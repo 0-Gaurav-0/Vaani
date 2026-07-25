@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+runtime_log="$HOME/.local/share/vaani/logs/autostart.log"
+
+if pgrep -f '^\.venv/bin/python -m vaani$' >/dev/null 2>&1; then
+    exit 0
+fi
+
+mkdir -p "$(dirname "$runtime_log")"
+if [ -n "${VAANI_PROJECT_DIR:-}" ]; then
+    cd "$VAANI_PROJECT_DIR"
+    exec .venv/bin/python -m vaani >>"$runtime_log" 2>&1
+fi
+if command -v vaani >/dev/null 2>&1; then
+    exec vaani >>"$runtime_log" 2>&1
+fi
+exec python3 -m vaani >>"$runtime_log" 2>&1

@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+config/sites.json
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.superpowers/sdd/
+.worktrees/
+dist/
+build/
+*.egg-info/

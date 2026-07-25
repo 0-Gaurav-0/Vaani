@@ -1,0 +1,6 @@
+# Runtime and test dependencies for Ubuntu 22.04 / Python 3.10 / x86_64.
+# PyGObject is intentionally supplied by the verified system installation.
+httpx
+keyring
+python-xlib
+pytest
