@@ -1,2 +1,2 @@
 #!/bin/sh
-pkill -USR2 -f '^.venv/bin/python -m vaani$' 2>/dev/null || true
+pkill -USR2 -f '^\.venv/bin/python -m vaani$' 2>/dev/null || true
