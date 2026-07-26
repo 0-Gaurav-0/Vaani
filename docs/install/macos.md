@@ -73,6 +73,9 @@ If Accessibility is denied, Vaani still copies text to the clipboard and returns
 
 ## Hotkeys
 
+macOS uses Carbon hotkeys (not pynput). At startup you should see
+`Vaani hotkeys ready:`.
+
 These use the **Control** key (⌃), not **Command** (⌘).
 Command+Space stays with Spotlight.
 
@@ -80,14 +83,15 @@ Command+Space stays with Spotlight.
 |---|---|---|
 | Control+Space | ⌃Space | Smart dictation toggle |
 | Control+Shift+Space | ⌃⇧Space | Literal dictation toggle |
-| Control+Alt+Space | ⌃⌥Space | Assistant toggle |
+| Control+Option+Space | ⌃⌥Space | Assistant toggle |
 | Esc | Esc | Cancel in-flight work |
 
-Paste into apps still uses normal macOS **⌘V** under the hood — that is
-separate from the recording hotkey.
+`--record` working only proves mic + Groq. Global hotkeys need `python -m vaani`
+left running.
 
-If Control+Space does nothing, grant **Input Monitoring** to Terminal/Cursor
-and restart Vaani. Then try Control+Shift+Space.
+If Control+Space does nothing: System Settings → Keyboard → Keyboard Shortcuts
+→ **Input Sources** → turn OFF “Select the previous input source”, then restart
+Vaani.
 
 ## Data paths
 
