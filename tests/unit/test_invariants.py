@@ -25,6 +25,7 @@ from vaani.intent.schema import (
 )
 from vaani.platform.protocol import PlatformId
 from vaani.sites import resolve_site
+from vaani.policy.undo import UndoStack, register_undo
 from vaani.verbs.packs.core import build_core_registry
 from vaani.verbs.registry import Registry
 
@@ -428,6 +429,7 @@ def test_rung_1_2_corpus_resolves_with_brain_mocked_to_raise() -> None:
         resolve_site_fn=resolve_site,
         open_browser_fn=lambda **_k: "Opened browser.",
     )
+    patterns = patterns + register_undo(registry, UndoStack())
     router = Router(
         registry,
         patterns,

@@ -268,3 +268,13 @@
   verb: system.wifi.set
   rung: 2
   risk: R2
+
+- utterance: "undo that"
+  verb: session.undo
+  rung: 0
+  risk: R0
+
+- utterance: "undo"
+  verb: session.undo
+  rung: 0
+  risk: R0
