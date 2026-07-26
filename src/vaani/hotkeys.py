@@ -106,14 +106,28 @@ HotkeyRegistrar = HotkeyManager
 
 
 class XInputHotkeyManager:
-    """Global listener using xinput test-xi2, avoiding passive-grab conflicts."""
-    def __init__(self, on_trigger: Callable[[str], None], on_release: Callable[[str], None] | None = None,
-                 on_cancel: Callable[[], None] | None = None):
-        self.on_trigger, self.on_release, self.on_cancel = on_trigger, on_release, on_cancel
+    """Global listener using xinput test-xi2, avoiding passive-grab conflicts.
+
+    Esc rejects a pending confirm (cancel family). Return/Enter approves when
+    a PendingAction is staged (wired via ``on_approve``).
+    """
+    def __init__(
+        self,
+        on_trigger: Callable[[str], None],
+        on_release: Callable[[str], None] | None = None,
+        on_cancel: Callable[[], None] | None = None,
+        on_approve: Callable[[], None] | None = None,
+    ):
+        self.on_trigger, self.on_release = on_trigger, on_release
+        self.on_cancel = on_cancel
+        self.on_approve = on_approve
         self._proc = None; self._thread = None; self._stop = threading.Event()
         self._down: set[int] = set(); self._triggered = False
+        # keycodes: Escape=9, Return=36 (AT Translated Set 2 keyboard)
         self.ctrl, self.super, self.shift, self.space, self.escape = 37, 133, 50, 65, 9
+        self.enter = 36
         self._escape_seen = False
+        self._enter_seen = False
 
     def register(self) -> None:
         self._stop.clear(); self._thread = threading.Thread(target=self._poll, daemon=True); self._thread.start()
@@ -134,6 +148,11 @@ class XInputHotkeyManager:
                     if self.on_cancel: self.on_cancel()
                 elif self.escape not in down:
                     self._escape_seen = False
+                if self.enter in down and not self._enter_seen:
+                    self._enter_seen = True
+                    if self.on_approve: self.on_approve()
+                elif self.enter not in down:
+                    self._enter_seen = False
                 active = self.space in down and self.ctrl in down and self.super in down
                 if active and not self._triggered:
                     self._triggered = True; self.on_trigger(ASSISTANT)

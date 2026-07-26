@@ -207,7 +207,7 @@ Codex.
 | P2-02 | Expand app catalog + user apps.json | `todo`    | `feat/p2-02-user-apps`       | P2-01                 | User can add private app aliases outside Git (mirror `sites.json`); built-ins remain safe executables only                                             |
 | P2-03 | System toggles allowlist            | `todo`    | `feat/p2-03-system-toggles`  | P1-02 or P1-03, P2-01 | Mute/volume/lock (per-OS where available) via allowlisted implementations; unknown toggles refuse safely                                               |
 | P2-04 | Allowlisted shell commands          | `todo`    | `feat/p2-04-shell-allowlist` | P2-01                 | `~/.config/vaani/commands.json` (or OS equivalent) maps phrases → argv; no free-form shell from raw speech                                             |
-| P2-05 | Confirmation policy                 | `todo`    | `feat/p2-05-confirm-policy`  | P2-01                 | Destructive or agent intents require explicit confirm (hotkey, spoken “confirm”, or UI); dictation/open-app do not                                     |
+| P2-05 | Confirmation policy                 | `partial` | `feat/av-confirm`            | P2-01                 | R2+ stages PendingAction; pill Approve/Reject + Enter/Esc; TTL ~20s; no voice yes in v1; brain cannot self-approve R3/R4                               |
 | P2-06 | Agent runner interface              | `partial` | `feat/p2-06-agent-runner`    | P2-01, P2-05          | Codex remains one backend; interface allows another CLI/API later; timeout/cancel preserved; user MCP loading is an explicit opt-in flag (default off) |
 | P2-07 | Focus / window targeting            | `todo`    | `feat/p2-07-window-focus`    | P1-02 or P1-03        | “Focus Slack” / “Switch to browser” where the OS allows; clear notification when unsupported                                                           |
 | P2-08 | History UI                          | `todo`    | `feat/p2-08-history-ui`      | —                     | Browse/search/copy past transcripts and assistant results; read-only first is fine                                                                     |
@@ -354,7 +354,7 @@ feature row before implementation sprawls.
 Record the decision in the feature PR; do not block the whole roadmap on them.
 
 1. **Agent default:** Codex CLI only vs pluggable runner in P2-06.
-2. **Confirm UX:** spoken “confirm”, second hotkey, or GUI prompt.
+2. **Confirm UX:** pill Approve/Reject + Enter/Esc (2026-07-27). Voice “yes” deferred.
 3. **Remote transport:** Tailscale-first HTTP vs bundled WireGuard-like peer UI.
 4. **UI toolkit on Mac/Windows:** keep GTK where possible vs native notifications-only MVP.
 5. **Packaging:** `uv tool install` first vs platform-native installers first.

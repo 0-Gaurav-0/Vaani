@@ -9,7 +9,14 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ...indicator_protocol import clear_phase, resolve_phase_path, write_phase
+from ...indicator_protocol import (
+    clear_pending_id,
+    clear_phase,
+    resolve_pending_path,
+    resolve_phase_path,
+    write_pending_id,
+    write_phase,
+)
 
 SOUNDS = {
     "start": "/System/Library/Sounds/Tink.aiff",
@@ -63,13 +70,11 @@ class MacFeedback:
             if control_path is not None
             else os.environ.get("VAANI_INDICATOR_CONTROL")
         )
-        self.phase_path = str(
-            resolve_phase_path(
-                cache_dir=Path(self.amplitude_path).parent
-                if self.amplitude_path
-                else None
-            )
+        cache_dir = (
+            Path(self.amplitude_path).parent if self.amplitude_path else None
         )
+        self.phase_path = str(resolve_phase_path(cache_dir=cache_dir))
+        self.pending_path = str(resolve_pending_path(cache_dir=cache_dir))
         self.log_dir = Path(
             log_dir
             or os.environ.get(
@@ -129,11 +134,19 @@ class MacFeedback:
                 clear_phase(self.phase_path)
             except Exception:
                 pass
+            try:
+                clear_pending_id(self.pending_path)
+            except Exception:
+                pass
             return
         proc = self.indicator
         self.indicator = None
         try:
             clear_phase(self.phase_path)
+        except Exception:
+            pass
+        try:
+            clear_pending_id(self.pending_path)
         except Exception:
             pass
         try:
@@ -157,11 +170,18 @@ class MacFeedback:
             except Exception:
                 pass
             self.notify("paste", "Transcribing…")
+        elif cue == "confirming":
+            # Keep pill visible; Reject | Approve controls.
+            self._spawn_indicator()
+            try:
+                write_phase(self.phase_path, "confirming")
+            except Exception:
+                pass
         elif cue in _DISMISS_CUES:
             self._stop_indicator()
         path = SOUNDS.get(cue)
         if not path or not Path(path).is_file():
-            return cue in {"start", "processing"}
+            return cue in {"start", "processing", "confirming"}
         try:
             self.popen(
                 ["afplay", path],
@@ -185,6 +205,16 @@ class MacFeedback:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+        except Exception:
+            pass
+
+    def set_pending_id(self, action_id: str | None) -> None:
+        """Expose the staged PendingAction id to the confirming pill."""
+        try:
+            if action_id is None:
+                clear_pending_id(self.pending_path)
+            else:
+                write_pending_id(self.pending_path, action_id)
         except Exception:
             pass
 

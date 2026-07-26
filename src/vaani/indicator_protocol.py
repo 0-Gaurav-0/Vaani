@@ -1,12 +1,16 @@
-"""Portable stop/cancel channel for the recording indicator process.
+"""Portable stop/cancel/confirm channel for the recording indicator process.
 
 Linux historically used SIGUSR1/2. Windows has no equivalent, so the daemon
 and indicator share a small JSON control file under the cache directory.
+
+Confirm commands are ``approve:<id>`` / ``reject:<id>`` (plan T2.1). Static
+commands remain ``stop`` / ``cancel``.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Literal
@@ -18,6 +22,23 @@ ALLOWED_PHASES: frozenset[str] = frozenset(
     {"recording", "processing", "confirming", "working"}
 )
 
+_CONFIRM_COMMAND = re.compile(r"^(approve|reject):([A-Za-z0-9_-]{1,64})$")
+
+
+def is_allowed_command(command: str) -> bool:
+    """True for static stop/cancel or approve:<id> / reject:<id>."""
+    if command in ALLOWED:
+        return True
+    return _CONFIRM_COMMAND.match(command) is not None
+
+
+def parse_confirm_command(command: str) -> tuple[str, str] | None:
+    """Return ``(approve|reject, id)`` or None when not a confirm command."""
+    match = _CONFIRM_COMMAND.match(command)
+    if match is None:
+        return None
+    return match.group(1), match.group(2)
+
 
 def control_path(cache_dir: Path | str) -> Path:
     return Path(cache_dir) / "indicator_control.json"
@@ -25,6 +46,10 @@ def control_path(cache_dir: Path | str) -> Path:
 
 def phase_path(cache_dir: Path | str) -> Path:
     return Path(cache_dir) / "indicator_phase"
+
+
+def pending_path(cache_dir: Path | str) -> Path:
+    return Path(cache_dir) / "indicator_pending"
 
 
 def resolve_control_path(
@@ -45,8 +70,22 @@ def resolve_control_path(
     return Path("/tmp/vaani-indicator-control.json")
 
 
+def resolve_pending_path(
+    *,
+    explicit: str | os.PathLike[str] | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    env = os.environ.get("VAANI_INDICATOR_PENDING")
+    if env:
+        return Path(env)
+    control = resolve_control_path(cache_dir=cache_dir)
+    return control.parent / "indicator_pending"
+
+
 def write_command(path: Path | str, command: str) -> None:
-    if command not in ALLOWED:
+    if not is_allowed_command(command):
         raise ValueError(f"unknown indicator command: {command!r}")
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -69,8 +108,8 @@ def read_command(path: Path | str) -> str | None:
     if not isinstance(data, dict):
         return None
     command = data.get("command")
-    if command in ALLOWED:
-        return str(command)
+    if isinstance(command, str) and is_allowed_command(command):
+        return command
     return None
 
 
@@ -133,6 +172,39 @@ def read_phase(path: Path | str) -> str:
 
 
 def clear_phase(path: Path | str) -> None:
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+
+
+def write_pending_id(path: Path | str, action_id: str) -> None:
+    if not action_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", action_id):
+        raise ValueError(f"invalid pending action id: {action_id!r}")
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(action_id, encoding="utf-8")
+    os.replace(tmp, target)
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+
+
+def read_pending_id(path: Path | str) -> str | None:
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, OSError):
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
+        return value
+    return None
+
+
+def clear_pending_id(path: Path | str) -> None:
     try:
         Path(path).unlink()
     except FileNotFoundError:
