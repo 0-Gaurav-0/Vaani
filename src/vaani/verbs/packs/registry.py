@@ -12,11 +12,15 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Any, Callable, Mapping
 
+from vaani.intent.grammar import Pattern
+from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
 
 WhichFn = Callable[[str], str | None]
+RunFn = Callable[..., Any]
+PlatformGetter = Callable[[], PlatformId]
 
 
 class PackError(ValueError):
@@ -299,17 +303,31 @@ def read_packs_file(path: Path | str) -> dict[str, bool]:
     return dict(reg._overrides)
 
 
-def register_stub_packs(registry: Registry) -> None:
-    """Reserve installable pack names until T4.2–T4.4 land verb handlers.
+def register_stub_packs(
+    registry: Registry,
+    *,
+    run_fn: RunFn | None = None,
+    get_platform: PlatformGetter | None = None,
+) -> tuple[Pattern, ...]:
+    """Register installable pack verbs (git/forge stubs; pkg/docker live).
 
-    No verbs are registered; descriptors alone drive ``vaani caps`` pack rows.
+    Returns grammar patterns for packs that provide them. Descriptors alone
+    still drive ``vaani caps`` pack rows for packs without verbs yet.
     """
     from vaani.verbs.packs.docker import register_docker_pack
     from vaani.verbs.packs.forge import register_forge_pack
     from vaani.verbs.packs.git import register_git_pack
     from vaani.verbs.packs.pkg import register_pkg_pack
 
-    register_git_pack(registry)
-    register_pkg_pack(registry)
-    register_docker_pack(registry)
-    register_forge_pack(registry)
+    patterns: list[Pattern] = []
+    patterns.extend(register_git_pack(registry))
+    patterns.extend(register_pkg_pack(registry, run_fn=run_fn))
+    patterns.extend(
+        register_docker_pack(
+            registry,
+            run_fn=run_fn,
+            get_platform=get_platform,
+        )
+    )
+    patterns.extend(register_forge_pack(registry))
+    return tuple(patterns)
