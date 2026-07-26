@@ -325,14 +325,15 @@ def argv_matches(pid: int, expected: tuple[str, ...]) -> bool:
 
 
 def read_process_cmdline_raw(pid: int) -> str | None:
+    """Return a display/compare cmdline string for adoption matching — never for shell."""
     if pid <= 0:
         return None
     if sys.platform.startswith("linux"):
-        argv = read_process_argv(pid)
-        return None if argv is None else " ".join(argv)
+        parts = read_process_argv(pid)
+        return None if parts is None else " ".join(parts)
     if os.name == "nt":
-        argv = read_process_argv(pid)
-        return None if argv is None else subprocess.list2cmdline(list(argv))
+        parts = read_process_argv(pid)
+        return None if parts is None else subprocess.list2cmdline(list(parts))
     try:
         completed = subprocess.run(
             ["ps", "-p", str(pid), "-o", "args="],
