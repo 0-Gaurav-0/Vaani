@@ -69,7 +69,6 @@ def test_uv_python_never_guesses_npm() -> None:
     assert profile.test == ("pytest",)
     assert profile.test is not None
     assert profile.test[0] != "npm"
-    assert profile.env_files == (profile.root / ".env",)
 
 
 def test_poetry_lockfile() -> None:
@@ -103,7 +102,6 @@ def test_mixed_js_python_monorepo_prefers_js_lock_and_scripts() -> None:
     assert profile.test == ("pnpm", "test")
     assert profile.dev == ("pnpm", "run", "dev")
     assert profile.compose_file == profile.root / "docker-compose.yml"
-    assert profile.env_files == (profile.root / ".env.local",)
 
 
 def test_none_refuses_and_names_checked_files() -> None:
@@ -150,6 +148,20 @@ def test_python_only_require_test_does_not_invent_npm(tmp_path: Path) -> None:
     assert isinstance(profile, ProjectProfile)
     assert profile.manager == "pip"
     assert profile.test is None
+
+
+def test_compose_and_env_files_detection(tmp_path: Path) -> None:
+    (tmp_path / "Makefile").write_text("test:\n\tpytest\n", encoding="utf-8")
+    (tmp_path / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("A=1\n", encoding="utf-8")
+    (tmp_path / ".env.local").write_text("B=2\n", encoding="utf-8")
+    profile = detect_project(tmp_path)
+    assert isinstance(profile, ProjectProfile)
+    assert profile.compose_file == tmp_path.resolve() / "compose.yaml"
+    assert profile.env_files == (
+        tmp_path.resolve() / ".env",
+        tmp_path.resolve() / ".env.local",
+    )
 
 
 def test_cache_invalidates_on_mtime_change(tmp_path: Path) -> None:
