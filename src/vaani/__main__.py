@@ -2,12 +2,14 @@ import sys
 
 from .config import Settings
 from .platform import UnsupportedPlatform, build_platform, detect_os
+from .secrets import load_env_file
 
 
 def manual_record() -> int:
     from .groq import GroqClient
     from .secrets import SecretServiceKeyStore, effective_key
 
+    load_env_file()
     settings = Settings.from_home()
     settings.prepare()
     try:
@@ -45,6 +47,7 @@ def manual_record() -> int:
 
 
 def main() -> int:
+    load_env_file()
     if "--record" in sys.argv[1:]:
         return manual_record()
     settings = Settings.from_home()
