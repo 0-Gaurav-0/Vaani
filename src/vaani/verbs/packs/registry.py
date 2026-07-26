@@ -299,17 +299,19 @@ def read_packs_file(path: Path | str) -> dict[str, bool]:
     return dict(reg._overrides)
 
 
-def register_stub_packs(registry: Registry) -> None:
-    """Reserve installable pack names until T4.2–T4.4 land verb handlers.
+def register_stub_packs(registry: Registry, *, run_fn=None):
+    """Register installable packs that have landed; stubs for the rest.
 
-    No verbs are registered; descriptors alone drive ``vaani caps`` pack rows.
+    Returns grammar patterns from packs that provide them (currently ``git``).
     """
+    from vaani.intent.grammar import Pattern
     from vaani.verbs.packs.docker import register_docker_pack
     from vaani.verbs.packs.forge import register_forge_pack
     from vaani.verbs.packs.git import register_git_pack
     from vaani.verbs.packs.pkg import register_pkg_pack
 
-    register_git_pack(registry)
+    patterns: tuple[Pattern, ...] = register_git_pack(registry, run_fn=run_fn)
     register_pkg_pack(registry)
     register_docker_pack(registry)
     register_forge_pack(registry)
+    return patterns

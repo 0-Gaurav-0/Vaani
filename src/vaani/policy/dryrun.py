@@ -59,8 +59,14 @@ def materialize_argv(
     slots: Mapping[str, Any],
     *,
     platform: PlatformId,
+    context: Context | None = None,
 ) -> tuple[str, ...] | None:
     """Best-effort argv for dry-run. Returns None when no shape is known."""
+    if verb_name.startswith("vcs."):
+        from vaani.verbs.packs.git import materialize_git_argv
+
+        return materialize_git_argv(verb_name, slots, context=context)
+
     if verb_name == "app.open":
         name = str(slots.get("name") or "")
         target = _find_app_target(name, _app_catalog(platform))
@@ -259,7 +265,12 @@ def dry_run_result(
     context: Context,
 ) -> Result:
     """Build a DRY_RUN result with evidence=argv. Never calls the verb handler."""
-    evidence = materialize_argv(verb.name, intent.slots, platform=context.platform)
+    evidence = materialize_argv(
+        verb.name,
+        intent.slots,
+        platform=context.platform,
+        context=context,
+    )
     if evidence is None:
         evidence = _fallback_argv(verb.name, intent.slots)
     workspace = str(context.workspace) if context.workspace is not None else ""

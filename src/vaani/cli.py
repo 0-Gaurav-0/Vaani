@@ -240,7 +240,7 @@ def build_registry(
         run_command=exec_run,
     )
     register_undo(registry, UndoStack())
-    register_stub_packs(registry)
+    register_stub_packs(registry, run_fn=exec_run)
     pack_reg = packs if packs is not None else _packs_for_settings(settings)
     pack_reg.apply(registry)
     return registry
