@@ -136,33 +136,55 @@ def test_do_json_dry_run_stable(capsys: pytest.CaptureFixture[str]) -> None:
     assert list(json.loads(second).keys()) == sorted(json.loads(second).keys())
 
 
-def test_caps_completeness_json(capsys: pytest.CaptureFixture[str]) -> None:
-    registry = build_registry(PlatformId.MACOS)
-    code = cmd_caps(as_json=True, registry=registry)
+def test_caps_completeness_json(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
+    from vaani.verbs.packs.registry import ALWAYS_ON_PACKS, INSTALLABLE_PACKS, PackRegistry
+
+    packs = PackRegistry(tmp_path / "packs.json", which=lambda _b: "/bin/true")
+    registry = build_registry(PlatformId.MACOS, packs=packs)
+    code = cmd_caps(as_json=True, registry=registry, packs=packs)
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert set(payload) == (
+    assert set(payload) == {"packs", "verbs"}
+    assert set(payload["packs"]) == set(ALWAYS_ON_PACKS) | set(INSTALLABLE_PACKS)
+    for name in ALWAYS_ON_PACKS:
+        assert payload["packs"][name]["enabled"] is True
+        assert payload["packs"][name]["always_on"] is True
+    verbs = payload["verbs"]
+    assert set(verbs) == (
         CORE_VERB_NAMES | PROCS_VERB_NAMES | PROJECT_VERB_NAMES | UNDO_VERB_NAMES
     )
-    for verb_name, row in payload.items():
+    for verb_name, row in verbs.items():
         assert set(row) == {"linux", "macos", "windows"}, verb_name
         for platform, cell in row.items():
             assert cell.get("support") in {"supported", "degraded", "unsupported"}, (
                 verb_name,
                 platform,
             )
-    assert payload["system.volume.set"]["windows"]["support"] == "degraded"
-    assert payload["system.dnd.set"]["macos"]["support"] == "degraded"
+    assert verbs["system.volume.set"]["windows"]["support"] == "degraded"
+    assert verbs["system.dnd.set"]["macos"]["support"] == "degraded"
 
 
-def test_caps_text_has_no_blank_cells(capsys: pytest.CaptureFixture[str]) -> None:
-    registry = build_registry(PlatformId.LINUX)
-    assert cmd_caps(as_json=False, registry=registry) == 0
+def test_caps_text_has_no_blank_cells(capsys: pytest.CaptureFixture[str], tmp_path) -> None:
+    from vaani.verbs.packs.registry import PackRegistry
+
+    packs = PackRegistry(tmp_path / "packs.json", which=lambda _b: "/bin/true")
+    registry = build_registry(PlatformId.LINUX, packs=packs)
+    assert cmd_caps(as_json=False, registry=registry, packs=packs) == 0
     out = capsys.readouterr().out
+    assert "packs" in out
+    assert "core" in out
     assert "app.open" in out
     assert "supported" in out
-    # No empty platform columns — every data line has three support tokens after the verb.
-    lines = [line for line in out.splitlines() if line and not line.startswith("-") and not line.startswith("verb")]
+    # Verb rows: no empty platform columns — three support tokens after the verb.
+    verb_header = next(
+        line for line in out.splitlines() if line.startswith("verb") and "linux" in line
+    )
+    verb_section = out.split(verb_header, 1)[-1]
+    lines = [
+        line
+        for line in verb_section.splitlines()
+        if line and not line.startswith("-")
+    ]
     for line in lines:
         parts = line.split()
         assert len(parts) >= 4

@@ -21,6 +21,7 @@ from vaani.policy.undo import UndoStack, register_undo
 from vaani.secrets import load_env_file
 from vaani.sites import resolve_site
 from vaani.verbs.packs.core import build_core_registry
+from vaani.verbs.packs.registry import PackRegistry, register_stub_packs
 from vaani.verbs.registry import Registry
 
 # Re-export for callers/tests that imported materialize from the CLI module.
@@ -199,13 +200,27 @@ def _delivery_for(platform: PlatformId) -> Any | None:
         return None
 
 
-def build_registry(platform: PlatformId | None = None) -> Registry:
+def _packs_for_settings(settings: Settings | None = None) -> PackRegistry:
+    cfg = settings if settings is not None else Settings.from_home()
+    try:
+        cfg.prepare()
+    except Exception:
+        pass
+    return PackRegistry(cfg.packs_path)
+
+
+def build_registry(
+    platform: PlatformId | None = None,
+    *,
+    packs: PackRegistry | None = None,
+) -> Registry:
     plat = platform if platform is not None else detect_os()
     resolve_app_fn, launch_app_fn = _resolve_launch(plat)
     open_browser_fn = _open_browser_for(plat)
     system = _system_for(plat)
     delivery = _delivery_for(plat)
     supervisor: Supervisor | None = None
+    settings: Settings | None = None
     try:
         settings = Settings.from_home()
         settings.prepare()
@@ -225,6 +240,9 @@ def build_registry(platform: PlatformId | None = None) -> Registry:
         run_command=exec_run,
     )
     register_undo(registry, UndoStack())
+    register_stub_packs(registry)
+    pack_reg = packs if packs is not None else _packs_for_settings(settings)
+    pack_reg.apply(registry)
     return registry
 
 
@@ -383,7 +401,7 @@ def cmd_do(
     return 0
 
 
-def _matrix_json(registry: Registry) -> dict[str, Any]:
+def _verbs_matrix_json(registry: Registry) -> dict[str, Any]:
     matrix = registry.matrix()
     out: dict[str, Any] = {}
     for verb_name in sorted(matrix):
@@ -398,12 +416,24 @@ def _matrix_json(registry: Registry) -> dict[str, Any]:
     return out
 
 
+def _caps_json(registry: Registry, packs: PackRegistry) -> dict[str, Any]:
+    return {
+        "packs": packs.caps_payload(),
+        "verbs": _verbs_matrix_json(registry),
+    }
+
+
 def cmd_caps(
     *,
     as_json: bool = False,
     registry: Registry | None = None,
+    packs: PackRegistry | None = None,
 ) -> int:
-    reg = registry if registry is not None else build_registry()
+    pack_reg = packs if packs is not None else _packs_for_settings()
+    reg = registry if registry is not None else build_registry(packs=pack_reg)
+    if registry is not None:
+        # Ensure injected registries still reflect pack state for caps.
+        pack_reg.apply(reg)
     matrix = reg.matrix()
     # Completeness: every registered verb has all three platforms filled.
     for verb_name, row in matrix.items():
@@ -417,8 +447,16 @@ def cmd_caps(
                 return 1
 
     if as_json:
-        print(json.dumps(_matrix_json(reg), sort_keys=True, separators=(",", ":")))
+        print(json.dumps(_caps_json(reg, pack_reg), sort_keys=True, separators=(",", ":")))
         return 0
+
+    print("packs")
+    print("-----")
+    for name, row in pack_reg.caps_payload().items():
+        note = row.get("note") or ""
+        suffix = f"  ({note})" if note else ""
+        print(f"{name:<16}{row['support']:<12}enabled={row['enabled']}{suffix}")
+    print()
 
     platforms = [p.value for p in _PLATFORMS]
     header = f"{'verb':<24}" + "".join(f"{p:<12}" for p in platforms)
