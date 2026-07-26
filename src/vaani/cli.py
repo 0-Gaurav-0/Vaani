@@ -1,4 +1,4 @@
-"""CLI surface: daemon default, record/debug aliases, ``do`` / ``caps``."""
+"""CLI surface: daemon default, record/debug aliases, ``do`` / ``caps`` / ``bridge``."""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +28,7 @@ from vaani.verbs.registry import Registry
 __all__ = (
     "build_parser",
     "build_registry",
+    "cmd_bridge",
     "cmd_caps",
     "cmd_do",
     "main",
@@ -144,6 +145,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     caps_p = sub.add_parser("caps", help="print verb capability matrix")
     caps_p.add_argument("--json", action="store_true", help="machine-readable output")
+
+    bridge_p = sub.add_parser(
+        "bridge",
+        help="localhost control bridge (POST /v1/intent; bearer auth)",
+    )
+    bridge_p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address (loopback only; default 127.0.0.1)",
+    )
+    bridge_p.add_argument(
+        "--port",
+        type=int,
+        default=32123,
+        help="bind port (default 32123)",
+    )
+    bridge_p.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token (or set VAANI_BRIDGE_TOKEN)",
+    )
 
     return parser
 
@@ -459,6 +481,23 @@ def _caps_json(registry: Registry, packs: PackRegistry) -> dict[str, Any]:
     }
 
 
+def cmd_bridge(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 32123,
+    token: str | None = None,
+) -> int:
+    """Start the localhost control bridge (T8.2 / P3-01, P3-02)."""
+    from vaani.remote.bridge import BindError, serve_bridge
+
+    load_env_file()
+    try:
+        return serve_bridge(host=host, port=port, token=token)
+    except BindError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
 def cmd_caps(
     *,
     as_json: bool = False,
@@ -528,6 +567,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "caps":
         return cmd_caps(as_json=bool(args.json))
+    if args.command == "bridge":
+        return cmd_bridge(
+            host=str(args.host),
+            port=int(args.port),
+            token=args.token,
+        )
     if args.command == "debug":
         return run_daemon(debug=True)
     return run_daemon(debug=debug)
