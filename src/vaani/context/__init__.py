@@ -13,6 +13,13 @@ from vaani.context.focus import (
     probe_for_platform,
     resolve_focus,
 )
+from vaani.context.project import (
+    CHECKED_FILES,
+    ProfileMiss,
+    clear_project_cache,
+    detect_project,
+    require_command,
+)
 from vaani.context.repo import resolve_repo
 from vaani.context.workspace import (
     SOURCE_CONFIG,
@@ -25,7 +32,7 @@ from vaani.context.workspace import (
     resolve_workspace,
     set_last_used,
 )
-from vaani.intent.schema import Context, RepoInfo
+from vaani.intent.schema import Context, ProjectProfile, RepoInfo
 from vaani.platform.protocol import PlatformId
 
 # Runner is injected from L5 by callers — context must not import vaani.exec.
@@ -43,12 +50,16 @@ def build_context(
     remember: bool = True,
     include_focus: bool = True,
     include_repo: bool = True,
+    include_project: bool = True,
 ) -> Context:
-    """Build a Context with best-effort workspace / repo / focus.
+    """Build a Context with best-effort workspace / repo / focus / project.
 
     Workspace (and ``workspace_source``) are always resolved. Focus is populated
     when available. Repo requires an injected argv ``runner`` (typically
     ``vaani.exec.runner.run``); without one, ``repo`` stays ``None``.
+    Project profile is detected when a workspace path is known (spec §12.8);
+    a detection miss leaves ``project`` as ``None`` (verbs refuse via
+    :func:`detect_project` / :func:`require_command`).
     """
     if focus_probe is not None:
         active = resolve_focus(focus_probe)
@@ -76,6 +87,12 @@ def build_context(
     if include_repo and runner is not None:
         repo = resolve_repo(workspace, runner=runner)
 
+    project: ProjectProfile | None = None
+    if include_project and workspace is not None:
+        detected = detect_project(workspace)
+        if isinstance(detected, ProjectProfile):
+            project = detected
+
     focus_info = active.info if include_focus else None
 
     return Context(
@@ -83,7 +100,7 @@ def build_context(
         workspace=workspace,
         workspace_source=source,
         repo=repo,
-        project=None,
+        project=project,
         focus=focus_info,
         screen=None,
         session=None,
@@ -92,9 +109,11 @@ def build_context(
 
 __all__ = [
     "ActiveFocus",
+    "CHECKED_FILES",
     "FakeFocusProbe",
     "FocusProbe",
     "NullFocusProbe",
+    "ProfileMiss",
     "SOURCE_CONFIG",
     "SOURCE_FOCUSED_EDITOR",
     "SOURCE_FOCUSED_TERMINAL",
@@ -102,8 +121,11 @@ __all__ = [
     "SOURCE_LAST_USED",
     "build_context",
     "clear_last_used",
+    "clear_project_cache",
+    "detect_project",
     "get_last_used",
     "probe_for_platform",
+    "require_command",
     "resolve_focus",
     "resolve_repo",
     "resolve_workspace",
