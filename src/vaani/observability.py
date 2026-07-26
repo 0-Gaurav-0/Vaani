@@ -8,6 +8,16 @@ from pathlib import Path
 KEY_RE = re.compile(r"(?i)(?:api[_-]?key|authorization|bearer|groq[_-]?api[_-]?key|token)\s*[:=]\s*[^\s,;]+")
 CANARY_RE = re.compile(r"CANARY_TRANSCRIPT")
 PAYLOAD_RE = re.compile(r"(?i)\b(?:transcript|raw_text|final_text|clipboard(?:_text)?)\b\s*(?:[:=]\s*|\s+)([^\n,;]+)")
+_STREAM_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S+"
+)
+
+
+def _redact(value: str) -> str:
+    """Redact secret-shaped tokens in process streams and audit evidence."""
+    return _STREAM_SECRET_RE.sub(r"\1=[REDACTED]", value)
+
+
 def sanitize(value: object) -> str:
     text = KEY_RE.sub("[REDACTED]", str(value))
     text = PAYLOAD_RE.sub(lambda match: match.group(0)[:match.start(1)-match.start()] + "[REDACTED]", text)

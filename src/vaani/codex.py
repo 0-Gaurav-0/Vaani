@@ -1,8 +1,11 @@
 """Bounded, cancellable Codex CLI runner and headless result adapter."""
 from __future__ import annotations
-import os, signal, subprocess, threading
+import os, subprocess, threading
 from dataclasses import dataclass
 from pathlib import Path
+
+from .exec.proc import _stop_process
+from .observability import _redact
 
 @dataclass(frozen=True)
 class CodexResult:
@@ -11,32 +14,6 @@ class CodexResult:
     returncode: int
     timed_out: bool = False
     cancelled: bool = False
-
-def _redact(value: str) -> str:
-    import re
-    return re.sub(r'(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S+', r'\1=[REDACTED]', value)
-
-def _stop_process(proc: subprocess.Popen[str] | subprocess.Popen[bytes] | None, *, forceful: bool = False) -> None:
-    """Terminate a session-leader child without assuming POSIX killpg."""
-    if proc is None or proc.poll() is not None:
-        return
-    if os.name == "nt" or not hasattr(os, "killpg"):
-        try:
-            (proc.kill if forceful else proc.terminate)()
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        return
-    sig = signal.SIGKILL if forceful else signal.SIGTERM
-    try:
-        os.killpg(proc.pid, sig)
-    except Exception:
-        try:
-            (proc.kill if forceful else proc.terminate)()
-        except Exception:
-            pass
 
 class CodexRunner:
     def __init__(self, executable: str = "codex", cwd: str | None = None, timeout: float = 30.0):
