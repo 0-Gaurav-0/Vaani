@@ -36,6 +36,7 @@ from .intent.schema import Context, Intent, Result, Status
 from .platform import detect_os
 from .policy.confirm import ConfirmEngine, requires_confirm
 from .policy.dryrun import dispatch, materialize_argv
+from .policy.undo import UndoStack, register_undo
 from .surface.result import format_result_message, show_result
 from .verbs.packs.core import browser_intent, build_core_registry
 
@@ -96,6 +97,7 @@ class Controller:
         self.indicator_phase_path = str(resolve_phase_path(cache_dir=cache_dir))
         self.indicator_pending_path = str(resolve_pending_path(cache_dir=cache_dir))
         self.confirm = ConfirmEngine()
+        self.undo = UndoStack()
         self._session = SessionLoop(logger=self.logger)
         self._session.add("indicator_control", self._poll_indicator_control)
         self._session.add("amplitude", self._write_amplitude)
@@ -114,6 +116,7 @@ class Controller:
             get_delivery=lambda: self.delivery,
             get_platform=detect_os,
         )
+        patterns = patterns + register_undo(self.registry, self.undo)
         self.router = Router(
             self.registry,
             patterns,
@@ -453,6 +456,8 @@ class Controller:
             return
 
         result = dispatch(verb, intent, context)
+        if result.status is Status.OK:
+            self.undo.record_success(verb, intent, result)
         self._finish_assistant_result(
             result, raw=raw, audio=audio, verb_name=verb.name, token=token
         )
@@ -501,6 +506,8 @@ class Controller:
                 raise RuntimeError(
                     result.detail or result.summary or "assistant failed"
                 )
+            if result.status is Status.OK:
+                self.undo.record_success(verb, intent, result)
             self._finish_assistant_result(
                 result,
                 raw=intent.raw_utterance,

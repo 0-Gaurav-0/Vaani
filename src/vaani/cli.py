@@ -14,6 +14,7 @@ from vaani.intent.schema import Context, Intent, Result, Status, Support
 from vaani.platform import UnsupportedPlatform, build_platform, detect_os
 from vaani.platform.protocol import PlatformId
 from vaani.policy.dryrun import dispatch, materialize_argv
+from vaani.policy.undo import UndoStack, register_undo
 from vaani.secrets import load_env_file
 from vaani.sites import resolve_site
 from vaani.verbs.packs.core import build_core_registry
@@ -210,6 +211,7 @@ def build_registry(platform: PlatformId | None = None) -> Registry:
         get_delivery=lambda: delivery,
         get_platform=lambda: plat,
     )
+    register_undo(registry, UndoStack())
     return registry
 
 

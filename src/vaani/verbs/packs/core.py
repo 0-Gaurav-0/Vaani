@@ -739,7 +739,7 @@ def build_core_verbs(
             risk=RiskClass.R0,
             requires=frozenset(),
             support=_VOLUME_SUPPORT,
-            undo=None,
+            undo="system.volume.set",
             pack="core",
             handler=handle_volume,
         ),
@@ -1073,7 +1073,11 @@ def build_core_registry(
     popen: Popen | None = None,
     patterns: Sequence[Pattern] | None = None,
 ) -> tuple[Registry, tuple[Pattern, ...]]:
-    """Register core + procs verbs and return ``(registry, patterns)``."""
+    """Register core + procs verbs and return ``(registry, patterns)``.
+
+    ``session.undo`` is registered by the assembly layer (controller/CLI) via
+    ``policy.undo.register_undo`` so L3 never imports L4.
+    """
     _ = resolve_site_fn  # reserved for future site-slot resolvers
     registry = Registry()
     for verb in build_core_verbs(

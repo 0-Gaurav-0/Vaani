@@ -4,8 +4,8 @@ Pending actions are single-use, TTL ~20s, and invalidated by a new utterance.
 Approve paths are pill click, Enter, or control-file commands — never voice
 "yes" in v1. The brain cannot self-approve R3/R4 (``via="agent"`` rejected).
 
-Undo / dry-run packs hook here later via optional callbacks; this module does
-not implement those features.
+Dry-run short-circuits in ``policy.dryrun.dispatch``. Undo recording happens
+in the controller after a successful mutating dispatch (``UndoStack.record_success``).
 """
 from __future__ import annotations
 
