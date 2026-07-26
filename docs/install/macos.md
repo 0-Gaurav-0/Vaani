@@ -44,15 +44,21 @@ unavailable or the focused app changed.
 
 ## Hotkeys
 
-| Chord | Action |
-|---|---|
-| Ctrl+Space | Smart dictation toggle |
-| Ctrl+Shift+Space | Literal dictation toggle |
-| Ctrl+Alt+Space | Assistant toggle |
-| Esc | Cancel in-flight work |
+These use the **Control** key (⌃), not **Command** (⌘).
+Command+Space stays with Spotlight.
 
-If a browser or the OS steals Ctrl+Space, try the literal / assistant chords
-first, then consider remapping (configurable chords are a follow-up).
+| Chord | Keys | Action |
+|---|---|---|
+| Control+Space | ⌃Space | Smart dictation toggle |
+| Control+Shift+Space | ⌃⇧Space | Literal dictation toggle |
+| Control+Alt+Space | ⌃⌥Space | Assistant toggle |
+| Esc | Esc | Cancel in-flight work |
+
+Paste into apps still uses normal macOS **⌘V** under the hood — that is
+separate from the recording hotkey.
+
+If Control+Space does nothing, grant **Input Monitoring** to Terminal/Cursor
+and restart Vaani. Then try Control+Shift+Space.
 
 ## Data paths
 
