@@ -16,6 +16,7 @@ from vaani.cli import (
 from vaani.intent.schema import Context, Intent, Result, RiskClass, SlotSpec, Status, Support, Verb
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.packs.core import CORE_VERB_NAMES
+from vaani.verbs.packs.procs import PROCS_VERB_NAMES
 from vaani.verbs.registry import Registry
 
 
@@ -138,7 +139,7 @@ def test_caps_completeness_json(capsys: pytest.CaptureFixture[str]) -> None:
     code = cmd_caps(as_json=True, registry=registry)
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert set(payload) == CORE_VERB_NAMES
+    assert set(payload) == CORE_VERB_NAMES | PROCS_VERB_NAMES
     for verb_name, row in payload.items():
         assert set(row) == {"linux", "macos", "windows"}, verb_name
         for platform, cell in row.items():

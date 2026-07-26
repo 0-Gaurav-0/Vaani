@@ -8,6 +8,7 @@ from vaani.intent.schema import Context, Intent, Result, Status, Support
 from vaani.platform.protocol import PlatformId
 from vaani.sites import resolve_site
 from vaani.verbs.packs.core import CORE_VERB_NAMES, build_core_registry
+from vaani.verbs.packs.procs import PROCS_VERB_NAMES
 
 
 class _FakeSystem:
@@ -103,7 +104,9 @@ def _registry(**kwargs):
 def test_core_pack_registers_all_t13_verbs() -> None:
     registry, _ = _registry()
     names = set(registry.matrix())
-    assert names == CORE_VERB_NAMES
+    assert CORE_VERB_NAMES <= names
+    assert PROCS_VERB_NAMES <= names
+    assert names == CORE_VERB_NAMES | PROCS_VERB_NAMES
 
 
 def test_caps_matrix_three_platforms_for_new_verbs() -> None:
