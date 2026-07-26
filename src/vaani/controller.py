@@ -349,8 +349,27 @@ class Controller:
     @staticmethod
     def _browser_intent(text: str) -> bool:
         normalized = " ".join(text.casefold().strip().split())
-        direct = {"open chrome", "open google chrome", "open browser", "launch chrome", "launch browser",
-                  "open brave", "launch brave", "open brave browser", "launch brave browser"}
+        # Exact allowlist only (no free-form suffixes like "and run ls").
+        # Include natural spoken variants ("open a browser").
+        direct = {
+            "open chrome",
+            "open google chrome",
+            "open browser",
+            "open a browser",
+            "open the browser",
+            "launch chrome",
+            "launch browser",
+            "launch a browser",
+            "launch the browser",
+            "open brave",
+            "launch brave",
+            "open brave browser",
+            "launch brave browser",
+            "open a chrome",
+            "open the chrome",
+            "open a brave",
+            "open the brave",
+        }
         return normalized in direct
 
     @staticmethod
