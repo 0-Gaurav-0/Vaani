@@ -5,8 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from vaani.assemble import Assembly, assemble
-from vaani.codex import CodexRunner, ResultWindow
+from vaani.codex import ResultWindow
 from vaani.controller import Controller
+from vaani.exec.agent import AgentRunner
 from vaani.groq import GroqClient
 from vaani.history import HistoryStore
 from vaani.platform.protocol import PlatformBundle, PlatformId
@@ -117,8 +118,11 @@ def test_assemble_wires_controller_from_fake_bundle(tmp_path):
     assert controller.feedback is bundle.feedback
     assert controller.app_launcher is bundle.apps
     assert controller.browser_launcher is bundle.browser
-    assert isinstance(controller.codex, CodexRunner)
+    assert isinstance(controller.codex, AgentRunner)
+    assert controller.agent is controller.codex
     assert isinstance(controller.result_window, ResultWindow)
+    assert controller.codex.registry is controller.registry
+    assert controller.codex.confirm is controller.confirm
 
     controller.result_window.sink("hello from assistant")
     assert feedback.notifications == [("paste", "hello from assistant")]
