@@ -21,15 +21,24 @@ class SanitizingFilter(logging.Filter):
 
 def configure_logging(log_dir: Path, *, debug: bool = False) -> logging.Logger:
     log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    log_dir.chmod(0o700)
+    try:
+        log_dir.chmod(0o700)
+    except OSError:
+        pass
     logger = logging.getLogger("vaani")
-    logger.handlers.clear(); logger.setLevel(logging.DEBUG if debug else logging.INFO); logger.propagate = False
+    logger.handlers.clear()
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    logger.propagate = False
     handler = RotatingFileHandler(log_dir / "vaani.log", maxBytes=1024 * 1024, backupCount=3)
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     handler.addFilter(SanitizingFilter())
     logger.addHandler(handler)
     if debug:
-        stderr = logging.StreamHandler(sys.stderr); stderr.setLevel(logging.DEBUG); stderr.addFilter(SanitizingFilter()); logger.addHandler(stderr)
+        stderr = logging.StreamHandler(sys.stderr)
+        stderr.setLevel(logging.DEBUG)
+        stderr.addFilter(SanitizingFilter())
+        stderr.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(stderr)
     return logger
 
 def exception_category(exc: BaseException) -> str:

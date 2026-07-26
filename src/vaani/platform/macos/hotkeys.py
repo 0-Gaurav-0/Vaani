@@ -1,23 +1,14 @@
-"""Global hotkeys for macOS.
+"""Global hotkeys for macOS via Carbon RegisterEventHotKey.
 
-Uses Carbon ``RegisterEventHotKey`` (HIToolbox) instead of pynput.
-
-Default chords avoid macOS collisions:
-- Command+Space → Spotlight
-- Control+Space → Input Sources
-- Control+Shift+Space → often reserved / awkward in terminals
-
-Vaani macOS defaults (Control+Option family):
-- Control+Option+V       → smart dictation
-- Control+Option+Shift+V → literal
-- Control+Option+A       → assistant
-- Esc                    → cancel
+The Carbon event loop is pumped on the **main thread** (see ``pump``).
+Background-thread ReceiveNextEvent often never delivers hotkey presses.
 """
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
 import logging
+import sys
 import threading
 from typing import Any, Callable
 
@@ -25,24 +16,23 @@ SMART = "smart"
 LITERAL = "literal"
 ASSISTANT = "assistant"
 
-# HIToolbox virtual key codes (ANSI)
 _KEY_A = 0
 _KEY_V = 9
 _KEY_ESCAPE = 53
 
-# EventModifiers (Carbon)
 _CMD = 1 << 8
 _SHIFT = 1 << 9
 _OPTION = 1 << 11
 _CONTROL = 1 << 12
 
-# (key_code, modifiers, mode_or_cancel)
-_BINDINGS: tuple[tuple[int, int, str], ...] = (
-    (_KEY_V, _CONTROL | _OPTION, SMART),
-    (_KEY_V, _CONTROL | _OPTION | _SHIFT, LITERAL),
-    (_KEY_A, _CONTROL | _OPTION, ASSISTANT),
-    (_KEY_ESCAPE, 0, "cancel"),
+_BINDINGS: tuple[tuple[int, int, str, str], ...] = (
+    (_KEY_V, _CONTROL | _OPTION, SMART, "Control+Option+V"),
+    (_KEY_V, _CONTROL | _OPTION | _SHIFT, LITERAL, "Control+Option+Shift+V"),
+    (_KEY_A, _CONTROL | _OPTION, ASSISTANT, "Control+Option+A"),
+    (_KEY_ESCAPE, 0, "cancel", "Esc"),
 )
+
+_EVENT_LOOP_TIMED_OUT = -9875
 
 
 def _fourcc(text: str) -> int:
@@ -58,7 +48,7 @@ class EventHotKeyID(ctypes.Structure):
 
 
 class HotkeyService:
-    """Register smart/literal/assistant chords and Esc-to-cancel via Carbon."""
+    """Register chords; call ``pump()`` on the main thread while Vaani runs."""
 
     def __init__(
         self,
@@ -70,27 +60,30 @@ class HotkeyService:
     ):
         self.on_trigger = on_trigger
         self.on_cancel = on_cancel
-        # listener_factory kept for unit tests (fake pynput-style register path)
         self._listener_factory = listener_factory
         self._listener: Any | None = None
         self._lock = threading.Lock()
         self.logger = logger or logging.getLogger("vaani")
         self.trusted: bool | None = True
-        self._thread: threading.Thread | None = None
-        self._stop = threading.Event()
-        self._hotkey_refs: list[ctypes.c_void_p] = []
-        self._handler_ref = ctypes.c_void_p()
         self._carbon: Any | None = None
         self._handler_proc: Any | None = None
+        self._handler_ref = ctypes.c_void_p()
+        self._hotkey_refs: list[ctypes.c_void_p] = []
+        self._target: ctypes.c_void_p | None = None
+        self._registered = False
+        self._press_count = 0
+        self._pump_count = 0
+        self._last_loop_error: int | None = None
 
     def register(self) -> None:
         with self._lock:
-            if self._listener is not None or self._thread is not None:
+            if self._registered or self._listener is not None:
                 return
             if self._listener_factory is not None:
                 self._register_test_factory()
                 return
             self._register_carbon()
+            self._registered = True
 
     def _register_test_factory(self) -> None:
         mapping: dict[str, Callable[[], None]] = {
@@ -103,15 +96,16 @@ class HotkeyService:
         listener = self._listener_factory(mapping)
         listener.start()
         self._listener = listener
+        self._registered = True
 
     def _register_carbon(self) -> None:
         lib_name = ctypes.util.find_library("Carbon")
+        self.logger.info("event=hotkey_carbon_load library=%s", lib_name)
         if not lib_name:
             raise RuntimeError("Carbon framework not found — cannot register macOS hotkeys")
         carbon = ctypes.cdll.LoadLibrary(lib_name)
         self._carbon = carbon
 
-        # Prototypes
         carbon.GetEventDispatcherTarget.restype = ctypes.c_void_p
         carbon.RegisterEventHotKey.argtypes = [
             ctypes.c_uint32,
@@ -161,7 +155,6 @@ class HotkeyService:
         EventHandlerProc = ctypes.CFUNCTYPE(
             ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
         )
-
         service = self
 
         @EventHandlerProc
@@ -170,37 +163,49 @@ class HotkeyService:
             actual = ctypes.c_uint32(0)
             err = carbon.GetEventParameter(
                 event,
-                _fourcc("hkey"),  # kEventParamDirectObject
-                _fourcc("hkid"),  # typeEventHotKeyID
+                _fourcc("hkey"),
+                _fourcc("hkid"),
                 None,
                 ctypes.sizeof(hotkey_id),
                 ctypes.byref(actual),
                 ctypes.byref(hotkey_id),
             )
             if err != 0:
+                service.logger.warning("event=hotkey_param_error status=%s", err)
                 return 0
             idx = int(hotkey_id.id)
             if idx < 0 or idx >= len(_BINDINGS):
+                service.logger.warning("event=hotkey_unknown_id id=%s", idx)
                 return 0
-            _key, _mods, action = _BINDINGS[idx]
+            _key, _mods, action, label = _BINDINGS[idx]
+            service._press_count += 1
+            service.logger.info(
+                "event=hotkey_pressed action=%s label=%s count=%s",
+                action,
+                label,
+                service._press_count,
+            )
+            print(f"[vaani] hotkey pressed: {label} ({action})", flush=True)
             try:
                 if action == "cancel":
                     if service.on_cancel is not None:
                         service.on_cancel()
+                        service.logger.info("event=hotkey_cancel_dispatched")
                 else:
                     service.on_trigger(action)
-            except Exception:
-                pass
+                    service.logger.info("event=hotkey_trigger_dispatched action=%s", action)
+            except Exception as exc:
+                service.logger.exception("event=hotkey_handler_error detail=%s", type(exc).__name__)
             return 0
 
-        # Keep callback alive for the process lifetime of the listener.
         self._handler_proc = _handler
-
         target = carbon.GetEventDispatcherTarget()
+        self._target = ctypes.c_void_p(target)
+        self.logger.info("event=hotkey_dispatcher target=%s", target)
         if not target:
             raise RuntimeError("GetEventDispatcherTarget failed")
 
-        spec = EventTypeSpec(eventClass=_fourcc("keyb"), eventKind=6)  # kEventHotKeyPressed
+        spec = EventTypeSpec(eventClass=_fourcc("keyb"), eventKind=6)
         err = carbon.InstallEventHandler(
             target,
             self._handler_proc,
@@ -209,11 +214,12 @@ class HotkeyService:
             None,
             ctypes.byref(self._handler_ref),
         )
+        self.logger.info("event=hotkey_install_handler status=%s ref=%s", err, self._handler_ref)
         if err != 0:
             raise RuntimeError(f"InstallEventHandler failed ({err})")
 
         signature = _fourcc("vani")
-        for index, (key_code, modifiers, action) in enumerate(_BINDINGS):
+        for index, (key_code, modifiers, action, label) in enumerate(_BINDINGS):
             hotkey_id = EventHotKeyID(signature=signature, id=index)
             ref = ctypes.c_void_p()
             status = carbon.RegisterEventHotKey(
@@ -226,66 +232,87 @@ class HotkeyService:
             )
             if status != 0:
                 self.logger.error(
-                    "RegisterEventHotKey failed for %s status=%s "
-                    "(shortcut may be taken by macOS Input Sources or another app)",
+                    "event=hotkey_register_failed action=%s label=%s key=%s mods=%s status=%s",
                     action,
+                    label,
+                    key_code,
+                    modifiers,
                     status,
                 )
+                print(f"[vaani] FAILED to register {label} (status={status})", file=sys.stderr, flush=True)
                 continue
             self._hotkey_refs.append(ref)
+            self.logger.info(
+                "event=hotkey_register_ok action=%s label=%s key=%s mods=%s",
+                action,
+                label,
+                key_code,
+                modifiers,
+            )
+            print(f"[vaani] registered {label}", flush=True)
 
         if not self._hotkey_refs:
             raise RuntimeError(
                 "No macOS hotkeys registered — another app may own "
-                "Control+Option+V / Control+Option+A. Quit conflicting shortcuts and retry."
+                "Control+Option+V / Control+Option+A."
             )
 
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run_loop, name="vaani-mac-hotkeys", daemon=True)
-        self._thread.start()
         self.logger.info(
-            "hotkeys armed (Carbon): Control+Option+V smart, "
-            "Control+Option+Shift+V literal, Control+Option+A assistant, Esc cancel"
+            "event=hotkey_armed count=%s pump=main_thread",
+            len(self._hotkey_refs),
         )
         print(
-            "Vaani hotkeys ready:\n"
+            "Vaani hotkeys ready (main-thread Carbon pump):\n"
             "  Control+Option+V       → smart dictation\n"
             "  Control+Option+Shift+V → literal\n"
             "  Control+Option+A       → assistant\n"
             "  Esc                    → cancel\n"
-            "(Avoids Spotlight ⌘Space and Input Sources ⌃Space.)",
+            "Press a chord once — you should see: [vaani] hotkey pressed: ...",
             flush=True,
         )
 
-    def _run_loop(self) -> None:
-        carbon = self._carbon
-        if carbon is None:
+    def pump(self, timeout: float = 0.25) -> None:
+        """Process pending Carbon events. Must run on the main thread."""
+        if self._listener is not None or self._carbon is None or self._target is None:
             return
+        carbon = self._carbon
         event = ctypes.c_void_p()
-        target = carbon.GetEventDispatcherTarget()
-        # eventLoopTimedOutErr = -9875
-        while not self._stop.is_set():
-            err = carbon.ReceiveNextEvent(0, None, 0.25, True, ctypes.byref(event))
-            if err == 0 and event:
-                carbon.SendEventToEventTarget(event, target)
-                carbon.ReleaseEvent(event)
-                event = ctypes.c_void_p()
-            elif err not in (0, -9875):
-                # Unexpected error — keep looping unless stopping.
-                if self._stop.is_set():
-                    break
+        self._pump_count += 1
+        err = carbon.ReceiveNextEvent(0, None, float(timeout), True, ctypes.byref(event))
+        if err == 0 and event:
+            self.logger.debug("event=hotkey_loop_event pump=%s", self._pump_count)
+            send_err = carbon.SendEventToEventTarget(event, self._target)
+            carbon.ReleaseEvent(event)
+            if send_err != 0:
+                self.logger.warning("event=hotkey_send_failed status=%s", send_err)
+        elif err == _EVENT_LOOP_TIMED_OUT:
+            if self._pump_count in (1, 20, 100) or self._pump_count % 240 == 0:
+                self.logger.debug(
+                    "event=hotkey_loop_idle pump=%s presses=%s",
+                    self._pump_count,
+                    self._press_count,
+                )
+        else:
+            if err != self._last_loop_error:
+                self.logger.warning("event=hotkey_loop_error status=%s pump=%s", err, self._pump_count)
+                self._last_loop_error = err
 
     def unregister(self) -> None:
         with self._lock:
             listener = self._listener
             self._listener = None
-            thread = self._thread
-            self._thread = None
             refs = list(self._hotkey_refs)
             self._hotkey_refs.clear()
             handler_ref = self._handler_ref
             self._handler_ref = ctypes.c_void_p()
             carbon = self._carbon
+            self._registered = False
+            self._target = None
+        self.logger.info(
+            "event=hotkey_unregister presses=%s pumps=%s",
+            self._press_count,
+            self._pump_count,
+        )
         if listener is not None:
             for method_name in ("stop", "join"):
                 method = getattr(listener, method_name, None)
@@ -296,7 +323,6 @@ class HotkeyService:
                 except Exception:
                     pass
             return
-        self._stop.set()
         if carbon is not None:
             for ref in refs:
                 try:
@@ -308,8 +334,6 @@ class HotkeyService:
                     carbon.RemoveEventHandler(handler_ref)
                 except Exception:
                     pass
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=1.0)
 
     def _make_trigger(self, mode: str) -> Callable[[], None]:
         def _cb() -> None:
