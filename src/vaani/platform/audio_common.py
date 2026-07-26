@@ -19,7 +19,12 @@ SAMPLE_WIDTH = 2  # 16-bit
 
 
 class SoundDeviceRecorder:
-    """Record 16 kHz mono PCM to a temporary WAV via the sounddevice package."""
+    """Record 16 kHz mono PCM to a temporary WAV via the sounddevice package.
+
+    Audio is buffered in memory from the PortAudio callback and written to a
+    WAV only on ``stop()``. Writing the wave file from the realtime callback
+    is unsafe and often yields empty files on macOS.
+    """
 
     def __init__(self, audio_dir: Path, *, device: Any = None):
         self.audio_dir = Path(audio_dir)
@@ -32,25 +37,26 @@ class SoundDeviceRecorder:
         self.device = device
         self._stream: Any = None
         self._path: Path | None = None
-        self._wave: wave.Wave_write | None = None
         self._started = 0.0
         self._lock = threading.Lock()
-        self._frames = 0
+        self._chunks: list[bytes] = []
+        self._callback_error: str | None = None
 
     def start(self) -> AudioResult:
         with self._lock:
             if self._stream is not None:
                 raise AudioError("recording already active")
             try:
+                import numpy as np  # noqa: F401
                 import sounddevice as sd
             except ImportError as exc:
                 raise AudioPreflightError(
-                    "sounddevice is not installed; pip install 'vaani[macos]' or 'vaani[windows]'"
+                    "sounddevice/numpy missing; pip install 'vaani[macos]' or 'vaani[windows]'"
                 ) from exc
+
             self.audio_dir.mkdir(parents=True, exist_ok=True)
             try:
-                if hasattr(self.audio_dir, "chmod"):
-                    self.audio_dir.chmod(0o700)
+                self.audio_dir.chmod(0o700)
             except OSError:
                 pass
             fd, path = tempfile.mkstemp(prefix="recording-", suffix=".wav", dir=self.audio_dir)
@@ -58,24 +64,22 @@ class SoundDeviceRecorder:
                 os.fchmod(fd, 0o600)
             except (OSError, AttributeError):
                 pass
+            os.close(fd)
             self._path = Path(path)
-            self._wave = wave.open(os.fdopen(fd, "wb"), "wb")
-            self._wave.setnchannels(CHANNELS)
-            self._wave.setsampwidth(SAMPLE_WIDTH)
-            self._wave.setframerate(SAMPLE_RATE)
-            self._frames = 0
+            self._chunks = []
+            self._callback_error = None
 
             def callback(indata, frames, time_info, status):  # noqa: ARG001
-                if self._wave is None:
-                    return
                 try:
-                    self._wave.writeframes(indata.tobytes())
-                    self._frames += frames
-                except Exception:
-                    pass
+                    if status:
+                        self._callback_error = str(status)
+                    # InputStream delivers a numpy array; copy out of the ring buffer.
+                    self._chunks.append(bytes(indata))
+                except Exception as exc:  # pragma: no cover - defensive
+                    self._callback_error = repr(exc)
 
             try:
-                self._stream = sd.RawInputStream(
+                self._stream = sd.InputStream(
                     samplerate=SAMPLE_RATE,
                     channels=CHANNELS,
                     dtype="int16",
@@ -93,27 +97,51 @@ class SoundDeviceRecorder:
         with self._lock:
             if self._stream is None or self._path is None:
                 raise AudioError("recording is not active")
-            try:
-                self._stream.stop()
-                self._stream.close()
-            finally:
-                self._stream = None
-                if self._wave is not None:
-                    try:
-                        self._wave.close()
-                    except Exception:
-                        pass
-                    self._wave = None
-            duration = max(time.monotonic() - self._started, 0.0)
+            stream = self._stream
             path = self._path
+            self._stream = None
             self._path = None
-        if duration < MIN_RECORDING_SECONDS:
+            chunks = self._chunks
+            self._chunks = []
+            callback_error = self._callback_error
+            started = self._started
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
+        # Give the callback thread a beat to finish the last block.
+        time.sleep(0.05)
+        wall = max(time.monotonic() - started, 0.0)
+        pcm = b"".join(chunks)
+        if not pcm:
             path.unlink(missing_ok=True)
-            raise AudioError("recording too short")
-        if duration > MAX_RECORDING_SECONDS:
+            detail = callback_error or "no samples received"
+            raise AudioError(
+                f"no audio captured ({detail}). "
+                "Grant Microphone access to Terminal/Cursor in "
+                "System Settings → Privacy & Security → Microphone, then retry."
+            )
+        frames = len(pcm) // (CHANNELS * SAMPLE_WIDTH)
+        file_duration = frames / float(SAMPLE_RATE)
+        try:
+            with wave.open(str(path), "wb") as wav:
+                wav.setnchannels(CHANNELS)
+                wav.setsampwidth(SAMPLE_WIDTH)
+                wav.setframerate(SAMPLE_RATE)
+                wav.writeframes(pcm)
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            raise AudioError(f"failed to write WAV: {exc}") from exc
+        if file_duration < MIN_RECORDING_SECONDS:
+            path.unlink(missing_ok=True)
+            raise AudioError(
+                "recording too short — speak for at least half a second before stopping"
+            )
+        if wall > MAX_RECORDING_SECONDS or file_duration > MAX_RECORDING_SECONDS:
             path.unlink(missing_ok=True)
             raise AudioError("recording too long")
-        return validate_wav(path, duration_seconds=duration)
+        return validate_wav(path, duration_seconds=file_duration)
 
     def cleanup(self) -> None:
         with self._lock:
@@ -124,15 +152,10 @@ class SoundDeviceRecorder:
                 except Exception:
                     pass
                 self._stream = None
-            if self._wave is not None:
-                try:
-                    self._wave.close()
-                except Exception:
-                    pass
-                self._wave = None
             if self._path is not None:
                 try:
                     self._path.unlink(missing_ok=True)
                 except OSError:
                     pass
                 self._path = None
+            self._chunks = []
