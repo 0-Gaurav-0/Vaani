@@ -71,14 +71,24 @@ If Accessibility is denied, Vaani still copies text to the clipboard and returns
 
 macOS uses Carbon hotkeys. At startup you should see `Vaani hotkeys ready:`.
 
-Defaults avoid Spotlight (⌘Space) and Input Sources (⌃Space):
+Defaults use **Option+Space** (easier hold-to-talk). Avoids Spotlight (⌘Space);
+if another app owns ⌥Space, free that shortcut or tell us and we’ll switch.
 
 | Chord | Keys | Action |
 |---|---|---|
-| Control+Option+V | ⌃⌥V | Smart dictation toggle |
-| Control+Option+Shift+V | ⌃⌥⇧V | Literal dictation toggle |
-| Control+Option+A | ⌃⌥A | Assistant toggle |
+| Option+Space | ⌥Space | **Hold** for smart dictation (release = stop) |
+| Option+Shift+Space | ⌥⇧Space | **Hold** for literal dictation |
+| Control+Option+Space | ⌃⌥Space | **Hold** for assistant |
 | Esc | Esc | Cancel in-flight work |
+
+The bottom pill appears while the chord is held. On release it switches to a
+**processing** animation (pulsing dots) until paste finishes, then vanishes.
+New dictation hotkeys are ignored while processing (Esc still cancels).
+The microphone is opened only while recording (`event=mic_open` /
+`event=mic_close` in the log) — not for the whole time Vaani is running.
+
+Uploads are compressed (FLAC when `soundfile` is installed; otherwise macOS
+`afconvert` m4a) and cleanup uses a fast Groq model for quicker paste.
 
 `--record` working only proves mic + Groq. Global hotkeys need `python -m vaani`
 left running.
@@ -93,12 +103,12 @@ python -m vaani --debug
 On start, note:
 
 - `[vaani] log file: ~/Library/Application Support/Vaani/logs/vaani.log`
-- `[vaani] registered Control+Option+V` (and the other chords)
+- `[vaani] registered Option+Space` (and the other chords)
 
 When you press a chord you should see:
 
 ```text
-[vaani] hotkey pressed: Control+Option+V (smart)
+[vaani] hotkey pressed: Option+Space (smart)
 event=hotkey_pressed ...
 event=recording ...
 ```
@@ -118,8 +128,19 @@ tail -f "$HOME/Library/Application Support/Vaani/logs/vaani.log"
 | Cache / audio / amplitude | `~/Library/Caches/Vaani` |
 | Config | `~/Library/Application Support/Vaani/config` |
 
-Amplitude IPC for a future indicator lives at
-`~/Library/Caches/Vaani/amplitude` (`VAANI_AMPLITUDE_PATH`).
+While recording, a compact black pill appears at the **bottom** of the screen:
+grey **X** (cancel), live waveform, white **✓** (stop & paste). Drag sideways
+only — it stays pinned to the bottom. A small **●** may also appear in the menu
+bar. Spawn logs: `~/Library/Application Support/Vaani/logs/indicator.err`.
+
+| IPC | Path / env |
+|---|---|
+| Amplitude | `~/Library/Caches/Vaani/amplitude` (`VAANI_AMPLITUDE_PATH`) |
+| Stop/cancel control | `~/Library/Caches/Vaani/indicator_control.json` (`VAANI_INDICATOR_CONTROL`) |
+| Pill position | `~/Library/Application Support/Vaani/indicator.json` |
+
+If a pill is stuck after a crash: quit Vaani, or
+`pkill -f 'vaani.platform.macos.indicator_app'`.
 
 ## Smoke checklist
 
@@ -137,12 +158,12 @@ Run from the repo with the venv active:
 
    - Open TextEdit (or a browser text field)
    - Start Vaani: `python -m vaani`
-   - Press Control+Option+V, speak, press Control+Option+V again
+   - Hold Option+Space, speak, release to stop
    - Text should paste into the focused field when Accessibility is granted
 
 3. **Assistant app open**
 
-   - Press Control+Option+A
+   - Hold Control+Option+Space, say “open Terminal”
    - Say “Open Terminal”
    - Terminal.app should launch (`open -a Terminal`)
 

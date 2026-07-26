@@ -42,6 +42,28 @@ def test_sounddevice_recorder_writes_wav(tmp_path, monkeypatch):
     assert result.duration_seconds >= 0.25
 
 
+def test_sounddevice_recorder_publishes_live_level(tmp_path, monkeypatch):
+    import array
+
+    class LoudStream(_FakeStream):
+        def start(self):
+            self.started = True
+            samples = array.array("h", [12000] * 1600)
+            self.callback(memoryview(samples).cast("B"), 1600, None, None)
+
+    sd = SimpleNamespace(InputStream=lambda **kwargs: LoudStream(kwargs["callback"]))
+    monkeypatch.setitem(__import__("sys").modules, "sounddevice", sd)
+    monkeypatch.setitem(__import__("sys").modules, "numpy", SimpleNamespace())
+
+    amp = tmp_path / "amplitude"
+    rec = SoundDeviceRecorder(tmp_path / "audio", amplitude_path=amp)
+    rec.start()
+    assert rec.level > 0.2
+    assert amp.exists()
+    assert float(amp.read_text()) > 0.2
+    rec.cleanup()
+
+
 def test_sounddevice_recorder_empty_audio_message(tmp_path, monkeypatch):
     class EmptyStream(_FakeStream):
         def start(self):

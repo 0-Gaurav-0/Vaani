@@ -37,6 +37,19 @@ $env:GROQ_API_KEY = "gsk_..."
 Data lands under `%APPDATA%\Vaani` and cache under `%LOCALAPPDATA%\Vaani\Cache`
 (including the amplitude IPC file used by the controller).
 
+While recording, a compact black pill sits at the **bottom** of the screen:
+grey **X** (cancel), live waveform, white **✓** (stop & paste). Horizontal drag
+only. Spawned via `python -m vaani.platform.windows.indicator_app` (tkinter).
+
+| IPC | Path / env |
+|---|---|
+| Amplitude | `%LOCALAPPDATA%\Vaani\Cache\amplitude` (`VAANI_AMPLITUDE_PATH`) |
+| Stop/cancel control | `%LOCALAPPDATA%\Vaani\Cache\indicator_control.json` (`VAANI_INDICATOR_CONTROL`) |
+| Pill X position | `%LOCALAPPDATA%\Vaani\indicator.json` |
+
+If a pill is stuck after a crash: quit Vaani, or end the orphan
+`python -m vaani.platform.windows.indicator_app` process in Task Manager.
+
 ## Hotkeys
 
 | Chord | Action |
@@ -80,5 +93,5 @@ python -m vaani
   the clipboard (`CLIPBOARD_ONLY`).
 - Antivirus or accessibility tooling may block `pynput` global hooks — run from a
   normal user session first.
-- There is no Linux-style `SIGUSR` control channel on Windows MVP; use hotkeys
-  (or stop the process) to control the daemon.
+- Stop/cancel from the pill uses the control file (not Unix signals). Hotkeys
+  (`Esc`, toggle chord) still work while the pill is open.

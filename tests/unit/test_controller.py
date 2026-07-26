@@ -36,8 +36,77 @@ def test_smart_and_literal_flow():
 def test_cancel_returns_idle_without_history():
     c,h=make(); c.trigger('smart'); assert c.cancel(); assert c.state is AppState.IDLE; assert not h.rows
 
+
+def test_indicator_control_file_stop(tmp_path):
+    from vaani.indicator_protocol import write_command
+
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"RIFF" + b"\x00" * 40 + b"\x00\x00")
+    control = tmp_path / "indicator_control.json"
+    amp = tmp_path / "amplitude"
+
+    class RecFile:
+        def start(self):
+            return SimpleNamespace(path=wav, duration_seconds=1)
+
+        def stop(self):
+            return SimpleNamespace(path=wav, duration_seconds=1)
+
+        def cleanup(self):
+            pass
+
+    h = History()
+    c = Controller(
+        recorder=RecFile(),
+        groq=Groq(),
+        delivery=Delivery(),
+        history=h,
+        key_provider=lambda: "key",
+        amplitude_path=amp,
+        indicator_control_path=control,
+        max_duration=60,
+    )
+    assert c.trigger("smart")
+    write_command(control, "stop")
+    c._poll_indicator_control()
+    if c._worker:
+        c._worker.join(2)
+    assert h.rows
+    assert c.state is AppState.IDLE
+
 def test_busy_rejected():
     c,_=make(); assert c.trigger('smart'); assert not c.trigger('literal')
+
+
+def test_processing_blocks_new_input_without_dismiss_feedback():
+    from vaani.types import AppState
+
+    class FB:
+        def __init__(self):
+            self.cues = []
+
+        def play(self, cue):
+            self.cues.append(cue)
+            return True
+
+    h = History()
+    fb = FB()
+    c = Controller(
+        recorder=Rec(),
+        groq=Groq(),
+        delivery=Delivery(),
+        history=h,
+        feedback=fb,
+        key_provider=lambda: "key",
+        max_duration=60,
+    )
+    c.state = AppState.PROCESSING
+    before = list(fb.cues)
+    assert not c.trigger("smart")
+    assert not c.handle_hotkey("smart")
+    # Must not play busy (that would dismiss the processing pill).
+    assert fb.cues == before
+    assert any(e.name == "busy" for e in c.events)
 
 def test_assistant_uses_runner_displays_and_persists():
     class Runner:

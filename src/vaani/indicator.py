@@ -51,9 +51,20 @@ class AmplitudeChannel:
         except Exception: return None
     def close(self): self.closed=True
 def dispatch_control(action: str, pid: int | None = None):
-    target = pid or os.getppid(); sig = signal.SIGUSR2 if action == "cancel" else signal.SIGUSR1
-    try: os.kill(target, sig)
-    except Exception: return False
+    """Ask the parent daemon to stop or cancel (file + optional SIGUSR)."""
+    try:
+        from .indicator_protocol import resolve_control_path, write_command
+        write_command(resolve_control_path(), action)
+    except Exception:
+        pass
+    if not hasattr(signal, "SIGUSR1"):
+        return True
+    target = pid or os.getppid()
+    sig = signal.SIGUSR2 if action == "cancel" else signal.SIGUSR1
+    try:
+        os.kill(target, sig)
+    except Exception:
+        return False
     return True
 
 def pcm16_rms(data: bytes) -> float:

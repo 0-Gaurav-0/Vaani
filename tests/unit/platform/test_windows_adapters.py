@@ -1,6 +1,7 @@
 """Unit tests for Windows platform adapters (mocked; safe on macOS/Linux CI)."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -184,6 +185,32 @@ def test_hotkeys_register_mapping():
     assert cancels == ["cancel"]
     service.unregister()
     assert started["value"] is False
+
+
+def test_windows_feedback_spawns_indicator_on_start(tmp_path):
+    calls: list[list[str]] = []
+
+    def fake_popen(args, **_kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(terminate=lambda: None, poll=lambda: None)
+
+    fb = WindowsFeedback(
+        runner=lambda *_a, **_k: SimpleNamespace(returncode=0),
+        beeper=lambda: None,
+        popen=fake_popen,
+        amplitude_path=tmp_path / "amplitude",
+        control_path=tmp_path / "control.json",
+    )
+    assert fb.play("start")
+    assert calls and calls[0][:3] == [
+        sys.executable,
+        "-m",
+        "vaani.platform.windows.indicator_app",
+    ]
+    fb.play("processing")
+    assert fb.indicator is not None
+    fb.play("success")
+    assert fb.indicator is None
 
 
 def test_feedback_console_fallback():

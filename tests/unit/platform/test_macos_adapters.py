@@ -1,11 +1,39 @@
 """Unit tests for macOS platform adapters (mocked; no Accessibility required)."""
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from vaani.delivery import DeliveryStatus
 from vaani.platform.protocol import AppTarget, FocusSnapshot, PlatformId
+
+
+def test_mac_feedback_spawns_indicator_on_start(tmp_path):
+    from vaani.platform.macos.feedback import MacFeedback
+
+    calls: list[list[str]] = []
+
+    def fake_popen(args, **_kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(terminate=lambda: None, poll=lambda: None)
+
+    def fake_run(*_a, **_k):
+        return SimpleNamespace(returncode=0)
+
+    fb = MacFeedback(
+        runner=fake_run,
+        popen=fake_popen,
+        amplitude_path=tmp_path / "amplitude",
+        control_path=tmp_path / "control.json",
+    )
+    assert fb.play("start")
+    assert calls and calls[0][:3] == [sys.executable, "-m", "vaani.platform.macos.indicator_app"]
+    # Processing keeps the pill visible (phase switch); dismiss on success.
+    fb.play("processing")
+    assert fb.indicator is not None
+    fb.play("success")
+    assert fb.indicator is None
 
 
 def test_resolve_app_requires_action_word():
@@ -232,8 +260,8 @@ def test_hotkey_service_register_unregister():
     # Simulate chords.
     # Find callbacks by inspecting the factory-built listener.
     listener = service._listener
-    assert "<ctrl>+<alt>+v" in listener.mapping
-    listener.mapping["<ctrl>+<alt>+v"]()
+    assert "<alt>+<space>" in listener.mapping
+    listener.mapping["<alt>+<space>"]()
     listener.mapping["<esc>"]()
     assert triggers == ["smart"]
     assert cancels == ["cancel"]

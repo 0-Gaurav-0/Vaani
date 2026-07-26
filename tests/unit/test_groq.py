@@ -32,7 +32,7 @@ def test_retry_429_requires_valid_header():
 
 def test_cleanup_strict_and_temperature():
     def h(req):
-        payload=json.loads(req.read()); assert payload['model']=='openai/gpt-oss-120b'; assert payload['max_tokens']==4096; assert payload['temperature']==0.1; assert 'untrusted' in payload['messages'][0]['content']
+        payload=json.loads(req.read()); assert payload['model']=='llama-3.1-8b-instant'; assert payload['max_tokens']==4096; assert payload['temperature']==0.1; assert 'untrusted' in payload['messages'][0]['content']
         return httpx.Response(200,json={'choices':[{'message':{'content':'```ok```'},'finish_reason':'stop'}]})
     result = client(h).cleanup('raw','k')
     assert result.text=='ok' and not result.used_fallback

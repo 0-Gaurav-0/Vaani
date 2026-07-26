@@ -26,17 +26,23 @@ def build_windows(settings: Settings | None = None) -> PlatformBundle:
     settings = settings or Settings.from_home()
     settings.prepare()
     os.environ.setdefault("VAANI_AMPLITUDE_PATH", str(settings.amplitude_path))
+    os.environ.setdefault("VAANI_INDICATOR_CONTROL", str(settings.indicator_control_path))
     target = WindowsTargetProbe()
     return PlatformBundle(
         id=PlatformId.WINDOWS,
         settings=settings,
-        recorder=WindowsAudioRecorder(settings.audio_dir),
+        recorder=WindowsAudioRecorder(
+            settings.audio_dir, amplitude_path=settings.amplitude_path
+        ),
         hotkeys=_NoopHotkeys(),
         target=target,
         delivery=WindowsDelivery(target=target),
         apps=WindowsAppLauncher(),
         browser=WindowsBrowserLauncher(),
-        feedback=WindowsFeedback(),
+        feedback=WindowsFeedback(
+            amplitude_path=settings.amplitude_path,
+            control_path=settings.indicator_control_path,
+        ),
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_windows(settings),
     )
@@ -51,16 +57,22 @@ class _NoopHotkeys:
 
 
 def run_windows(settings: Settings) -> int:
-    """Run the Windows hotkey loop (no SIGUSR control channel in MVP)."""
+    """Run the Windows hotkey loop."""
     sweep_audio_directory(settings.audio_dir)
     os.environ["VAANI_AMPLITUDE_PATH"] = str(settings.amplitude_path)
+    os.environ["VAANI_INDICATOR_CONTROL"] = str(settings.indicator_control_path)
     logger = configure_logging(settings.log_dir, debug=settings.debug)
 
     target = WindowsTargetProbe()
     delivery = WindowsDelivery(target=target)
-    recorder = WindowsAudioRecorder(settings.audio_dir)
+    recorder = WindowsAudioRecorder(
+        settings.audio_dir, amplitude_path=settings.amplitude_path
+    )
     history = HistoryStore(settings.history_db)
-    feedback = WindowsFeedback()
+    feedback = WindowsFeedback(
+        amplitude_path=settings.amplitude_path,
+        control_path=settings.indicator_control_path,
+    )
     groq = GroqClient()
     store = SecretServiceKeyStore()
     apps = WindowsAppLauncher()
@@ -73,6 +85,7 @@ def run_windows(settings: Settings) -> int:
         feedback=feedback,
         key_provider=lambda: effective_key(store).value,
         amplitude_path=settings.amplitude_path,
+        indicator_control_path=settings.indicator_control_path,
         browser_launcher=browser,
         app_launcher=apps,
     )
