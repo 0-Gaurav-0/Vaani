@@ -309,7 +309,7 @@ def register_stub_packs(
     run_fn: RunFn | None = None,
     get_platform: PlatformGetter | None = None,
 ) -> tuple[Pattern, ...]:
-    """Register installable pack verbs (git/pkg/docker; forge stub until T4.3).
+    """Register installable pack verbs (git/forge/pkg/docker).
 
     Returns grammar patterns for packs that provide them. Descriptors alone
     still drive ``vaani caps`` pack rows for packs without verbs yet.
@@ -330,5 +330,5 @@ def register_stub_packs(
             get_platform=get_platform,
         )
     )
-    patterns.extend(register_forge_pack(registry))
+    patterns.extend(register_forge_pack(registry, run_fn=run_fn))
     return tuple(patterns)

@@ -539,3 +539,34 @@
   rung: 4
   risk: R3
   not_verb: vcs.branch.create
+
+# T4.3 forge / gh pack (append-only)
+- utterance: "create a pull request"
+  verb: forge.pr.create
+  rung: 4
+  risk: R2
+
+- utterance: "open the PR I was working on"
+  verb: forge.pr.open
+  rung: 4
+  risk: R0
+
+- utterance: "list my open PRs"
+  verb: forge.pr.list
+  rung: 4
+  risk: R0
+
+- utterance: "check out the PR branch for pull request 3"
+  verb: forge.pr.checkout
+  rung: 4
+  risk: R1
+
+- utterance: "merge the pull request"
+  verb: forge.pr.merge
+  rung: 4
+  risk: R3
+
+- utterance: "login to gh"
+  verb: forge.auth.login
+  rung: 4
+  risk: R1
