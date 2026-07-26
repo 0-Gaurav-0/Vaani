@@ -249,8 +249,8 @@ def test_double_approve_control_command(tmp_path: Path):
 
 def test_ttl_expire_clears_confirming(tmp_path: Path):
     c, _h, _w, _control = _controller(tmp_path, text="quit Slack")
-    # Short TTL for the test.
-    c.confirm._ttl = 0.05
+    # Short TTL for the test (ConfirmEngine clamps constructor ttl to >=0.1).
+    c.confirm._ttl = 0.1
     verb = c.registry.get("app.quit")
     assert verb is not None
     object.__setattr__(
@@ -264,10 +264,10 @@ def test_ttl_expire_clears_confirming(tmp_path: Path):
     assert c.stop()
     c._worker.join(2)
     assert c.confirm.peek() is not None
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline and c.confirm.peek() is not None:
-        c._expire_confirm()
-        time.sleep(0.02)
+    # Wait past TTL, then expire explicitly. peek() soft-hides expired
+    # actions without emitting, so do not rely on a poll loop alone.
+    time.sleep(0.15)
+    c._expire_confirm()
     assert c.confirm.peek() is None
     assert any(e.name == "confirm_expired" for e in c.events)
 
