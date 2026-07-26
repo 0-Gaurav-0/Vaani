@@ -11,7 +11,13 @@ import sys
 import time
 from pathlib import Path
 
-from .indicator_protocol import read_pending_id, read_phase, resolve_pending_path
+from .indicator_protocol import (
+    read_options,
+    read_pending_id,
+    read_phase,
+    resolve_options_path,
+    resolve_pending_path,
+)
 from .waveform import WaveformBuffer
 
 # Compact + flush to the bottom so it barely eats content space.
@@ -74,6 +80,7 @@ def run_pill(
     pending_file = pending_path or resolve_pending_path(
         cache_dir=control_path.parent
     )
+    options_file = resolve_options_path(cache_dir=control_path.parent)
     t0 = time.monotonic()
     root = tk.Tk()
     root.title("Vaani")
@@ -152,20 +159,32 @@ def run_pill(
                 fill="#ff6b6b",
                 font=("Helvetica", 9),
             )
-            canvas.create_text(
-                w // 2,
-                HEIGHT // 2,
-                text="Confirm?",
-                fill="#ffffff",
-                font=("Helvetica", 9),
-            )
-            canvas.create_text(
-                w - 44,
-                HEIGHT // 2,
-                text="Approve",
-                fill="#7dffa3",
-                font=("Helvetica", 9),
-            )
+            option_labels = read_options(options_file)
+            if option_labels:
+                # Disambiguation: numbered pill options (no Approve default).
+                center = " · ".join(str(i + 1) for i in range(len(option_labels)))
+                canvas.create_text(
+                    w // 2,
+                    HEIGHT // 2,
+                    text=center,
+                    fill="#ffffff",
+                    font=("Helvetica", 9),
+                )
+            else:
+                canvas.create_text(
+                    w // 2,
+                    HEIGHT // 2,
+                    text="Confirm?",
+                    fill="#ffffff",
+                    font=("Helvetica", 9),
+                )
+                canvas.create_text(
+                    w - 44,
+                    HEIGHT // 2,
+                    text="Approve",
+                    fill="#7dffa3",
+                    font=("Helvetica", 9),
+                )
             return
 
         cx, cy, r = 14, HEIGHT // 2, 10
@@ -234,10 +253,22 @@ def run_pill(
         w = layout["width"]
         if phase == "confirming":
             action_id = read_pending_id(pending_file)
+            option_labels = read_options(options_file)
             if action_id and event.x < HIT_PAD:
                 _send(control_path, f"reject:{action_id}")
                 return
-            if action_id and event.x > w - HIT_PAD:
+            if action_id and option_labels:
+                # Map center clicks to option 1..N (left→right).
+                inner_left, inner_right = HIT_PAD, w - HIT_PAD
+                if inner_left <= event.x <= inner_right:
+                    span = max(1, inner_right - inner_left)
+                    slot = min(
+                        len(option_labels) - 1,
+                        max(0, int((event.x - inner_left) / span * len(option_labels))),
+                    )
+                    _send(control_path, f"select:{action_id}:{slot + 1}")
+                    return
+            elif action_id and event.x > w - HIT_PAD:
                 _send(control_path, f"approve:{action_id}")
                 return
             drag_state["start"] = (event.x_root, event.y_root)

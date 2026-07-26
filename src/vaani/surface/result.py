@@ -36,6 +36,17 @@ def format_result_message(result: Result) -> str:
             message = f"{summary}: {argv}"
         return message[:NOTIFY_MAX]
 
+    if result.status is Status.NEEDS_DISAMBIGUATE:
+        prompt = result.disambiguation
+        if prompt is not None and prompt.options:
+            choices = " · ".join(
+                f"{i + 1}:{opt.label}" for i, opt in enumerate(prompt.options)
+            )
+            message = f"{summary or prompt.question}: {choices}"
+        else:
+            message = summary or detail or "Which one?"
+        return message[:NOTIFY_MAX]
+
     if result.status is Status.DRY_RUN:
         message = summary or detail or "Dry run — nothing executed."
         if not message.casefold().startswith("dry"):
