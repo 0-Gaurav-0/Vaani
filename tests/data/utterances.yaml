@@ -410,3 +410,54 @@
   rung: 1
   risk: R0
   not_verb: editor.open
+
+# T4.4 package + container packs — CLI-PKG / CLI-DOCK
+- utterance: "install lodash"
+  verb: pkg.add
+  rung: 4
+  risk: R2
+
+- utterance: "add requests to the project"
+  verb: pkg.add
+  rung: 4
+  risk: R2
+
+- utterance: "update the lockfile"
+  verb: pkg.lock
+  rung: 4
+  risk: R1
+
+- utterance: "run npm run lint"
+  verb: pkg.script.run
+  rung: 4
+  risk: R1
+
+- utterance: "remove node_modules and reinstall"
+  verb: pkg.reinstall
+  rung: 4
+  risk: R3
+
+- utterance: "start docker"
+  verb: container.engine.start
+  rung: 4
+  risk: R1
+
+- utterance: "list running containers"
+  verb: container.list
+  rung: 4
+  risk: R0
+
+- utterance: "stop all containers"
+  verb: container.stop_all
+  rung: 4
+  risk: R3
+
+- utterance: "rebuild the compose stack"
+  verb: container.compose.rebuild
+  rung: 4
+  risk: R2
+
+- utterance: "tail logs for the api container"
+  verb: container.logs
+  rung: 4
+  risk: R0

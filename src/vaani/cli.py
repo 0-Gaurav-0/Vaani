@@ -240,7 +240,11 @@ def build_registry(
         run_command=exec_run,
     )
     register_undo(registry, UndoStack())
-    register_stub_packs(registry)
+    register_stub_packs(
+        registry,
+        run_fn=exec_run,
+        get_platform=lambda: plat,
+    )
     pack_reg = packs if packs is not None else _packs_for_settings(settings)
     pack_reg.apply(registry)
     return registry
@@ -459,7 +463,9 @@ def cmd_caps(
     print()
 
     platforms = [p.value for p in _PLATFORMS]
-    header = f"{'verb':<24}" + "".join(f"{p:<12}" for p in platforms)
+    verb_width = max((len(name) for name in matrix), default=24)
+    verb_width = max(verb_width, 24) + 2
+    header = f"{'verb':<{verb_width}}" + "".join(f"{p:<12}" for p in platforms)
     print(header)
     print("-" * len(header))
     for verb_name in sorted(matrix):
@@ -467,7 +473,7 @@ def cmd_caps(
         for platform in _PLATFORMS:
             support, _note = matrix[verb_name][platform.value]
             cells.append(f"{support.value:<12}")
-        print(f"{verb_name:<24}" + "".join(cells))
+        print(f"{verb_name:<{verb_width}}" + "".join(cells))
     return 0
 
 
