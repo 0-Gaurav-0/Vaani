@@ -155,14 +155,16 @@ def test_delivery_paste_failure_falls_back():
     )
 
 
-def test_hotkeys_register_mapping():
+def test_hotkeys_hold_to_talk_press_release():
     triggers: list[str] = []
+    releases: list[str] = []
     cancels: list[str] = []
     started = {"value": False}
 
     class FakeListener:
-        def __init__(self, mapping):
-            self.mapping = mapping
+        def __init__(self, press_mapping, release_mapping=None):
+            self.press = press_mapping
+            self.release = release_mapping or {}
 
         def start(self):
             started["value"] = True
@@ -172,19 +174,52 @@ def test_hotkeys_register_mapping():
 
     service = WindowsHotkeyService(
         triggers.append,
+        on_release=releases.append,
         on_cancel=lambda: cancels.append("cancel"),
         listener_factory=FakeListener,
     )
     service.register()
     assert started["value"] is True
-    assert "<ctrl>+<space>" in service._listener.mapping
-    assert "<esc>" in service._listener.mapping
-    service._listener.mapping["<ctrl>+<space>"]()
-    service._listener.mapping["<esc>"]()
+    assert "<ctrl>+<space>" in service._listener.press
+    assert "<esc>" in service._listener.press
+    assert "<ctrl>+<space>" in service._listener.release
+    service._listener.press["<ctrl>+<space>"]()
+    service._listener.release["<ctrl>+<space>"]()
+    service._listener.press["<esc>"]()
     assert triggers == ["smart"]
+    assert releases == ["smart"]
     assert cancels == ["cancel"]
     service.unregister()
     assert started["value"] is False
+
+
+def test_hotkeys_literal_and_assistant_chords():
+    triggers: list[str] = []
+    releases: list[str] = []
+
+    class FakeListener:
+        def __init__(self, press_mapping, release_mapping=None):
+            self.press = press_mapping
+            self.release = release_mapping or {}
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    service = WindowsHotkeyService(
+        triggers.append,
+        on_release=releases.append,
+        listener_factory=FakeListener,
+    )
+    service.register()
+    service._listener.press["<ctrl>+<shift>+<space>"]()
+    service._listener.release["<ctrl>+<shift>+<space>"]()
+    service._listener.press["<ctrl>+<alt>+<space>"]()
+    service._listener.release["<ctrl>+<alt>+<space>"]()
+    assert triggers == ["literal", "assistant"]
+    assert releases == ["literal", "assistant"]
 
 
 def test_windows_feedback_spawns_indicator_on_start(tmp_path):
@@ -192,7 +227,7 @@ def test_windows_feedback_spawns_indicator_on_start(tmp_path):
 
     def fake_popen(args, **_kwargs):
         calls.append(list(args))
-        return SimpleNamespace(terminate=lambda: None, poll=lambda: None)
+        return SimpleNamespace(terminate=lambda: None, poll=lambda: None, pid=4242)
 
     fb = WindowsFeedback(
         runner=lambda *_a, **_k: SimpleNamespace(returncode=0),
@@ -200,6 +235,7 @@ def test_windows_feedback_spawns_indicator_on_start(tmp_path):
         popen=fake_popen,
         amplitude_path=tmp_path / "amplitude",
         control_path=tmp_path / "control.json",
+        log_dir=tmp_path / "logs",
     )
     assert fb.play("start")
     assert calls and calls[0][:3] == [
@@ -207,10 +243,53 @@ def test_windows_feedback_spawns_indicator_on_start(tmp_path):
         "-m",
         "vaani.platform.windows.indicator_app",
     ]
+    # Processing keeps the pill visible (phase switch); dismiss on success.
     fb.play("processing")
     assert fb.indicator is not None
+    from vaani.indicator_protocol import read_phase
+
+    assert read_phase(fb.phase_path) == "processing"
     fb.play("success")
     assert fb.indicator is None
+
+
+def test_reap_orphan_indicators_runs_powershell_on_win32():
+    from vaani.platform.windows.runtime import reap_orphan_indicators
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0)
+
+    reap_orphan_indicators(runner=fake_run, platform="win32")
+    assert calls and calls[0][0] == "powershell"
+    assert "indicator_app" in calls[0][-1]
+
+
+def test_reap_orphan_indicators_noop_off_windows():
+    from vaani.platform.windows.runtime import reap_orphan_indicators
+
+    calls: list[list[str]] = []
+    reap_orphan_indicators(
+        runner=lambda *a, **k: calls.append(list(a[0])) or SimpleNamespace(returncode=0),
+        platform="darwin",
+    )
+    assert calls == []
+
+
+def test_hotkey_chord_match_prefers_specific_modifiers():
+    from vaani.platform.windows.hotkeys import WindowsHotkeyService
+
+    service = WindowsHotkeyService(lambda _m: None)
+    service._pressed = {"ctrl", "space"}
+    assert service._match_action() == "smart"
+    service._pressed = {"ctrl", "shift", "space"}
+    assert service._match_action() == "literal"
+    service._pressed = {"ctrl", "alt", "space"}
+    assert service._match_action() == "assistant"
+    service._pressed = {"ctrl", "shift", "alt", "space"}
+    assert service._match_action() is None
 
 
 def test_feedback_console_fallback():
