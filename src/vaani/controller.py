@@ -150,7 +150,11 @@ class Controller:
             run_command=exec_run,
         )
         patterns = patterns + register_undo(self.registry, self.undo)
-        register_stub_packs(self.registry)
+        patterns = patterns + register_stub_packs(
+            self.registry,
+            run_fn=exec_run,
+            get_platform=detect_os,
+        )
         packs_settings = settings
         if packs_settings is None:
             try:
