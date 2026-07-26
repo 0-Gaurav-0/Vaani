@@ -72,6 +72,11 @@ def materialize_argv(
 
         return materialize_forge_argv(verb_name, slots, context=context)
 
+    if verb_name.startswith("window."):
+        from vaani.verbs.packs.window import materialize_window_argv
+
+        return materialize_window_argv(verb_name, slots, platform=platform)
+
     if verb_name == "app.open":
         name = str(slots.get("name") or "")
         target = _find_app_target(name, _app_catalog(platform))

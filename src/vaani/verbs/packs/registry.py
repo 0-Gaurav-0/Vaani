@@ -1,8 +1,8 @@
 """Capability pack registry: descriptors, enable/disable, packs.json I/O.
 
-``core`` / ``procs`` / ``project`` are always on. Installable packs are
-individually toggleable and declare binaries, auth, and permissions so a missing
-tool surfaces as ``DEGRADED`` ("gh isn't installed") rather than rung-6
+``core`` / ``procs`` / ``project`` / ``window`` are always on. Installable packs
+are individually toggleable and declare binaries, auth, and permissions so a
+missing tool surfaces as ``DEGRADED`` ("gh isn't installed") rather than rung-6
 escalation (invariant 5).
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ class PackDescriptor:
 
 
 # Always-on in-tree packs (cannot be disabled).
-ALWAYS_ON_PACKS: tuple[str, ...] = ("core", "procs", "project")
+ALWAYS_ON_PACKS: tuple[str, ...] = ("core", "procs", "project", "window")
 
 # Installable / individually toggleable packs (T4.1+).
 INSTALLABLE_PACKS: tuple[str, ...] = (
@@ -90,6 +90,12 @@ BUILTIN_PACKS: dict[str, PackDescriptor] = {
     "procs": _descriptor("procs", "Ports, processes, trash, wifi", always_on=True),
     "project": _descriptor(
         "project", "Project commands, jobs, terminal/editor", always_on=True
+    ),
+    "window": _descriptor(
+        "window",
+        "Focus, tile, hide-others window control",
+        always_on=True,
+        permissions=frozenset({"accessibility"}),
     ),
     "git": _descriptor("git", "Git / VCS verbs", binaries=("git",)),
     "pkg": _descriptor("pkg", "Package manager verbs", binaries=()),

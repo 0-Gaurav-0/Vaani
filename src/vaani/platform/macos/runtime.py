@@ -20,6 +20,7 @@ from .feedback import MacFeedback
 from .hotkeys import HotkeyService
 from .system import MacSystemControl
 from .target import MacTargetProbe
+from .window import MacWindowControl
 
 
 def build_macos(settings: Settings | None = None) -> PlatformBundle:
@@ -41,6 +42,7 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
     )
     hotkeys = HotkeyService(lambda _mode: None)
     system = MacSystemControl()
+    window = MacWindowControl()
     return PlatformBundle(
         id=PlatformId.MACOS,
         settings=settings,
@@ -54,6 +56,7 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_macos(settings),
         system=system,
+        window=window,
     )
 
 
@@ -77,6 +80,7 @@ def run_macos(settings: Settings) -> int:
     target = MacTargetProbe()
     delivery = MacClipboardDelivery(target=target)
     system = MacSystemControl()
+    window = MacWindowControl()
     bundle = PlatformBundle(
         id=PlatformId.MACOS,
         settings=settings,
@@ -96,6 +100,7 @@ def run_macos(settings: Settings) -> int:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: 0,
         system=system,
+        window=window,
     )
     assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
     controller = assembly.controller

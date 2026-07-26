@@ -75,6 +75,7 @@ def assemble(
         browser_launcher=bundle.browser,
         app_launcher=bundle.apps,
         system=bundle.system,
+        window=getattr(bundle, "window", None),
         terminal=getattr(bundle, "terminal", None),
         supervisor=supervisor,
         settings=settings if supervisor is not None else None,

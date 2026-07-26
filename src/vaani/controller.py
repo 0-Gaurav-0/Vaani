@@ -80,6 +80,7 @@ class Controller:
                  browser_launcher: Any | None = None,
                  app_launcher: Any | None = None,
                  system: Any | None = None,
+                 window: Any | None = None,
                  terminal: Any | None = None,
                  supervisor: Any | None = None,
                  settings: Any | None = None,
@@ -90,6 +91,7 @@ class Controller:
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
         self.system = system
+        self.window = window
         self.terminal = terminal
         if supervisor is not None:
             self.supervisor = supervisor
@@ -155,6 +157,7 @@ class Controller:
             get_codex=lambda: self.codex,
             get_result_window=lambda: self.result_window,
             get_system=lambda: self.system,
+            get_window=lambda: self.window,
             get_delivery=lambda: self.delivery,
             get_platform=detect_os,
             get_supervisor=lambda: self.supervisor,

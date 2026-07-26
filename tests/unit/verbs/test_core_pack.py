@@ -10,6 +10,7 @@ from vaani.sites import resolve_site
 from vaani.verbs.packs.core import CORE_VERB_NAMES, build_core_registry
 from vaani.verbs.packs.project import PROJECT_VERB_NAMES
 from vaani.verbs.packs.procs import PROCS_VERB_NAMES
+from vaani.verbs.packs.window import WINDOW_VERB_NAMES
 
 
 class _FakeSystem:
@@ -108,7 +109,10 @@ def test_core_pack_registers_all_t13_verbs() -> None:
     assert CORE_VERB_NAMES <= names
     assert PROCS_VERB_NAMES <= names
     assert PROJECT_VERB_NAMES <= names
-    assert names == CORE_VERB_NAMES | PROCS_VERB_NAMES | PROJECT_VERB_NAMES
+    assert WINDOW_VERB_NAMES <= names
+    assert names == (
+        CORE_VERB_NAMES | PROCS_VERB_NAMES | PROJECT_VERB_NAMES | WINDOW_VERB_NAMES
+    )
 
 
 def test_caps_matrix_three_platforms_for_new_verbs() -> None:
