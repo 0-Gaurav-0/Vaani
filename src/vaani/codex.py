@@ -16,6 +16,28 @@ def _redact(value: str) -> str:
     import re
     return re.sub(r'(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S+', r'\1=[REDACTED]', value)
 
+def _stop_process(proc: subprocess.Popen[str] | subprocess.Popen[bytes] | None, *, forceful: bool = False) -> None:
+    """Terminate a session-leader child without assuming POSIX killpg."""
+    if proc is None or proc.poll() is not None:
+        return
+    if os.name == "nt" or not hasattr(os, "killpg"):
+        try:
+            (proc.kill if forceful else proc.terminate)()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return
+    sig = signal.SIGKILL if forceful else signal.SIGTERM
+    try:
+        os.killpg(proc.pid, sig)
+    except Exception:
+        try:
+            (proc.kill if forceful else proc.terminate)()
+        except Exception:
+            pass
+
 class CodexRunner:
     def __init__(self, executable: str = "codex", cwd: str | None = None, timeout: float = 30.0):
         default_cwd = os.environ.get("VAANI_ASSISTANT_CWD") or str(Path.home())
@@ -30,9 +52,7 @@ class CodexRunner:
         ]
     def cancel(self):
         self._cancel.set()
-        if self._proc and self._proc.poll() is None:
-            try: os.killpg(self._proc.pid, signal.SIGTERM)
-            except Exception: self._proc.terminate()
+        _stop_process(self._proc, forceful=False)
     def run(self, prompt: str, *, timeout: float | None = None) -> CodexResult:
         self._cancel.clear()
         env = {k:v for k,v in os.environ.items() if k not in {"OPENAI_API_KEY", "GROQ_API_KEY"}}
@@ -44,8 +64,7 @@ class CodexRunner:
                                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try: out, err = self._proc.communicate(timeout=timeout or self.timeout)
             except subprocess.TimeoutExpired:
-                try: os.killpg(self._proc.pid, signal.SIGKILL)
-                except Exception: self._proc.kill()
+                _stop_process(self._proc, forceful=True)
                 out, err = self._proc.communicate()
                 return CodexResult(_redact(out), _redact(err), -1, timed_out=True)
             return CodexResult(_redact(out), _redact(err), self._proc.returncode, cancelled=self._cancel.is_set())
