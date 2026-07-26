@@ -70,6 +70,8 @@ def test_build_linux_bundle_id(tmp_path: Path, monkeypatch):
     assert bundle.id is PlatformId.LINUX
     assert "amplitude" in str(bundle.settings.amplitude_path)
     assert hasattr(bundle.feedback, "play")
+    assert bundle.system is not None
+    assert hasattr(bundle.system, "volume_set")
 
 
 def test_audio_recorder_exposes_level(tmp_path: Path):
