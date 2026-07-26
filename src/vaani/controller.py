@@ -9,8 +9,6 @@ import logging
 import threading
 import time
 import struct, math, os
-import shutil
-import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -39,10 +37,20 @@ class Controller:
                  key_provider: Callable[[], str | None] | None = None,
                  hotkeys: Any | None = None, logger: logging.Logger | None = None,
                  max_duration: float = 300.0, join_timeout: float = 5.0,
-                 codex: Any | None = None, result_window: Any | None = None):
+                 codex: Any | None = None, result_window: Any | None = None,
+                 amplitude_path: str | os.PathLike[str] | None = None,
+                 browser_launcher: Any | None = None,
+                 app_launcher: Any | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self.codex, self.result_window = codex, result_window
+        self.browser_launcher = browser_launcher
+        self.app_launcher = app_launcher
+        self.amplitude_path = str(
+            amplitude_path
+            or os.environ.get("VAANI_AMPLITUDE_PATH")
+            or "/tmp/vaani-amplitude"
+        )
         self.logger = logger or logging.getLogger("vaani")
         self.max_duration, self.join_timeout = max_duration, join_timeout
         self.state = AppState.IDLE; self.mode: str | None = None
@@ -122,7 +130,7 @@ class Controller:
 
     def _start_amplitude_monitor(self, path: Any) -> None:
         self._amplitude_stop.clear()
-        out = "/tmp/vaani-amplitude"
+        out = self.amplitude_path
         def monitor():
             while not self._amplitude_stop.wait(0.08):
                 try:
@@ -131,6 +139,9 @@ class Controller:
                     if len(data) >= 2:
                         vals = struct.unpack("<%dh" % (len(data)//2), data[:len(data)//2*2])
                         level = min(1.0, math.sqrt(sum(v*v for v in vals)/len(vals))/32768.0)
+                        parent = os.path.dirname(out)
+                        if parent:
+                            os.makedirs(parent, mode=0o700, exist_ok=True)
                         with open(out, "w") as dst: dst.write(f"{level:.4f}")
                 except Exception: pass
         self._amplitude_thread = threading.Thread(target=monitor, daemon=True); self._amplitude_thread.start()
@@ -156,9 +167,17 @@ class Controller:
                 final = answer(question, key, cancel=self._cancel).text
                 history_mode = "answer"
             if self.mode == "assistant":
-                app = resolve_app(raw)
+                app = (
+                    self.app_launcher.resolve(raw)
+                    if self.app_launcher is not None
+                    else resolve_app(raw)
+                )
                 if app:
-                    answer = launch_app(app)
+                    answer = (
+                        self.app_launcher.launch(app)
+                        if self.app_launcher is not None
+                        else launch_app(app)
+                    )
                     if self.result_window is not None and hasattr(self.result_window, "show_text"):
                         self.result_window.show_text(answer)
                     with self._lock:
@@ -173,8 +192,11 @@ class Controller:
                 if site or browser:
                     url = site.url if site else "about:blank"
                     requested = site.browser if site else ("chrome" if "chrome" in raw.casefold() else "brave")
-                    prefer_brave = requested != "chrome"
-                    answer = self._open_browser(prefer_brave=prefer_brave, url=url)
+                    prefer = "chrome" if requested == "chrome" else "brave"
+                    if self.browser_launcher is not None:
+                        answer = self.browser_launcher.open(url, prefer=prefer)
+                    else:
+                        answer = self._open_browser(prefer_brave=prefer != "chrome", url=url)
                     if site and answer.startswith("Opened"):
                         answer = f"Opened {site.name}."
                     if self.result_window is not None and hasattr(self.result_window, "show_text"):
@@ -245,20 +267,10 @@ class Controller:
 
     @staticmethod
     def _open_browser(*, prefer_brave: bool = True, url: str = "about:blank") -> str:
-        brave_names = ("/opt/brave.com/brave/brave-browser", "brave-browser", "brave")
-        other_names = ("google-chrome", "chromium", "chromium-browser")
-        names = brave_names + other_names if prefer_brave else other_names + brave_names
-        executable = next((shutil.which(name) for name in names if shutil.which(name)), None)
-        if not executable:
-            return "Unable to open browser: no supported browser is installed."
-        try:
-            args = [executable, "--new-window", url] if "brave" in executable else [executable, "--profile-directory=Default", "--new-window", url]
-            proc = subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            time.sleep(0.4)
-            return "Opened browser." if proc.poll() is None else "Browser launch exited; check whether an existing browser window was reused."
-        except OSError:
-            return "Unable to open browser."
+        """Backward-compatible Linux browser open used by unit tests and fallbacks."""
+        from .platform.linux.browser import open_browser
+
+        return open_browser(prefer_brave=prefer_brave, url=url)
 
     def _fail(self, exc: BaseException, category: str | None = None) -> None:
         category = category or exception_category(exc)

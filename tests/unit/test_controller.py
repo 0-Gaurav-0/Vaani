@@ -75,14 +75,24 @@ def test_assistant_launches_resolved_desktop_app(monkeypatch):
 def test_browser_intent_safe_action(monkeypatch):
     assert Controller._browser_intent("  Open   Chrome ")
     assert not Controller._browser_intent("open chrome and run ls")
-    monkeypatch.setattr("vaani.controller.shutil.which", lambda name: None)
+    monkeypatch.setattr("vaani.platform.linux.browser.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "vaani.platform.linux.browser.Path.exists",
+        lambda self: False,
+    )
     assert "no supported browser" in Controller._open_browser()
     assert Controller._browser_intent("open brave browser")
 
 
 def test_browser_defaults_to_brave(monkeypatch):
     seen = []
-    monkeypatch.setattr("vaani.controller.shutil.which", lambda name: "/usr/bin/brave-browser" if "brave" in name else None)
-    monkeypatch.setattr("vaani.controller.subprocess.Popen", lambda args, **kwargs: seen.append(args) or SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(
+        "vaani.platform.linux.browser.shutil.which",
+        lambda name: "/usr/bin/brave-browser" if "brave" in name else None,
+    )
+    monkeypatch.setattr(
+        "vaani.platform.linux.browser.subprocess.Popen",
+        lambda args, **kwargs: seen.append(args) or SimpleNamespace(poll=lambda: None),
+    )
     assert Controller._open_browser().startswith("Opened")
     assert "brave" in seen[0][0]
