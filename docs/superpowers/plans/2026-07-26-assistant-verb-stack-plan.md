@@ -343,12 +343,13 @@ Defaults keep every existing `build_<os>()` call site valid, so T0.8 is additive
       def reject(self, action_id: str) -> None: ...
       def expire_tick(self) -> None: ...   # registered on SessionLoop
   ```
-- **Three approval paths, all required (spec §12.2 / A9):**
-  1. **Hotkey tap** — a press/release shorter than `MIN_RECORDING_SECONDS` (0.250s, [config.py:18](../../../src/vaani/config.py#L18)) while a pending action exists = approve. No STT round trip, hands-free-adjacent, and it reuses the hold-to-talk press/release seam already in each runtime ([linux/runtime.py:148-163](../../../src/vaani/platform/linux/runtime.py#L148-L163)).
-  2. **Voice** — a normal utterance is checked against the confirm phrase set **before** the router runs (spec §1.2 step 1 ordering).
-  3. **Click** — pill writes `approve:<id>` / `reject:<id>` through the `indicator_protocol` channel; `ALLOWED` gains the two commands with the same enum validation.
+- **Approval paths (product decision 2026-07-27 — see parallel-agents plan §0):**
+  1. **Pill UI (required)** — while `confirming`, the Vaani pill shows **Reject** and **Approve**. Click either control.
+  2. **Keyboard (required)** — **Enter = Approve**, **Esc = Reject** (aligned with global cancel).
+  3. **Voice approve phrases** — **deferred** (no “yes”/“confirm” in v1); new speech while pending **cancels** the pending action instead of approving.
+- Channel: pill writes `approve:<id>` / `reject:<id>` through `indicator_protocol`; `ALLOWED` gains those commands with the same enum validation. Hotkey layer maps Enter/Esc to the same commands while a `PendingAction` exists.
 - Single-use, TTL ~20s, invalidated by any new utterance or a target state change. The brain can never self-approve R3/R4 — enforced in `ConfirmEngine.approve` by rejecting `via="agent"` for those classes, and tested.
-- **Tests:** TTL expiry; double-approve rejected; new utterance invalidates; tap-vs-hold discrimination at the 250ms boundary; `via="agent"` blocked on R3/R4.
+- **Tests:** TTL expiry; double-approve rejected; new utterance invalidates (reject, not approve); Enter approve; Esc reject; pill click both sides; `via="agent"` blocked on R3/R4.
 
 ### T2.2 Dry-run + materialization [S] `feat/av-dryrun`
 - **Depends:** T2.1
@@ -589,7 +590,7 @@ From spec Appendix B, with the task each one blocks:
 | # | Decision | Blocks | Recommendation |
 |---|---|---|---|
 | 1 | Workspace precedence | T3.2 | Take spec §5.2 as written; always report the source |
-| 2 | Confirm phrase set | T2.1 | "confirm" + "do it" only. Exclude bare "yes" — too common in ordinary speech near a pending action |
+| 2 | Confirm UX | T2.1 | **Pill only:** Approve + Reject controls; **Enter** approve, **Esc** reject. Voice “yes/confirm” deferred (see parallel-agents plan) |
 | 3 | Windows volume mechanism | T1.2 | Ship `DEGRADED` in S1; revisit with pycaw once the rest of S1 is proven |
 | 4 | DND on macOS/Windows | T1.2 | Accept `DEGRADED`; the hacks aren't worth the support burden |
 | 5 | Wayland scope | T5.1, T6.1 | `UNSUPPORTED` for window/input; portal spike for screen only (`P0-06`) |

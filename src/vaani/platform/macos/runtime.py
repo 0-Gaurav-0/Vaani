@@ -104,7 +104,9 @@ def run_macos(settings: Settings) -> int:
     assistant = CodexRunner()
 
     def show_assistant_result(text: str) -> None:
-        feedback.notify("paste", (text or "")[:160])
+        # Prefer the real assistant reply; never fall back to paste-default copy.
+        message = (text or "").strip() or "Assistant returned no output."
+        feedback.notify("paste", message[:160])
 
     controller.codex = assistant
     controller.result_window = ResultWindow(show_assistant_result)
