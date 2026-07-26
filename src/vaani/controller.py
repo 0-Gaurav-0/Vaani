@@ -89,6 +89,7 @@ class Controller:
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self._codex, self.result_window = codex, result_window
+        self.agent = codex  # AgentRunner when wired; CodexRunner remains duck-compatible
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
         self.system = system
@@ -202,6 +203,7 @@ class Controller:
     @codex.setter
     def codex(self, value: Any) -> None:
         self._codex = value
+        self.agent = value
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))

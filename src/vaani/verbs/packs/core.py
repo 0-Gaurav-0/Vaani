@@ -644,7 +644,6 @@ def build_core_verbs(
         return _open_dir(path, platform, runner=run, popen=spawn)
 
     def handle_agent_task(intent: Intent, context: Context) -> Result:
-        # TODO(T7.1): prefer BrainProtocol.run_task(...) when brains modules land.
         confirmed = "confirmed" in intent.modifiers or "yes" in intent.modifiers
         proposed = str(intent.slots.get("proposed_diff") or "").strip()
         base_prompt = str(intent.slots.get("prompt") or intent.raw_utterance or "")
@@ -713,8 +712,8 @@ def build_core_verbs(
                 rung=6,
             )
 
-        codex = get_codex() if get_codex is not None else None
-        if codex is None:
+        runner = get_codex() if get_codex is not None else None
+        if runner is None:
             return Result(
                 status=Status.FAILED,
                 summary="assistant runner unavailable",
@@ -722,8 +721,13 @@ def build_core_verbs(
                 rung=6,
             )
 
-        # Phase 2 — run backend; stage diff apply confirm when a patch is returned.
-        answer = codex.run(seeded_prompt)
+        # Phase 2 — run pluggable brain; stage diff apply confirm when a patch returns.
+        brain = intent.brain or intent.slots.get("brain")
+        brain_name = str(brain) if brain else None
+        try:
+            answer = runner.run(seeded_prompt, brain=brain_name)
+        except TypeError:
+            answer = runner.run(seeded_prompt)
         window = get_result_window() if get_result_window is not None else None
         if window is not None and hasattr(window, "show"):
             window.show(answer)
@@ -755,7 +759,8 @@ def build_core_verbs(
                     materialized=apply_argv,
                 ),
             )
-        return Result(status=Status.OK, summary=final, detail=final, rung=6)
+        summary = final if len(final) <= 80 else final[:77] + "..."
+        return Result(status=Status.OK, summary=summary, detail=final, rung=6)
 
     return (
         Verb(
@@ -920,7 +925,10 @@ def build_core_verbs(
         Verb(
             name="agent.task",
             title="Run an agent task",
-            slots={"prompt": SlotSpec(type="str", required=True)},
+            slots={
+                "prompt": SlotSpec(type="str", required=True),
+                "brain": SlotSpec(type="str", required=False),
+            },
             rung=6,
             risk=RiskClass.R2,
             requires=frozenset(),
