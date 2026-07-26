@@ -24,6 +24,7 @@ from vaani.known_folders import canonical_folder, resolve_known_folder
 from vaani.platform.protocol import PlatformId
 from vaani.sites import PUBLIC_SITES
 from vaani.verbs.packs.procs import register_procs_pack
+from vaani.verbs.packs.project import register_project_pack
 from vaani.verbs.registry import Registry
 
 # Exact allowlist from the former Controller._browser_intent (plus natural variants).
@@ -1064,6 +1065,10 @@ def build_core_registry(
     get_system: Callable[[], Any | None] | None = None,
     get_delivery: Callable[[], Any | None] | None = None,
     get_platform: Callable[[], PlatformId] | None = None,
+    get_supervisor: Callable[[], Any | None] | None = None,
+    get_terminal: Callable[[], Any | None] | None = None,
+    get_cancel: Callable[[], Any | None] | None = None,
+    run_command: Callable[..., Any] | None = None,
     quit_app_fn: Callable[[str, PlatformId], Result] | None = None,
     open_private_fn: Callable[..., str] | None = None,
     reveal_fn: Callable[[Path, PlatformId], Result] | None = None,
@@ -1073,7 +1078,7 @@ def build_core_registry(
     popen: Popen | None = None,
     patterns: Sequence[Pattern] | None = None,
 ) -> tuple[Registry, tuple[Pattern, ...]]:
-    """Register core + procs verbs and return ``(registry, patterns)``.
+    """Register core + procs + project verbs and return ``(registry, patterns)``.
 
     ``session.undo`` is registered by the assembly layer (controller/CLI) via
     ``policy.undo.register_undo`` so L3 never imports L4.
@@ -1106,5 +1111,15 @@ def build_core_registry(
         get_system=get_system,
         get_platform=get_platform,
     )
+    project = register_project_pack(
+        registry,
+        get_supervisor=get_supervisor,
+        get_system=get_system,
+        get_terminal=get_terminal,
+        get_platform=get_platform,
+        get_cancel=get_cancel,
+        run_fn=run_command,
+        popen=popen,
+    )
     base = tuple(patterns) if patterns is not None else core_patterns()
-    return registry, base + procs
+    return registry, base + procs + project

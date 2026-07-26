@@ -54,8 +54,27 @@ class Router:
         # ("how do I empty the trash" → "empty the trash").
         match_source = strip_interrogative_lead(raw) if interrogative else raw
         utterance = normalize(match_source, lexicon=self.lexicon)
+        full_norm = normalize(raw, lexicon=self.lexicon)
         enabled = {verb.name for verb in self.registry.enabled(platform)}
         mods = frozenset(modifiers)
+
+        # High-priority grammar (≥50) wins before app/site resolvers and before
+        # interrogative stripping — so "open this in Cursor" / "what's running"
+        # hit project/editor/job verbs instead of app.open or agent.task.
+        early = match(full_norm, self.patterns, lexicon=self.lexicon)
+        if early is not None:
+            verb_name, slots, priority = early
+            if priority >= 50 and verb_name in enabled:
+                verb = self.registry.get(verb_name)
+                rung = verb.rung if verb is not None else 1
+                return self._intent(
+                    verb_name,
+                    dict(slots),
+                    rung=rung,
+                    utterance=full_norm,
+                    raw=raw,
+                    modifiers=mods,
+                )
 
         # Rung 1 — today's resolver order (app before site) preserves §4.2.
         if "app.open" in enabled and self.resolve_app is not None:

@@ -217,6 +217,39 @@ def materialize_argv(
     if verb_name == "session.undo":
         return ("session.undo",)
 
+    if verb_name in {
+        "project.dev.start",
+        "project.dev.stop",
+        "project.dev.restart",
+        "project.test.run",
+        "project.build",
+        "project.typecheck",
+        "project.deps.install",
+    }:
+        return _fallback_argv(verb_name, slots)
+
+    if verb_name == "job.list":
+        return ("job.list",)
+
+    if verb_name == "job.logs":
+        key = str(slots.get("key") or "project.dev")
+        return ("job.logs", key)
+
+    if verb_name == "app.terminal.open":
+        if platform is PlatformId.MACOS:
+            return ("open", "-a", "Terminal", "${workspace}")
+        if platform is PlatformId.WINDOWS:
+            return ("wt", "-d", "${workspace}")
+        return ("gnome-terminal", "--working-directory", "${workspace}")
+
+    if verb_name == "editor.open":
+        editor = str(slots.get("editor") or "cursor")
+        path = str(slots.get("path") or "${workspace}")
+        line = slots.get("line")
+        if line is not None:
+            return (editor, "-g", f"{path}:{line}")
+        return (editor, path)
+
     return None
 
 

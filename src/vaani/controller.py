@@ -30,8 +30,10 @@ from .indicator_protocol import (
     write_phase,
 )
 from .session_loop import SessionLoop
+from .config import Settings
 from .context import build_context
 from .exec.runner import run as exec_run
+from .exec.supervisor import Supervisor
 from .intent.interrogative import refuse_interrogative, should_refuse_interrogative
 from .intent.router import Router
 from .intent.schema import Context, Intent, Result, Status
@@ -67,6 +69,9 @@ class Controller:
                  browser_launcher: Any | None = None,
                  app_launcher: Any | None = None,
                  system: Any | None = None,
+                 terminal: Any | None = None,
+                 supervisor: Any | None = None,
+                 settings: Any | None = None,
                  vocab_path: str | os.PathLike[str] | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
@@ -74,6 +79,27 @@ class Controller:
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
         self.system = system
+        self.terminal = terminal
+        if supervisor is not None:
+            self.supervisor = supervisor
+        else:
+            resolved_settings = settings
+            if resolved_settings is None:
+                try:
+                    resolved_settings = Settings.from_home()
+                    resolved_settings.prepare()
+                except Exception:
+                    resolved_settings = None
+            if resolved_settings is not None and all(
+                hasattr(resolved_settings, attr)
+                for attr in ("jobs_path", "log_dir", "data_dir")
+            ):
+                try:
+                    self.supervisor = Supervisor(resolved_settings)
+                except Exception:
+                    self.supervisor = None
+            else:
+                self.supervisor = None
         self.amplitude_path = str(
             amplitude_path
             or os.environ.get("VAANI_AMPLITUDE_PATH")
@@ -117,6 +143,10 @@ class Controller:
             get_system=lambda: self.system,
             get_delivery=lambda: self.delivery,
             get_platform=detect_os,
+            get_supervisor=lambda: self.supervisor,
+            get_terminal=lambda: self.terminal,
+            get_cancel=lambda: self._cancel,
+            run_command=exec_run,
         )
         patterns = patterns + register_undo(self.registry, self.undo)
         self.router = Router(
