@@ -104,10 +104,12 @@ def test_build_windows_optional_surfaces_default_none(tmp_path: Path, monkeypatc
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     from vaani.config import Settings
     from vaani.platform.windows.runtime import build_windows
+    from vaani.platform.windows.system import WindowsSystemControl
 
     bundle = build_windows(Settings.from_home(tmp_path, platform="windows"))
     assert bundle.id is PlatformId.WINDOWS
-    assert bundle.system is None
+    # T1.2 windows: system is wired; other optional surfaces stay absent.
+    assert isinstance(bundle.system, WindowsSystemControl)
     assert bundle.window is None
     assert bundle.input is None
     assert bundle.terminal is None
