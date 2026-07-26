@@ -226,6 +226,7 @@ def test_build_macos_returns_macos_bundle(tmp_path, monkeypatch):
     assert bundle.delivery is not None
     assert bundle.target is not None
     assert bundle.feedback is not None
+    assert bundle.system is not None
     assert callable(bundle.run)
 
 

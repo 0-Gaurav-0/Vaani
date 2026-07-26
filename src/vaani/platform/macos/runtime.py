@@ -18,6 +18,7 @@ from .browser import MacBrowserLauncher
 from .delivery import MacClipboardDelivery
 from .feedback import MacFeedback
 from .hotkeys import HotkeyService
+from .system import MacSystemControl
 from .target import MacTargetProbe
 
 
@@ -39,6 +40,7 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
         settings.audio_dir, amplitude_path=settings.amplitude_path
     )
     hotkeys = HotkeyService(lambda _mode: None)
+    system = MacSystemControl()
     return PlatformBundle(
         id=PlatformId.MACOS,
         settings=settings,
@@ -51,6 +53,7 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
         feedback=feedback,
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_macos(settings),
+        system=system,
     )
 
 
@@ -73,6 +76,7 @@ def run_macos(settings: Settings) -> int:
 
     target = MacTargetProbe()
     delivery = MacClipboardDelivery(target=target)
+    system = MacSystemControl()
     bundle = PlatformBundle(
         id=PlatformId.MACOS,
         settings=settings,
@@ -91,6 +95,7 @@ def run_macos(settings: Settings) -> int:
         ),
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: 0,
+        system=system,
     )
     assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
     controller = assembly.controller
