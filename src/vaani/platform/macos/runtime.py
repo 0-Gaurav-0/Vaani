@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import threading
 
 from ...codex import CodexRunner, ResultWindow
@@ -90,12 +91,17 @@ def run_macos(settings: Settings) -> int:
     hotkeys = HotkeyService(
         controller.handle_hotkey,
         on_cancel=controller.cancel,
+        logger=logger,
     )
     controller.hotkeys = hotkeys
 
     try:
         from .trust import python_paths
 
+        log_path = settings.log_dir / "vaani.log"
+        print(f"[vaani] log file: {log_path}", flush=True)
+        print(f"[vaani] debug={'on' if settings.debug else 'off'} (use --debug)", flush=True)
+        logger.info("event=startup_macos log=%s debug=%s", log_path, settings.debug)
         logger.info("hotkey interpreter paths: %s", ", ".join(python_paths()))
         hotkeys.register()
         logger.info(
@@ -105,14 +111,17 @@ def run_macos(settings: Settings) -> int:
         )
         signal.signal(signal.SIGINT, request_shutdown)
         signal.signal(signal.SIGTERM, request_shutdown)
-        while not controller._shutdown:
-            shutdown_event.wait(timeout=0.5)
+        # Carbon hotkey events must be pumped on the main thread.
+        while not controller._shutdown and not shutdown_event.is_set():
+            hotkeys.pump(0.25)
     except KeyboardInterrupt:
         request_shutdown()
     except Exception as exc:
-        logger.error("runtime failure category=shortcut detail=%s", type(exc).__name__)
+        logger.exception("runtime failure category=shortcut detail=%s", type(exc).__name__)
+        print(f"[vaani] runtime failure: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         request_shutdown()
         return 1
     finally:
         hotkeys.unregister()
+        logger.info("event=shutdown_macos")
     return 0

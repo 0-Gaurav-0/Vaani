@@ -83,6 +83,33 @@ Defaults avoid Spotlight (⌘Space) and Input Sources (⌃Space):
 `--record` working only proves mic + Groq. Global hotkeys need `python -m vaani`
 left running.
 
+### Debug hotkeys
+
+```bash
+python -m vaani --debug
+# or: VAANI_DEBUG=1 python -m vaani
+```
+
+On start, note:
+
+- `[vaani] log file: ~/Library/Application Support/Vaani/logs/vaani.log`
+- `[vaani] registered Control+Option+V` (and the other chords)
+
+When you press a chord you should see:
+
+```text
+[vaani] hotkey pressed: Control+Option+V (smart)
+event=hotkey_pressed ...
+event=recording ...
+```
+
+If registration lines appear but **no** `hotkey pressed` line, the OS is not
+delivering the shortcut (conflict / wrong modifiers). Tail the log:
+
+```bash
+tail -f "$HOME/Library/Application Support/Vaani/logs/vaani.log"
+```
+
 ## Data paths
 
 | Kind | Location |

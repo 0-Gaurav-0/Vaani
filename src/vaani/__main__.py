@@ -1,3 +1,4 @@
+import os
 import sys
 
 from .config import Settings
@@ -50,7 +51,8 @@ def main() -> int:
     load_env_file()
     if "--record" in sys.argv[1:]:
         return manual_record()
-    settings = Settings.from_home()
+    debug = "--debug" in sys.argv[1:] or os.environ.get("VAANI_DEBUG", "").strip() in {"1", "true", "yes"}
+    settings = Settings.from_home(debug=debug)
     settings.prepare()
     try:
         detect_os()
