@@ -13,8 +13,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-macos = ["sounddevice", "pyperclip", "pynput"]
-windows = ["sounddevice", "pyperclip", "pynput"]
+macos = ["sounddevice", "numpy", "pyperclip", "pynput"]
+windows = ["sounddevice", "numpy", "pyperclip", "pynput"]
 linux = ["python-xlib"]
 
 [project.scripts]

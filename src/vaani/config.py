@@ -94,9 +94,16 @@ class Settings:
         try:
             for directory in (self.data_dir, self.cache_dir, self.config_dir, self.log_dir, self.audio_dir):
                 directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-                directory.chmod(0o700)
+                try:
+                    directory.chmod(0o700)
+                except OSError:
+                    # macOS Application Support / TCC can refuse chmod; mkdir is enough.
+                    pass
             if self.history_db.exists():
-                self.history_db.chmod(0o600)
+                try:
+                    self.history_db.chmod(0o600)
+                except OSError:
+                    pass
         finally:
             os.umask(old)
 
