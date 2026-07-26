@@ -69,12 +69,13 @@ def test_build_linux_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     from vaani.config import Settings
     from vaani.platform.linux.runtime import build_linux
     from vaani.platform.linux.system import LinuxSystemControl
+    from vaani.platform.linux.window import LinuxWindowControl
 
     bundle = build_linux(Settings.from_home(tmp_path, platform="linux"))
     assert bundle.id is PlatformId.LINUX
-    # T1.2 linux half wires SystemControl; other optional surfaces stay None.
+    # T1.2/T5.1: system + window wired; later surfaces stay None.
     assert isinstance(bundle.system, LinuxSystemControl)
-    assert bundle.window is None
+    assert isinstance(bundle.window, LinuxWindowControl)
     assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None
@@ -84,6 +85,7 @@ def test_build_macos_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     from vaani.config import Settings
     from vaani.platform.macos.runtime import build_macos
     from vaani.platform.macos.system import MacSystemControl
+    from vaani.platform.macos.window import MacWindowControl
 
     monkeypatch.setattr(
         "vaani.platform.macos.runtime.SecretServiceKeyStore",
@@ -91,9 +93,9 @@ def test_build_macos_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     )
     bundle = build_macos(Settings.from_home(home=tmp_path))
     assert bundle.id is PlatformId.MACOS
-    # T1.2 macOS: system is wired; other optional surfaces stay absent.
+    # T1.2/T5.1: system + window wired; later surfaces stay absent.
     assert isinstance(bundle.system, MacSystemControl)
-    assert bundle.window is None
+    assert isinstance(bundle.window, MacWindowControl)
     assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None
@@ -105,12 +107,13 @@ def test_build_windows_optional_surfaces_default_none(tmp_path: Path, monkeypatc
     from vaani.config import Settings
     from vaani.platform.windows.runtime import build_windows
     from vaani.platform.windows.system import WindowsSystemControl
+    from vaani.platform.windows.window import WindowsWindowControl
 
     bundle = build_windows(Settings.from_home(tmp_path, platform="windows"))
     assert bundle.id is PlatformId.WINDOWS
-    # T1.2 windows: system is wired; other optional surfaces stay absent.
+    # T1.2/T5.1: system + window wired; later surfaces stay absent.
     assert isinstance(bundle.system, WindowsSystemControl)
-    assert bundle.window is None
+    assert isinstance(bundle.window, WindowsWindowControl)
     assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None

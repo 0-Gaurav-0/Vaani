@@ -19,6 +19,7 @@ from .apps import LinuxAppLauncher
 from .browser import LinuxBrowserLauncher
 from .feedback import LinuxFeedback
 from .system import LinuxSystemControl
+from .window import LinuxWindowControl
 
 
 def _reap_orphan_indicators() -> None:
@@ -63,6 +64,7 @@ def build_linux(settings: Settings | None = None) -> PlatformBundle:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_linux(settings),
         system=LinuxSystemControl(),
+        window=LinuxWindowControl(),
     )
 
 
@@ -129,6 +131,7 @@ def run_linux(settings: Settings) -> int:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: 0,
         system=LinuxSystemControl(),
+        window=LinuxWindowControl(),
     )
     assembly = assemble(bundle, delivery=delivery, target=probe, logger=logger)
     controller = assembly.controller

@@ -1,4 +1,4 @@
-"""Installable verb packs. ``core``/``procs``/``project`` are always on."""
+"""Installable verb packs. ``core``/``procs``/``project``/``window`` are always on."""
 
 from vaani.verbs.packs.docker import DOCKER_VERB_NAMES
 from vaani.verbs.packs.forge import FORGE_VERB_NAMES
@@ -16,6 +16,7 @@ from vaani.verbs.packs.registry import (
     missing_binary_reason,
     register_stub_packs,
 )
+from vaani.verbs.packs.window import WINDOW_VERB_NAMES
 
 __all__ = [
     "ALWAYS_ON_PACKS",
@@ -26,6 +27,7 @@ __all__ = [
     "PKG_VERB_NAMES",
     "PROCS_VERB_NAMES",
     "PROJECT_VERB_NAMES",
+    "WINDOW_VERB_NAMES",
     "PackDescriptor",
     "PackError",
     "PackPrerequisiteError",

@@ -23,6 +23,7 @@ from vaani.verbs.packs.git import GIT_VERB_NAMES
 from vaani.verbs.packs.pkg import PKG_VERB_NAMES
 from vaani.verbs.packs.procs import PROCS_VERB_NAMES
 from vaani.verbs.packs.project import PROJECT_VERB_NAMES
+from vaani.verbs.packs.window import WINDOW_VERB_NAMES
 from vaani.verbs.registry import Registry
 
 
@@ -158,6 +159,7 @@ def test_caps_completeness_json(capsys: pytest.CaptureFixture[str], tmp_path) ->
         CORE_VERB_NAMES
         | PROCS_VERB_NAMES
         | PROJECT_VERB_NAMES
+        | WINDOW_VERB_NAMES
         | PKG_VERB_NAMES
         | DOCKER_VERB_NAMES
         | GIT_VERB_NAMES

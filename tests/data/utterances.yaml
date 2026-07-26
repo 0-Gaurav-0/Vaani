@@ -570,3 +570,29 @@
   verb: forge.auth.login
   rung: 4
   risk: R1
+
+# T5.1 window pack (UI-WIN-01/02/03, append-only)
+- utterance: "focus Chrome"
+  verb: window.focus
+  rung: 4
+  risk: R0
+
+- utterance: "focus the terminal"
+  verb: window.focus
+  rung: 4
+  risk: R0
+
+- utterance: "split the window left"
+  verb: window.tile
+  rung: 4
+  risk: R0
+
+- utterance: "hide all other windows"
+  verb: window.hide_others
+  rung: 4
+  risk: R0
+
+- utterance: "show desktop"
+  verb: window.hide_others
+  rung: 4
+  risk: R0

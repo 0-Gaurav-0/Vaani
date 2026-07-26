@@ -22,6 +22,7 @@ from .feedback import WindowsFeedback
 from .hotkeys import WindowsHotkeyService
 from .system import WindowsSystemControl
 from .target import WindowsTargetProbe
+from .window import WindowsWindowControl
 
 
 def build_windows(settings: Settings | None = None) -> PlatformBundle:
@@ -49,6 +50,7 @@ def build_windows(settings: Settings | None = None) -> PlatformBundle:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_windows(settings),
         system=WindowsSystemControl(),
+        window=WindowsWindowControl(),
     )
 
 
@@ -126,6 +128,7 @@ def run_windows(settings: Settings) -> int:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: 0,
         system=WindowsSystemControl(),
+        window=WindowsWindowControl(),
     )
     assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
     controller = assembly.controller

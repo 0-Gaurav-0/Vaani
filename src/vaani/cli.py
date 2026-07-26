@@ -188,6 +188,20 @@ def _system_for(platform: PlatformId) -> Any:
     return LinuxSystemControl()
 
 
+def _window_for(platform: PlatformId) -> Any:
+    if platform is PlatformId.MACOS:
+        from vaani.platform.macos.window import MacWindowControl
+
+        return MacWindowControl()
+    if platform is PlatformId.WINDOWS:
+        from vaani.platform.windows.window import WindowsWindowControl
+
+        return WindowsWindowControl()
+    from vaani.platform.linux.window import LinuxWindowControl
+
+    return LinuxWindowControl()
+
+
 def _delivery_for(platform: PlatformId) -> Any | None:
     """Host delivery when the requested platform matches this machine."""
     try:
@@ -218,6 +232,7 @@ def build_registry(
     resolve_app_fn, launch_app_fn = _resolve_launch(plat)
     open_browser_fn = _open_browser_for(plat)
     system = _system_for(plat)
+    window = _window_for(plat)
     delivery = _delivery_for(plat)
     supervisor: Supervisor | None = None
     settings: Settings | None = None
@@ -234,6 +249,7 @@ def build_registry(
         resolve_site_fn=resolve_site,
         open_browser_fn=open_browser_fn,
         get_system=lambda: system,
+        get_window=lambda: window,
         get_delivery=lambda: delivery,
         get_platform=lambda: plat,
         get_supervisor=lambda: supervisor,

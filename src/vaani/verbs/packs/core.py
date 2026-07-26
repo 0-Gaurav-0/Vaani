@@ -25,6 +25,7 @@ from vaani.platform.protocol import PlatformId
 from vaani.sites import PUBLIC_SITES
 from vaani.verbs.packs.procs import register_procs_pack
 from vaani.verbs.packs.project import register_project_pack
+from vaani.verbs.packs.window import register_window_pack
 from vaani.verbs.registry import Registry
 
 # Exact allowlist from the former Controller._browser_intent (plus natural variants).
@@ -1063,6 +1064,7 @@ def build_core_registry(
     get_codex: Callable[[], Any] | None = None,
     get_result_window: Callable[[], Any] | None = None,
     get_system: Callable[[], Any | None] | None = None,
+    get_window: Callable[[], Any | None] | None = None,
     get_delivery: Callable[[], Any | None] | None = None,
     get_platform: Callable[[], PlatformId] | None = None,
     get_supervisor: Callable[[], Any | None] | None = None,
@@ -1078,7 +1080,7 @@ def build_core_registry(
     popen: Popen | None = None,
     patterns: Sequence[Pattern] | None = None,
 ) -> tuple[Registry, tuple[Pattern, ...]]:
-    """Register core + procs + project verbs and return ``(registry, patterns)``.
+    """Register core + procs + project + window verbs and return ``(registry, patterns)``.
 
     ``session.undo`` is registered by the assembly layer (controller/CLI) via
     ``policy.undo.register_undo`` so L3 never imports L4.
@@ -1121,5 +1123,6 @@ def build_core_registry(
         run_fn=run_command,
         popen=popen,
     )
+    window = register_window_pack(registry, get_window=get_window)
     base = tuple(patterns) if patterns is not None else core_patterns()
-    return registry, base + procs + project
+    return registry, base + procs + project + window
