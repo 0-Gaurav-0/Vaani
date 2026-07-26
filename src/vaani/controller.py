@@ -21,6 +21,10 @@ from .apps import launch_app, resolve_app
 from .sites import resolve_site
 from .indicator_protocol import clear_command, read_command
 from .session_loop import SessionLoop
+from .intent.router import Router
+from .intent.schema import Context, Status
+from .platform import detect_os
+from .verbs.packs.core import browser_intent, build_core_registry
 
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     import re
@@ -48,7 +52,7 @@ class Controller:
                  app_launcher: Any | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
-        self.codex, self.result_window = codex, result_window
+        self._codex, self.result_window = codex, result_window
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
         self.amplitude_path = str(
@@ -76,6 +80,34 @@ class Controller:
         self._session.add("indicator_control", self._poll_indicator_control)
         self._session.add("amplitude", self._write_amplitude)
         self._session.start()
+        self.registry, patterns = build_core_registry(
+            resolve_app_fn=lambda text: resolve_app(text),
+            launch_app_fn=lambda target: launch_app(target),
+            resolve_site_fn=lambda text: resolve_site(text),
+            open_browser_fn=lambda **kwargs: Controller._open_browser(**kwargs),
+            get_app_launcher=lambda: self.app_launcher,
+            get_browser_launcher=lambda: self.browser_launcher,
+            get_codex=lambda: self.codex,
+            get_result_window=lambda: self.result_window,
+        )
+        self.router = Router(
+            self.registry,
+            patterns,
+            resolve_app=lambda text: (
+                self.app_launcher.resolve(text)
+                if self.app_launcher is not None
+                else resolve_app(text)
+            ),
+            resolve_site=lambda text: resolve_site(text),
+        )
+
+    @property
+    def codex(self) -> Any:
+        return self._codex
+
+    @codex.setter
+    def codex(self, value: Any) -> None:
+        self._codex = value
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))
@@ -249,61 +281,7 @@ class Controller:
                 final = answer(question, key, cancel=self._cancel).text
                 history_mode = "answer"
             if self.mode == "assistant":
-                app = (
-                    self.app_launcher.resolve(raw)
-                    if self.app_launcher is not None
-                    else resolve_app(raw)
-                )
-                if app:
-                    answer = (
-                        self.app_launcher.launch(app)
-                        if self.app_launcher is not None
-                        else launch_app(app)
-                    )
-                    if self.result_window is not None and hasattr(self.result_window, "show_text"):
-                        self.result_window.show_text(answer)
-                    with self._lock:
-                        if self._cancel.is_set() or token != self._token: return
-                        self.history.insert(raw_text=raw, final_text=answer, mode="assistant",
-                                            delivery_status="displayed", cleanup_status="app_action",
-                                            duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000))
-                        self.state = AppState.IDLE; self._emit("assistant_complete"); self._feedback("success")
-                    return
-                site = resolve_site(raw)
-                browser = self._browser_intent(raw)
-                if site or browser:
-                    url = site.url if site else "about:blank"
-                    requested = site.browser if site else ("chrome" if "chrome" in raw.casefold() else "brave")
-                    prefer = "chrome" if requested == "chrome" else "brave"
-                    if self.browser_launcher is not None:
-                        answer = self.browser_launcher.open(url, prefer=prefer)
-                    else:
-                        answer = self._open_browser(prefer_brave=prefer != "chrome", url=url)
-                    if site and answer.startswith("Opened"):
-                        answer = f"Opened {site.name}."
-                    if self.result_window is not None and hasattr(self.result_window, "show_text"):
-                        self.result_window.show_text(answer)
-                    with self._lock:
-                        if self._cancel.is_set() or token != self._token: return
-                        self.history.insert(raw_text=raw, final_text=answer, mode="assistant",
-                                            delivery_status="displayed", cleanup_status="browser_action",
-                                            duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000))
-                        self.state = AppState.IDLE; self._emit("assistant_complete"); self._feedback("success")
-                    return
-                if self.codex is None:
-                    raise RuntimeError("assistant runner unavailable")
-                answer = self.codex.run(raw)
-                if self.result_window is not None and hasattr(self.result_window, "show"):
-                    self.result_window.show(answer)
-                if getattr(answer, "cancelled", False) or getattr(answer, "timed_out", False):
-                    raise RuntimeError("assistant request cancelled or timed out")
-                final = answer.stdout
-                with self._lock:
-                    if self._cancel.is_set() or token != self._token: return
-                    self.history.insert(raw_text=raw, final_text=final, mode="assistant",
-                                        delivery_status="displayed", cleanup_status="skipped",
-                                        duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000))
-                    self.state = AppState.IDLE; self._emit("assistant_complete"); self._feedback("success")
+                self._dispatch(raw, audio, token)
                 return
             if self.mode != DictationMode.LITERAL.value:
                 cleaned = self.groq.cleanup(raw, key, cancel=self._cancel); final = cleaned.text
@@ -343,31 +321,54 @@ class Controller:
                 pass
             self._fail(exc, getattr(exc, "category", None))
 
+    def _dispatch(self, raw: str, audio: Any, token: int) -> None:
+        """Route assistant speech through the verb registry and execute the hit."""
+        platform = detect_os()
+        intent = self.router.route(raw, platform=platform)
+        if intent is None:
+            raise RuntimeError("assistant runner unavailable")
+        verb = self.registry.get(intent.verb)
+        if verb is None:
+            raise RuntimeError("assistant runner unavailable")
+        context = Context(
+            platform=platform,
+            workspace=None,
+            workspace_source="home",
+            repo=None,
+            project=None,
+            focus=None,
+            screen=None,
+            session=None,
+        )
+        # Policy engine lands in a later slice; S0 always proceeds.
+        result = verb.handler(intent, context)
+        if result.status is Status.FAILED:
+            raise RuntimeError(result.detail or result.summary or "assistant failed")
+        final = result.detail or result.summary
+        cleanup = {
+            "app.open": "app_action",
+            "site.open": "browser_action",
+            "browser.open": "browser_action",
+        }.get(intent.verb, "skipped")
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return
+            self.history.insert(
+                raw_text=raw,
+                final_text=final,
+                mode="assistant",
+                delivery_status="displayed",
+                cleanup_status=cleanup,
+                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+            )
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
+            self._feedback("success")
+
     @staticmethod
     def _browser_intent(text: str) -> bool:
-        normalized = " ".join(text.casefold().strip().split())
-        # Exact allowlist only (no free-form suffixes like "and run ls").
-        # Include natural spoken variants ("open a browser").
-        direct = {
-            "open chrome",
-            "open google chrome",
-            "open browser",
-            "open a browser",
-            "open the browser",
-            "launch chrome",
-            "launch browser",
-            "launch a browser",
-            "launch the browser",
-            "open brave",
-            "launch brave",
-            "open brave browser",
-            "launch brave browser",
-            "open a chrome",
-            "open the chrome",
-            "open a brave",
-            "open the brave",
-        }
-        return normalized in direct
+        """Compat shim for existing unit tests — routing uses the grammar allowlist."""
+        return browser_intent(text)
 
     @staticmethod
     def _open_browser(*, prefer_brave: bool = True, url: str = "about:blank") -> str:

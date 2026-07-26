@@ -1,0 +1,152 @@
+# Seed corpus for T0.4 — today's allowlists + must-NOT-match negatives.
+# Append-only: later slices add rows without rewriting these.
+#
+# Fields:
+#   utterance: spoken text
+#   verb: expected verb name, or null when no grammar verb should win
+#   rung: expected ladder rung (omit when verb is null)
+#   risk: RiskClass value (omit when verb is null)
+#   not_verb: verb that must not match (negative rows)
+
+- utterance: "open Claude"
+  verb: app.open
+  rung: 1
+  risk: R0
+
+- utterance: "Open Claude website"
+  verb: site.open
+  rung: 1
+  risk: R0
+
+- utterance: "Launch the Terminal"
+  verb: app.open
+  rung: 1
+  risk: R0
+
+- utterance: "Open Cursor"
+  verb: app.open
+  rung: 1
+  risk: R0
+
+- utterance: "Open Gmail"
+  verb: site.open
+  rung: 1
+  risk: R0
+
+- utterance: "go to Stripe dashboard"
+  verb: site.open
+  rung: 1
+  risk: R0
+
+- utterance: "Open ChatGPT"
+  verb: site.open
+  rung: 1
+  risk: R0
+
+- utterance: "open chrome"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open google chrome"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open a browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open the browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "launch chrome"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "launch browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "launch a browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "launch the browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open brave"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "launch brave"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open brave browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "launch brave browser"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open a chrome"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open the chrome"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open a brave"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "open the brave"
+  verb: browser.open
+  rung: 1
+  risk: R0
+
+- utterance: "Open Claude in Brave"
+  verb: site.open
+  rung: 1
+  risk: R0
+
+- utterance: "fix the failing test"
+  verb: agent.task
+  rung: 6
+  risk: R2
+
+# Negatives — must not match the named verb
+- utterance: "open chrome and run ls"
+  verb: agent.task
+  rung: 6
+  risk: R2
+  not_verb: browser.open
+
+- utterance: "I use Claude"
+  verb: agent.task
+  rung: 6
+  risk: R2
+  not_verb: app.open
