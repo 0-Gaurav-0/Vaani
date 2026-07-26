@@ -30,7 +30,8 @@ class CodexRunner:
     def cancel(self):
         self._cancel.set()
         _stop_process(self._proc, forceful=False)
-    def run(self, prompt: str, *, timeout: float | None = None) -> CodexResult:
+    def run(self, prompt: str, *, timeout: float | None = None, **_kwargs: object) -> CodexResult:
+        # ``brain=`` / other AgentRunner kwargs are ignored for duck-compat.
         self._cancel.clear()
         env = {k:v for k,v in os.environ.items() if k not in {"OPENAI_API_KEY", "GROQ_API_KEY"}}
         try:

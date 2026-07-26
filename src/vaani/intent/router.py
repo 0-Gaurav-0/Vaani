@@ -14,6 +14,7 @@ from vaani.intent.interrogative import (
 from vaani.intent.lexicon import Lexicon
 from vaani.intent.normalize import detect_modifiers, normalize
 from vaani.intent.schema import Context, Intent
+from vaani.intent.wake import parse_agent_wake
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
 
@@ -100,6 +101,25 @@ class Router:
         full_norm = normalize(raw, lexicon=self.lexicon)
         enabled = {verb.name for verb in self.registry.enabled(platform)}
         mods = frozenset(modifiers)
+
+        # Wake phrase forces rung 6 and skips the ladder (spec §12.5).
+        wake = parse_agent_wake(raw)
+        if wake is not None and "agent.task" in enabled:
+            prompt, brain = wake
+            slots: dict[str, Any] = {"prompt": prompt or raw}
+            if brain:
+                slots["brain"] = brain
+            return self._intent(
+                "agent.task",
+                slots,
+                rung=6,
+                utterance=normalize(prompt, lexicon=self.lexicon) if prompt else utterance,
+                raw=raw,
+                confidence=1.0,
+                source="wake",
+                modifiers=mods,
+                brain=brain,
+            )
 
         # High-priority grammar (≥50) wins before app/site resolvers and before
         # interrogative stripping — so "open this in Cursor" / "what's running"
@@ -203,6 +223,7 @@ class Router:
         confidence: float = 1.0,
         source: str = "grammar",
         modifiers: frozenset[str] = frozenset(),
+        brain: str | None = None,
     ) -> Intent:
         return Intent(
             verb=verb,
@@ -214,5 +235,5 @@ class Router:
             utterance=utterance,
             raw_utterance=raw,
             modifiers=modifiers,
-            brain=None,
+            brain=brain,
         )

@@ -634,8 +634,8 @@ def build_core_verbs(
         return _open_dir(path, platform, runner=run, popen=spawn)
 
     def handle_agent_task(intent: Intent, _context: Context) -> Result:
-        codex = get_codex() if get_codex is not None else None
-        if codex is None:
+        runner = get_codex() if get_codex is not None else None
+        if runner is None:
             return Result(
                 status=Status.FAILED,
                 summary="assistant runner unavailable",
@@ -643,7 +643,12 @@ def build_core_verbs(
                 rung=6,
             )
         prompt = str(intent.slots.get("prompt") or intent.raw_utterance)
-        answer = codex.run(prompt)
+        brain = intent.brain or intent.slots.get("brain")
+        brain_name = str(brain) if brain else None
+        try:
+            answer = runner.run(prompt, brain=brain_name)
+        except TypeError:
+            answer = runner.run(prompt)
         window = get_result_window() if get_result_window is not None else None
         if window is not None and hasattr(window, "show"):
             window.show(answer)
@@ -655,7 +660,8 @@ def build_core_verbs(
                 rung=6,
             )
         final = getattr(answer, "stdout", "") or ""
-        return Result(status=Status.OK, summary=final, detail=final, rung=6)
+        summary = final if len(final) <= 80 else final[:77] + "..."
+        return Result(status=Status.OK, summary=summary, detail=final, rung=6)
 
     return (
         Verb(
@@ -820,7 +826,10 @@ def build_core_verbs(
         Verb(
             name="agent.task",
             title="Run an agent task",
-            slots={"prompt": SlotSpec(type="str", required=True)},
+            slots={
+                "prompt": SlotSpec(type="str", required=True),
+                "brain": SlotSpec(type="str", required=False),
+            },
             rung=6,
             risk=RiskClass.R2,
             requires=frozenset(),
