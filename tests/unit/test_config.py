@@ -38,8 +38,16 @@ def test_platform_roots_macos_and_windows(tmp_path):
     assert mac.data_dir == tmp_path / "Library" / "Application Support" / "Vaani"
     assert mac.amplitude_path == mac.cache_dir / "amplitude"
     assert mac.indicator_control_path == mac.cache_dir / "indicator_control.json"
+    assert mac.jobs_path == mac.data_dir / "jobs.json"
+    assert mac.packs_path == mac.data_dir / "packs.json"
+    assert mac.overlay_path == mac.cache_dir / "overlay.json"
+    assert mac.vocab_path == mac.data_dir / "vocab.json"
 
     win = Settings.from_home(tmp_path, platform="win32")
     assert win.platform == "windows"
     assert win.data_dir.name == "Vaani"
     assert win.cache_dir.name == "Cache"
+    assert win.jobs_path == win.data_dir / "jobs.json"
+    assert win.packs_path == win.data_dir / "packs.json"
+    assert win.overlay_path == win.cache_dir / "overlay.json"
+    assert win.vocab_path == win.data_dir / "vocab.json"
