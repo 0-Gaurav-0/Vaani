@@ -58,12 +58,15 @@ def _parse_scalar(value: str) -> object:
 
 
 def _router(*, llm_parse=None) -> Router:
+    from vaani.policy.undo import UndoStack, register_undo
+
     registry, patterns = build_core_registry(
         resolve_app_fn=resolve_app,
         launch_app_fn=launch_app,
         resolve_site_fn=resolve_site,
         open_browser_fn=lambda **_k: "Opened browser.",
     )
+    patterns = patterns + register_undo(registry, UndoStack())
     return Router(
         registry,
         patterns,
