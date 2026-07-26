@@ -4,3 +4,7 @@ httpx
 keyring
 python-xlib
 pytest
+#
+# macOS (Darwin): do not install python-xlib. Use the packaging extra instead:
+#   uv pip install -e '.[macos]'
+# which pulls sounddevice, pyperclip, and pynput (see pyproject.toml).
