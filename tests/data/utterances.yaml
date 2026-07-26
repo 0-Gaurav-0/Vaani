@@ -317,3 +317,14 @@
   rung: 2
   risk: R2
   interrogative: true
+
+# T2.3 undo
+- utterance: "undo that"
+  verb: session.undo
+  rung: 0
+  risk: R0
+
+- utterance: "undo"
+  verb: session.undo
+  rung: 0
+  risk: R0

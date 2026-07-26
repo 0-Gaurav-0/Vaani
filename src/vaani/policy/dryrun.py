@@ -204,6 +204,9 @@ def materialize_argv(
             return (cmdlet, "-Name", "Wi-Fi", "-Confirm:$false")
         return ("nmcli", "radio", "wifi", state)
 
+    if verb_name == "session.undo":
+        return ("session.undo",)
+
     return None
 
 
