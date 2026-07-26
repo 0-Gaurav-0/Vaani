@@ -21,6 +21,7 @@ from vaani.verbs.registry import Registry
 WhichFn = Callable[[str], str | None]
 RunFn = Callable[..., Any]
 PlatformGetter = Callable[[], PlatformId]
+InputGetter = Callable[[], Any | None]
 
 
 class PackError(ValueError):
@@ -314,13 +315,15 @@ def register_stub_packs(
     *,
     run_fn: RunFn | None = None,
     get_platform: PlatformGetter | None = None,
+    get_input: Callable[[], Any | None] | None = None,
 ) -> tuple[Pattern, ...]:
-    """Register installable pack verbs (git/forge/pkg/docker).
+    """Register installable pack verbs (git/forge/pkg/docker/computer-use).
 
     Returns grammar patterns for packs that provide them. Descriptors alone
     still drive ``vaani caps`` pack rows for packs without verbs yet.
     """
     from vaani.intent.grammar import Pattern
+    from vaani.verbs.packs.computer_use import register_computer_use_pack
     from vaani.verbs.packs.docker import register_docker_pack
     from vaani.verbs.packs.forge import register_forge_pack
     from vaani.verbs.packs.git import register_git_pack
@@ -337,4 +340,11 @@ def register_stub_packs(
         )
     )
     patterns.extend(register_forge_pack(registry, run_fn=run_fn))
+    patterns.extend(
+        register_computer_use_pack(
+            registry,
+            get_input=get_input,
+            get_platform=get_platform,
+        )
+    )
     return tuple(patterns)

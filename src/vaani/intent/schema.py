@@ -71,6 +71,7 @@ class ProjectProfile:
     dev: tuple[str, ...] | None = None
     typecheck: tuple[str, ...] | None = None
     lint: tuple[str, ...] | None = None
+    format: tuple[str, ...] | None = None
     compose_file: Path | None = None
     env_files: tuple[Path, ...] = ()
 

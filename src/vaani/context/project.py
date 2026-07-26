@@ -79,7 +79,7 @@ _LOCKFILE_MANAGERS: tuple[tuple[str, str], ...] = (
 
 _MAKE_TARGET = re.compile(r"^([A-Za-z_][\w-]*)\s*:")
 
-_COMMAND_FIELDS = ("test", "build", "dev", "typecheck", "lint")
+_COMMAND_FIELDS = ("test", "build", "dev", "typecheck", "lint", "format")
 
 # Cache: resolved root → (mtime fingerprint, result)
 _cache: dict[Path, tuple[tuple[tuple[str, float | None], ...], ProjectProfile | ProfileMiss]] = {}
@@ -191,6 +191,9 @@ def _detect_uncached(root: Path) -> ProjectProfile | ProfileMiss:
     lint = _resolve_named(
         "lint", root, present, scripts, pyproject, make_targets, manager, override
     )
+    format_argv = _resolve_format(
+        root, present, scripts, pyproject, make_targets, manager, override
+    )
 
     compose_file = _compose_file(root, present, override)
     env_files = _env_files(root, present, override)
@@ -203,6 +206,7 @@ def _detect_uncached(root: Path) -> ProjectProfile | ProfileMiss:
         dev=dev,
         typecheck=typecheck,
         lint=lint,
+        format=format_argv,
         compose_file=compose_file,
         env_files=env_files,
     )
@@ -216,6 +220,7 @@ def _detect_uncached(root: Path) -> ProjectProfile | ProfileMiss:
         and dev is None
         and typecheck is None
         and lint is None
+        and format_argv is None
         and compose_file is None
         and override is None
     ):
@@ -361,6 +366,50 @@ def _resolve_named(
     return None
 
 
+def _resolve_format(
+    root: Path,
+    present: set[str],
+    scripts: dict[str, str],
+    pyproject: dict[str, Any],
+    make_targets: frozenset[str],
+    manager: str | None,
+    override: dict[str, Any] | None,
+) -> tuple[str, ...] | None:
+    """Detect a verifiable project formatter (prettier / ruff / scripts.format)."""
+    if override and override.get("format") is not None:
+        return _as_argv(override["format"])
+
+    if "package.json" in present and "format" in scripts:
+        return _js_script_argv(manager, "format")
+
+    if "package.json" in present:
+        pkg = _load_json(root / "package.json")
+        deps: dict[str, Any] = {}
+        if isinstance(pkg, dict):
+            for key in ("dependencies", "devDependencies"):
+                block = pkg.get(key)
+                if isinstance(block, dict):
+                    deps.update(block)
+        if "prettier" in deps:
+            if manager == "yarn":
+                return ("yarn", "prettier", "--write", ".")
+            if manager == "bun":
+                return ("bunx", "prettier", "--write", ".")
+            if manager == "pnpm":
+                return ("pnpm", "exec", "prettier", "--write", ".")
+            return ("npx", "prettier", "--write", ".")
+
+    tool = pyproject.get("tool") if isinstance(pyproject.get("tool"), dict) else {}
+    if isinstance(tool, dict) and "ruff" in tool:
+        return ("ruff", "format", ".")
+
+    if "format" in make_targets:
+        return ("make", "format")
+
+    _ = present
+    return None
+
+
 def _python_test_argv(pyproject: dict[str, Any]) -> tuple[str, ...] | None:
     tool = pyproject.get("tool") if isinstance(pyproject.get("tool"), dict) else {}
     if not isinstance(tool, dict):
@@ -458,7 +507,17 @@ def _load_vaani_toml(root: Path) -> dict[str, Any] | None:
     if isinstance(project, dict):
         return project
     # Flat keys at top level are also accepted.
-    keys = {"manager", "test", "build", "dev", "typecheck", "lint", "compose_file", "env_files"}
+    keys = {
+        "manager",
+        "test",
+        "build",
+        "dev",
+        "typecheck",
+        "lint",
+        "format",
+        "compose_file",
+        "env_files",
+    }
     if keys & set(data):
         return {k: data[k] for k in keys if k in data}
     return {}

@@ -18,6 +18,7 @@ from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
 from .browser import LinuxBrowserLauncher
 from .feedback import LinuxFeedback
+from .input import LinuxInputSynth
 from .system import LinuxSystemControl
 from .window import LinuxWindowControl
 
@@ -65,6 +66,7 @@ def build_linux(settings: Settings | None = None) -> PlatformBundle:
         run=lambda _controller: run_linux(settings),
         system=LinuxSystemControl(),
         window=LinuxWindowControl(),
+        input=LinuxInputSynth(),
     )
 
 
@@ -132,6 +134,7 @@ def run_linux(settings: Settings) -> int:
         run=lambda _controller: 0,
         system=LinuxSystemControl(),
         window=LinuxWindowControl(),
+        input=LinuxInputSynth(),
     )
     assembly = assemble(bundle, delivery=delivery, target=probe, logger=logger)
     controller = assembly.controller

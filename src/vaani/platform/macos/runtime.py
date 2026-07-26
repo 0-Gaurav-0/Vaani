@@ -18,6 +18,7 @@ from .browser import MacBrowserLauncher
 from .delivery import MacClipboardDelivery
 from .feedback import MacFeedback
 from .hotkeys import HotkeyService
+from .input import MacInputSynth
 from .system import MacSystemControl
 from .target import MacTargetProbe
 from .window import MacWindowControl
@@ -57,6 +58,7 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
         run=lambda _controller: run_macos(settings),
         system=system,
         window=window,
+        input=MacInputSynth(),
     )
 
 
@@ -101,6 +103,7 @@ def run_macos(settings: Settings) -> int:
         run=lambda _controller: 0,
         system=system,
         window=window,
+        input=MacInputSynth(),
     )
     assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
     controller = assembly.controller

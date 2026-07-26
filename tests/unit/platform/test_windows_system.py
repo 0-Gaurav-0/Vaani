@@ -167,9 +167,11 @@ def test_build_windows_wires_system(tmp_path: Path, monkeypatch):
     bundle = build_windows(Settings.from_home(tmp_path, platform="windows"))
     assert bundle.id is PlatformId.WINDOWS
     assert isinstance(bundle.system, WindowsSystemControl)
+    from vaani.platform.windows.input import WindowsInputSynth
+
     assert isinstance(bundle.window, WindowsWindowControl)
+    assert isinstance(bundle.input, WindowsInputSynth)
     # Remaining optional surfaces stay absent until their tasks land.
-    assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None
 

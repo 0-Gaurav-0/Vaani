@@ -202,6 +202,20 @@ def _window_for(platform: PlatformId) -> Any:
     return LinuxWindowControl()
 
 
+def _input_for(platform: PlatformId) -> Any:
+    if platform is PlatformId.MACOS:
+        from vaani.platform.macos.input import MacInputSynth
+
+        return MacInputSynth()
+    if platform is PlatformId.WINDOWS:
+        from vaani.platform.windows.input import WindowsInputSynth
+
+        return WindowsInputSynth()
+    from vaani.platform.linux.input import LinuxInputSynth
+
+    return LinuxInputSynth()
+
+
 def _delivery_for(platform: PlatformId) -> Any | None:
     """Host delivery when the requested platform matches this machine."""
     try:
@@ -256,10 +270,12 @@ def build_registry(
         run_command=exec_run,
     )
     register_undo(registry, UndoStack())
+    input_synth = _input_for(plat)
     register_stub_packs(
         registry,
         run_fn=exec_run,
         get_platform=lambda: plat,
+        get_input=lambda: input_synth,
     )
     pack_reg = packs if packs is not None else _packs_for_settings(settings)
     pack_reg.apply(registry)

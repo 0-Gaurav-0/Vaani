@@ -20,6 +20,7 @@ from .browser import WindowsBrowserLauncher
 from .delivery import WindowsDelivery
 from .feedback import WindowsFeedback
 from .hotkeys import WindowsHotkeyService
+from .input import WindowsInputSynth
 from .system import WindowsSystemControl
 from .target import WindowsTargetProbe
 from .window import WindowsWindowControl
@@ -51,6 +52,7 @@ def build_windows(settings: Settings | None = None) -> PlatformBundle:
         run=lambda _controller: run_windows(settings),
         system=WindowsSystemControl(),
         window=WindowsWindowControl(),
+        input=WindowsInputSynth(),
     )
 
 
@@ -129,6 +131,7 @@ def run_windows(settings: Settings) -> int:
         run=lambda _controller: 0,
         system=WindowsSystemControl(),
         window=WindowsWindowControl(),
+        input=WindowsInputSynth(),
     )
     assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
     controller = assembly.controller
