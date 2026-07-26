@@ -328,3 +328,85 @@
   verb: session.undo
   rung: 0
   risk: R0
+
+# T3.4 project pack — TERM-DEV / TERM-TEST / TERM-JOB / UI-EDIT / TERM-SESS
+- utterance: "start the dev server"
+  verb: project.dev.start
+  rung: 3
+  risk: R1
+
+- utterance: "stop the dev server"
+  verb: project.dev.stop
+  rung: 3
+  risk: R1
+
+- utterance: "restart the dev server"
+  verb: project.dev.restart
+  rung: 3
+  risk: R1
+
+- utterance: "run the tests"
+  verb: project.test.run
+  rung: 3
+  risk: R1
+
+- utterance: "run the unit tests only"
+  verb: project.test.run
+  rung: 3
+  risk: R1
+
+- utterance: "watch the tests"
+  verb: project.test.run
+  rung: 3
+  risk: R1
+
+- utterance: "install the dependencies"
+  verb: project.deps.install
+  rung: 3
+  risk: R1
+
+- utterance: "build the project"
+  verb: project.build
+  rung: 3
+  risk: R1
+
+- utterance: "typecheck the project"
+  verb: project.typecheck
+  rung: 3
+  risk: R1
+
+- utterance: "what's running"
+  verb: job.list
+  rung: 1
+  risk: R0
+
+- utterance: "show the dev server logs"
+  verb: job.logs
+  rung: 1
+  risk: R0
+
+- utterance: "open a terminal in this project"
+  verb: app.terminal.open
+  rung: 3
+  risk: R0
+
+- utterance: "open the file with the build error"
+  verb: editor.open
+  rung: 3
+  risk: R0
+
+- utterance: "open this folder in Cursor"
+  verb: editor.open
+  rung: 3
+  risk: R0
+
+- utterance: "open this in VS Code"
+  verb: editor.open
+  rung: 3
+  risk: R0
+
+- utterance: "Open Cursor"
+  verb: app.open
+  rung: 1
+  risk: R0
+  not_verb: editor.open

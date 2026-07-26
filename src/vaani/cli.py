@@ -12,6 +12,7 @@ from vaani.apps import resolve_app as linux_resolve_app
 from vaani.config import Settings
 from vaani.context import NullFocusProbe, build_context
 from vaani.exec.runner import run as exec_run
+from vaani.exec.supervisor import Supervisor
 from vaani.intent.schema import Context, Intent, Result, Status, Support
 from vaani.platform import UnsupportedPlatform, build_platform, detect_os
 from vaani.platform.protocol import PlatformId
@@ -204,6 +205,14 @@ def build_registry(platform: PlatformId | None = None) -> Registry:
     open_browser_fn = _open_browser_for(plat)
     system = _system_for(plat)
     delivery = _delivery_for(plat)
+    supervisor: Supervisor | None = None
+    try:
+        settings = Settings.from_home()
+        settings.prepare()
+        supervisor = Supervisor(settings)
+        supervisor.adopt_or_clear()
+    except Exception:
+        supervisor = None
     registry, _patterns = build_core_registry(
         resolve_app_fn=resolve_app_fn,
         launch_app_fn=launch_app_fn,
@@ -212,6 +221,8 @@ def build_registry(platform: PlatformId | None = None) -> Registry:
         get_system=lambda: system,
         get_delivery=lambda: delivery,
         get_platform=lambda: plat,
+        get_supervisor=lambda: supervisor,
+        run_command=exec_run,
     )
     register_undo(registry, UndoStack())
     return registry

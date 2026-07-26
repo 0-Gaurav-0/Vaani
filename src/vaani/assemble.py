@@ -7,6 +7,7 @@ from typing import Any
 
 from .codex import CodexRunner, ResultWindow
 from .controller import Controller
+from .exec.supervisor import Supervisor
 from .groq import GroqClient
 from .history import HistoryStore
 from .observability import configure_logging
@@ -49,6 +50,17 @@ def assemble(
     history = HistoryStore(settings.history_db)
     groq = GroqClient()
     store = bundle.key_store
+    supervisor = None
+    if all(
+        hasattr(settings, attr)
+        for attr in ("jobs_path", "log_dir", "data_dir")
+    ):
+        try:
+            supervisor = Supervisor(settings)
+            supervisor.adopt_or_clear()
+        except Exception:
+            resolved_logger.exception("event=supervisor_adopt_failed")
+            supervisor = None
     controller = Controller(
         recorder=bundle.recorder,
         groq=groq,
@@ -63,6 +75,9 @@ def assemble(
         browser_launcher=bundle.browser,
         app_launcher=bundle.apps,
         system=bundle.system,
+        terminal=getattr(bundle, "terminal", None),
+        supervisor=supervisor,
+        settings=settings if supervisor is not None else None,
         vocab_path=getattr(settings, "vocab_path", None),
     )
     assistant = CodexRunner()

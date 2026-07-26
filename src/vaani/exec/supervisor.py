@@ -140,6 +140,20 @@ class Supervisor:
     def status(self, key: str) -> Job | None:
         return self._refresh_job(key)
 
+    def list_jobs(self) -> tuple[Job, ...]:
+        """Refresh and return all known jobs (running and recently exited)."""
+        # Merge on-disk entries that may not be in memory yet (e.g. after restart).
+        for key, job in self._load().items():
+            if key not in self._jobs:
+                self._jobs[key] = job
+        keys = tuple(self._jobs)
+        out: list[Job] = []
+        for key in keys:
+            job = self._refresh_job(key)
+            if job is not None:
+                out.append(job)
+        return tuple(out)
+
     def logs(self, key: str, *, tail: int = 200) -> str:
         job = self._jobs.get(key)
         if job is None:
