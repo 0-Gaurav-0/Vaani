@@ -286,7 +286,6 @@ def cmd_do(
     platform: PlatformId | None = None,
     registry: Registry | None = None,
 ) -> int:
-    _ = yes  # confirm policy lands later; accepted for forward compatibility
     plat = platform if platform is not None else detect_os()
     reg = registry if registry is not None else build_registry(plat)
     verb = reg.get(verb_name)
@@ -305,6 +304,26 @@ def cmd_do(
         return 2
 
     slots: dict[str, Any] = {key: value for key, value in slot_pairs}
+    # Coerce common typed slots from CLI strings.
+    if "port" in slots:
+        try:
+            slots["port"] = int(slots["port"])
+        except (TypeError, ValueError):
+            pass
+    if "enabled" in slots:
+        slots["enabled"] = str(slots["enabled"]).casefold() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if "force" in slots:
+        slots["force"] = str(slots["force"]).casefold() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     # Handlers that resolve from utterance expect natural phrasing for app.open.
     if verb_name == "app.open" and "name" in slots:
         name = str(slots["name"])
@@ -313,6 +332,12 @@ def cmd_do(
         utterance = " ".join(
             [verb_name, *[f"{k}={slots[k]}" for k in sorted(slots)]]
         )
+    mods: set[str] = set()
+    if dry_run:
+        mods.add("dry_run")
+    if yes:
+        # Until T2.1 pill confirm lands, --yes stands in for Approve.
+        mods.add("confirmed")
     intent = Intent(
         verb=verb_name,
         slots=slots,
@@ -322,7 +347,7 @@ def cmd_do(
         mode="act",
         utterance=utterance,
         raw_utterance=utterance,
-        modifiers=frozenset({"dry_run"} if dry_run else ()),
+        modifiers=frozenset(mods),
         brain=None,
     )
     context = _make_context(plat)

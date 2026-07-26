@@ -221,3 +221,50 @@
   verb: browser.window.private
   rung: 1
   risk: R0
+
+# T2.4 procs pack — SYS-PORT / SYS-PROC / SYS-DISK / SYS-NET
+- utterance: "free port 3000"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+
+- utterance: "kill whatever is on port 8080"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+
+- utterance: "kill the thing on port three thousand"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+
+- utterance: "open localhost 3000"
+  verb: site.open
+  rung: 1
+  risk: R0
+  not_verb: system.port.free
+
+- utterance: "kill the process named node"
+  verb: system.proc.kill
+  rung: 2
+  risk: R2
+
+- utterance: "show what's using the most CPU"
+  verb: system.proc.top
+  rung: 1
+  risk: R0
+
+- utterance: "empty the trash"
+  verb: system.trash.empty
+  rung: 1
+  risk: R2
+
+- utterance: "turn off Wi-Fi"
+  verb: system.wifi.set
+  rung: 2
+  risk: R2
+
+- utterance: "turn on wifi"
+  verb: system.wifi.set
+  rung: 2
+  risk: R2

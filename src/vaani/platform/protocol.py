@@ -1,6 +1,7 @@
 """Cross-platform adapter contracts for Vaani desktop I/O."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -14,6 +15,16 @@ if TYPE_CHECKING:
     from ..delivery import DeliveryStatus
     from ..intent.schema import Result, ScreenFrame
     from ..types import AudioResult
+
+
+@dataclass(frozen=True)
+class ProcInfo:
+    """A process discovered for port/name lookups (T2.4)."""
+
+    pid: int
+    name: str
+    uid: int | None = None
+    detail: str = ""
 
 
 class PlatformId(str, Enum):
@@ -78,7 +89,7 @@ class FeedbackService(Protocol):
 
 @runtime_checkable
 class SystemControl(Protocol):
-    """OS volume / DND / lock / network / trash surfaces (T1.2)."""
+    """OS volume / DND / lock / network / trash / process surfaces (T1.2 + T2.4)."""
 
     def volume_set(self, pct: int) -> Result: ...
     def mute(self, enabled: bool) -> Result: ...
@@ -89,6 +100,16 @@ class SystemControl(Protocol):
     def dns_flush(self) -> Result: ...
     def trash_empty(self) -> Result: ...
     def local_ip(self) -> str: ...
+
+    def list_listeners(self, port: int) -> tuple[ProcInfo, ...]: ...
+    def list_named(self, name: str) -> tuple[ProcInfo, ...]: ...
+    def kill_pids(
+        self,
+        pids: Sequence[int],
+        *,
+        signal: str = "term",
+    ) -> Result: ...
+    def open_process_monitor(self) -> Result: ...
 
 
 @runtime_checkable
