@@ -1,4 +1,8 @@
-"""Global hotkeys for macOS via pynput GlobalHotKeys."""
+"""Global hotkeys for macOS via pynput GlobalHotKeys.
+
+Smart dictation is **Control+Space** (⌃Space), never Command+Space
+(⌘Space is Spotlight and must not be claimed).
+"""
 from __future__ import annotations
 
 import threading
@@ -8,11 +12,15 @@ SMART = "smart"
 LITERAL = "literal"
 ASSISTANT = "assistant"
 
-# pynput chord strings (Ctrl family matches Linux Vaani defaults).
+# pynput: <ctrl> / <ctrl_l> / <ctrl_r> = Control key.
+# Do NOT use <cmd> here — that is Command (⌘), reserved for Spotlight etc.
 _HOTKEY_MAP = {
     "<ctrl>+<space>": SMART,
+    "<ctrl_l>+<space>": SMART,
     "<ctrl>+<shift>+<space>": LITERAL,
+    "<ctrl_l>+<shift>+<space>": LITERAL,
     "<ctrl>+<alt>+<space>": ASSISTANT,
+    "<ctrl_l>+<alt>+<space>": ASSISTANT,
 }
 
 
