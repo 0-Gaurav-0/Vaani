@@ -43,6 +43,7 @@ from .policy.dryrun import attach_workspace, dispatch, materialize_argv
 from .policy.undo import UndoStack, register_undo
 from .surface.result import format_result_message, show_result
 from .verbs.packs.core import browser_intent, build_core_registry
+from .verbs.packs.registry import PackRegistry, register_stub_packs
 
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     import re
@@ -149,6 +150,16 @@ class Controller:
             run_command=exec_run,
         )
         patterns = patterns + register_undo(self.registry, self.undo)
+        register_stub_packs(self.registry)
+        packs_settings = settings
+        if packs_settings is None:
+            try:
+                packs_settings = Settings.from_home()
+                packs_settings.prepare()
+            except Exception:
+                packs_settings = None
+        if packs_settings is not None and hasattr(packs_settings, "packs_path"):
+            PackRegistry(packs_settings.packs_path).apply(self.registry)
         self.router = Router(
             self.registry,
             patterns,
