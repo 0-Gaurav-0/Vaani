@@ -33,10 +33,21 @@ _BINDINGS: tuple[tuple[int, int, str, str], ...] = (
 )
 
 _EVENT_LOOP_TIMED_OUT = -9875
+_EVENT_NOT_HANDLED = -9874
 
 
 def _fourcc(text: str) -> int:
-    return (ord(text[0]) << 24) | (ord(text[1]) << 16) | (ord(text[2]) << 8) | ord(text[3])
+    value = 0
+    for ch in text[:4].ljust(4, "\0"):
+        value = (value << 8) | ord(ch)
+    return value
+
+
+# CarbonEvents.h
+_K_EVENT_CLASS_KEYBOARD = _fourcc("keyb")
+_K_EVENT_HOT_KEY_PRESSED = 5
+_K_EVENT_PARAM_DIRECT_OBJECT = _fourcc("----")  # kEventParamDirectObject
+_TYPE_EVENT_HOT_KEY_ID = _fourcc("hkid")
 
 
 class EventTypeSpec(ctypes.Structure):
@@ -69,7 +80,8 @@ class HotkeyService:
         self._handler_proc: Any | None = None
         self._handler_ref = ctypes.c_void_p()
         self._hotkey_refs: list[ctypes.c_void_p] = []
-        self._target: ctypes.c_void_p | None = None
+        self._app_target: int | None = None
+        self._dispatcher_target: int | None = None
         self._registered = False
         self._press_count = 0
         self._pump_count = 0
@@ -107,6 +119,7 @@ class HotkeyService:
         self._carbon = carbon
 
         carbon.GetEventDispatcherTarget.restype = ctypes.c_void_p
+        carbon.GetApplicationEventTarget.restype = ctypes.c_void_p
         carbon.RegisterEventHotKey.argtypes = [
             ctypes.c_uint32,
             ctypes.c_uint32,
@@ -163,15 +176,18 @@ class HotkeyService:
             actual = ctypes.c_uint32(0)
             err = carbon.GetEventParameter(
                 event,
-                _fourcc("hkey"),
-                _fourcc("hkid"),
+                _K_EVENT_PARAM_DIRECT_OBJECT,
+                _TYPE_EVENT_HOT_KEY_ID,
                 None,
                 ctypes.sizeof(hotkey_id),
                 ctypes.byref(actual),
                 ctypes.byref(hotkey_id),
             )
             if err != 0:
-                service.logger.warning("event=hotkey_param_error status=%s", err)
+                service.logger.warning(
+                    "event=hotkey_param_error status=%s (expected kEventParamDirectObject)",
+                    err,
+                )
                 return 0
             idx = int(hotkey_id.id)
             if idx < 0 or idx >= len(_BINDINGS):
@@ -199,15 +215,27 @@ class HotkeyService:
             return 0
 
         self._handler_proc = _handler
-        target = carbon.GetEventDispatcherTarget()
-        self._target = ctypes.c_void_p(target)
-        self.logger.info("event=hotkey_dispatcher target=%s", target)
-        if not target:
-            raise RuntimeError("GetEventDispatcherTarget failed")
+        # Register + install on the application target; dispatch via dispatcher.
+        app_target = carbon.GetApplicationEventTarget()
+        dispatcher = carbon.GetEventDispatcherTarget()
+        self._app_target = int(app_target) if app_target else None
+        self._dispatcher_target = int(dispatcher) if dispatcher else None
+        self.logger.info(
+            "event=hotkey_targets app=%s dispatcher=%s pressed_kind=%s param=%s",
+            self._app_target,
+            self._dispatcher_target,
+            _K_EVENT_HOT_KEY_PRESSED,
+            _K_EVENT_PARAM_DIRECT_OBJECT,
+        )
+        if not app_target or not dispatcher:
+            raise RuntimeError("GetApplicationEventTarget/GetEventDispatcherTarget failed")
 
-        spec = EventTypeSpec(eventClass=_fourcc("keyb"), eventKind=6)
+        spec = EventTypeSpec(
+            eventClass=_K_EVENT_CLASS_KEYBOARD,
+            eventKind=_K_EVENT_HOT_KEY_PRESSED,
+        )
         err = carbon.InstallEventHandler(
-            target,
+            app_target,
             self._handler_proc,
             1,
             ctypes.byref(spec),
@@ -226,7 +254,7 @@ class HotkeyService:
                 key_code,
                 modifiers,
                 hotkey_id,
-                target,
+                app_target,
                 0,
                 ctypes.byref(ref),
             )
@@ -273,7 +301,7 @@ class HotkeyService:
 
     def pump(self, timeout: float = 0.25) -> None:
         """Process pending Carbon events. Must run on the main thread."""
-        if self._listener is not None or self._carbon is None or self._target is None:
+        if self._listener is not None or self._carbon is None or self._dispatcher_target is None:
             return
         carbon = self._carbon
         event = ctypes.c_void_p()
@@ -281,10 +309,13 @@ class HotkeyService:
         err = carbon.ReceiveNextEvent(0, None, float(timeout), True, ctypes.byref(event))
         if err == 0 and event:
             self.logger.debug("event=hotkey_loop_event pump=%s", self._pump_count)
-            send_err = carbon.SendEventToEventTarget(event, self._target)
+            send_err = carbon.SendEventToEventTarget(event, self._dispatcher_target)
             carbon.ReleaseEvent(event)
-            if send_err != 0:
+            # eventNotHandledErr (-9874) is normal for unrelated events.
+            if send_err not in (0, _EVENT_NOT_HANDLED):
                 self.logger.warning("event=hotkey_send_failed status=%s", send_err)
+            elif send_err == _EVENT_NOT_HANDLED:
+                self.logger.debug("event=hotkey_send_unhandled pump=%s", self._pump_count)
         elif err == _EVENT_LOOP_TIMED_OUT:
             if self._pump_count in (1, 20, 100) or self._pump_count % 240 == 0:
                 self.logger.debug(
@@ -307,7 +338,8 @@ class HotkeyService:
             self._handler_ref = ctypes.c_void_p()
             carbon = self._carbon
             self._registered = False
-            self._target = None
+            self._app_target = None
+            self._dispatcher_target = None
         self.logger.info(
             "event=hotkey_unregister presses=%s pumps=%s",
             self._press_count,
