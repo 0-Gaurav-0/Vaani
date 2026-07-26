@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from vaani.intent.lexicon import Lexicon
 from vaani.intent.normalize import normalize
 
 
@@ -75,10 +76,13 @@ def _extract_slots(
 
 
 def match(
-    text: str, patterns: Sequence[Pattern]
+    text: str,
+    patterns: Sequence[Pattern],
+    *,
+    lexicon: Lexicon | None = None,
 ) -> tuple[str, dict[str, Any], int] | None:
     """Return ``(verb, slots, priority)`` for the highest-priority match."""
-    normalized = normalize(text)
+    normalized = normalize(text, lexicon=lexicon)
     if not normalized:
         return None
 

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from vaani.intent.grammar import Pattern, match
+from vaani.intent.lexicon import Lexicon
 from vaani.intent.normalize import normalize
 from vaani.intent.schema import Intent
 from vaani.platform.protocol import PlatformId
@@ -22,6 +24,8 @@ class Router:
         resolve_app: Callable[[str], Any] | None = None,
         resolve_site: Callable[[str], Any] | None = None,
         llm_parse: Callable[[str], Intent | None] | None = None,
+        lexicon: Lexicon | None = None,
+        vocab_path: Path | str | None = None,
     ) -> None:
         self.registry = registry
         self.patterns = tuple(patterns)
@@ -29,11 +33,15 @@ class Router:
         self.resolve_site = resolve_site
         # Present for dependency injection in tests; rung 1/2 must not need it.
         self.llm_parse = llm_parse
+        if lexicon is not None:
+            self.lexicon = lexicon
+        else:
+            self.lexicon = Lexicon.for_matching(vocab_path)
 
     def route(self, transcript: str, *, platform: PlatformId) -> Intent | None:
         """Map ``transcript`` to an Intent for ``platform``, or None."""
         raw = transcript
-        utterance = normalize(transcript)
+        utterance = normalize(transcript, lexicon=self.lexicon)
         enabled = {verb.name for verb in self.registry.enabled(platform)}
 
         # Rung 1 — today's resolver order (app before site) preserves §4.2.
@@ -64,7 +72,7 @@ class Router:
                     raw=raw,
                 )
 
-        hit = match(utterance, self.patterns)
+        hit = match(utterance, self.patterns, lexicon=self.lexicon)
         if hit is not None:
             verb_name, slots, _priority = hit
             if verb_name in enabled:
