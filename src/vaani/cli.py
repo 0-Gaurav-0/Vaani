@@ -350,6 +350,44 @@ def materialize_argv(
         prompt = str(slots.get("prompt") or "")
         return tuple(CodexRunner.command_for("codex", prompt))
 
+    if verb_name == "system.port.free":
+        port = str(slots.get("port") or "")
+        if platform is PlatformId.MACOS:
+            return ("lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t")
+        if platform is PlatformId.WINDOWS:
+            return ("Get-NetTCPConnection", "-LocalPort", port, "-State", "Listen")
+        return ("ss", "-lptnH", f"sport = :{port}")
+
+    if verb_name == "system.proc.kill":
+        name = str(slots.get("name") or "")
+        if platform is PlatformId.WINDOWS:
+            return ("Stop-Process", "-Name", name, "-Force")
+        return ("pkill", "-f", name)
+
+    if verb_name == "system.proc.top":
+        if platform is PlatformId.MACOS:
+            return ("open", "-a", "Activity Monitor")
+        if platform is PlatformId.WINDOWS:
+            return ("taskmgr.exe",)
+        return ("gnome-system-monitor",)
+
+    if verb_name == "system.trash.empty":
+        if platform is PlatformId.MACOS:
+            return ("osascript", "-e", 'tell application "Finder" to empty trash')
+        if platform is PlatformId.WINDOWS:
+            return ("Clear-RecycleBin", "-Force")
+        return ("gio", "trash", "--empty")
+
+    if verb_name == "system.wifi.set":
+        enabled = slots.get("enabled", True) not in {False, "false", "0", 0}
+        state = "on" if enabled else "off"
+        if platform is PlatformId.MACOS:
+            return ("networksetup", "-setairportpower", "<device>", state)
+        if platform is PlatformId.WINDOWS:
+            cmdlet = "Enable-NetAdapter" if enabled else "Disable-NetAdapter"
+            return (cmdlet, "-Name", "Wi-Fi", "-Confirm:$false")
+        return ("nmcli", "radio", "wifi", state)
+
     return None
 
 
@@ -426,7 +464,6 @@ def cmd_do(
     platform: PlatformId | None = None,
     registry: Registry | None = None,
 ) -> int:
-    _ = yes  # confirm policy lands later; accepted for forward compatibility
     plat = platform if platform is not None else detect_os()
     reg = registry if registry is not None else build_registry(plat)
     verb = reg.get(verb_name)
@@ -445,6 +482,26 @@ def cmd_do(
         return 2
 
     slots: dict[str, Any] = {key: value for key, value in slot_pairs}
+    # Coerce common typed slots from CLI strings.
+    if "port" in slots:
+        try:
+            slots["port"] = int(slots["port"])
+        except (TypeError, ValueError):
+            pass
+    if "enabled" in slots:
+        slots["enabled"] = str(slots["enabled"]).casefold() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    if "force" in slots:
+        slots["force"] = str(slots["force"]).casefold() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
     # Handlers that resolve from utterance expect natural phrasing for app.open.
     if verb_name == "app.open" and "name" in slots:
         name = str(slots["name"])
@@ -453,6 +510,12 @@ def cmd_do(
         utterance = " ".join(
             [verb_name, *[f"{k}={slots[k]}" for k in sorted(slots)]]
         )
+    mods: set[str] = set()
+    if dry_run:
+        mods.add("dry_run")
+    if yes:
+        # Until T2.1 pill confirm lands, --yes stands in for Approve.
+        mods.add("confirmed")
     intent = Intent(
         verb=verb_name,
         slots=slots,
@@ -462,7 +525,7 @@ def cmd_do(
         mode="act",
         utterance=utterance,
         raw_utterance=utterance,
-        modifiers=frozenset({"dry_run"} if dry_run else ()),
+        modifiers=frozenset(mods),
         brain=None,
     )
     context = _make_context(plat)

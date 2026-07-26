@@ -207,3 +207,53 @@ def test_build_macos_wires_system(tmp_path, monkeypatch):
     assert bundle.id is PlatformId.MACOS
     assert isinstance(bundle.system, MacSystemControl)
     assert bundle.system.support()["dns_flush"][0] is Support.UNSUPPORTED
+
+
+def test_list_listeners_lsof_fpcu_argv():
+    calls: list[list[str]] = []
+
+    def runner(args, **_kwargs):
+        calls.append(list(args))
+        return _ok("p41233\ncpython\nu501\n")
+
+    ctrl = MacSystemControl(runner=runner)
+    holders = ctrl.list_listeners(3000)
+    assert calls == [["lsof", "-nP", "-iTCP:3000", "-sTCP:LISTEN", "-Fpcu"]]
+    assert len(holders) == 1
+    assert holders[0].pid == 41233
+    assert holders[0].name == "python"
+    assert holders[0].uid == 501
+
+
+def test_kill_pids_term_then_kill_escalation():
+    signals: list[tuple[int, int]] = []
+    sleeps: list[float] = []
+
+    def killer(pid: int, sig: int) -> None:
+        signals.append((pid, sig))
+
+    ctrl = MacSystemControl(
+        runner=lambda *_a, **_k: _ok(),
+        sleeper=lambda s: sleeps.append(s),
+        killer=killer,
+        pid_alive=lambda _pid: True,
+    )
+    result = ctrl.kill_pids([99], signal="term")
+    assert result.status is Status.OK
+    assert sleeps == [2.0]
+    # SIGTERM then SIGKILL
+    assert signals[0][0] == 99
+    assert signals[1][0] == 99
+    assert signals[0][1] != signals[1][1]
+
+
+def test_open_process_monitor_argv():
+    calls: list[list[str]] = []
+
+    def runner(args, **_kwargs):
+        calls.append(list(args))
+        return _ok()
+
+    ctrl = MacSystemControl(runner=runner)
+    assert ctrl.open_process_monitor().status is Status.OK
+    assert calls == [["open", "-a", "Activity Monitor"]]

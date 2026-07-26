@@ -218,3 +218,29 @@ def test_build_linux_wires_system(tmp_path: Path, monkeypatch):
     assert bundle.system is not None
     assert isinstance(bundle.system, SystemControl)
     assert isinstance(bundle.system, LinuxSystemControl)
+
+
+def test_list_listeners_prefers_ss():
+    rec = RecordingRunner(
+        _ok('LISTEN 0 128 *:3000 *:* users:(("python3",pid=4242,fd=3))\n')
+    )
+    ctrl, _ = _ctrl(tools={"ss", "lsof"}, runner=rec)
+    holders = ctrl.list_listeners(3000)
+    assert rec.calls[0][:2] == ["ss", "-lptnH"]
+    assert holders[0].pid == 4242
+    assert holders[0].name == "python3"
+
+
+def test_list_named_pgrep_argv():
+    rec = RecordingRunner(_ok("111 /usr/bin/node server.js\n"))
+    ctrl, _ = _ctrl(tools={"pgrep"}, runner=rec)
+    holders = ctrl.list_named("node")
+    assert rec.calls == [["pgrep", "-af", "node"]]
+    assert holders[0].pid == 111
+    assert holders[0].name == "node"
+
+
+def test_open_process_monitor_uses_available_tool():
+    ctrl, rec = _ctrl(tools={"gnome-system-monitor"})
+    assert ctrl.open_process_monitor().status is Status.OK
+    assert rec.calls == [["gnome-system-monitor"]]
