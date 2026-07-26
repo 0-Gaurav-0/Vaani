@@ -1,8 +1,13 @@
 import logging
-from vaani.observability import configure_logging, exception_category, sanitize
+from vaani.observability import _redact, configure_logging, exception_category, sanitize
 def test_sanitizes_key():
     assert "secret" not in sanitize("api_key=secret")
     assert exception_category(TimeoutError()) == "timeout"
+
+def test_stream_redact_keeps_key_name():
+    assert _redact("api_key=supersecret") == "api_key=[REDACTED]"
+    assert _redact("password: hunter2") == "password=[REDACTED]"
+    assert "hunter2" not in _redact("token=hunter2")
 
 def test_file_and_debug_stderr_redact(tmp_path, capsys):
     logger = configure_logging(tmp_path, debug=True)
