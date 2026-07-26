@@ -1,12 +1,34 @@
 """Private, concurrent-safe SQLite transcript history."""
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import shutil, sqlite3, threading
-from typing import Any, Iterable
+import json
+import shutil
+import sqlite3
+import threading
+from typing import Any, Mapping
+
+from vaani.observability import _redact
 
 UTC_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+# Additive columns for PRAGMA user_version 2 (T8.1 / spec §12.11).
+# ``slots`` is JSON text; values are redacted at the audit boundary before INSERT.
+_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("verb", "TEXT"),
+    ("rung", "INTEGER"),
+    ("risk", "TEXT"),
+    ("status", "TEXT"),
+    ("confirmed_by", "TEXT"),
+    ("workspace", "TEXT"),
+    ("workspace_source", "TEXT"),
+    ("brain", "TEXT"),
+    ("evidence", "TEXT"),
+    ("slots", "TEXT"),
+)
+
 
 @dataclass(frozen=True)
 class HistoryEntry:
@@ -18,6 +40,47 @@ class HistoryEntry:
     cleanup_status: str | None = None
     duration_ms: int | None = None
     created_at: str | None = None
+    verb: str | None = None
+    rung: int | None = None
+    risk: str | None = None
+    status: str | None = None
+    confirmed_by: str | None = None
+    workspace: str | None = None
+    workspace_source: str | None = None
+    brain: str | None = None
+    evidence: str | tuple[str, ...] | list[str] | None = None
+    slots: Mapping[str, Any] | str | None = None
+
+
+def _serialize_evidence(value: object | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _redact(value)
+    if isinstance(value, (tuple, list)):
+        return json.dumps([_redact(str(part)) for part in value], ensure_ascii=False)
+    return _redact(str(value))
+
+
+def _serialize_slots(value: object | None) -> str | None:
+    """JSON-encode slots with secret-shaped string values redacted."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        # Already serialized — still run redaction over the blob.
+        return _redact(value)
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if isinstance(item, str):
+                redacted[str(key)] = _redact(item)
+            elif isinstance(item, (int, float, bool)) or item is None:
+                redacted[str(key)] = item
+            else:
+                redacted[str(key)] = _redact(str(item))
+        return json.dumps(redacted, ensure_ascii=False, sort_keys=True)
+    return _redact(str(value))
+
 
 class HistoryStore:
     def __init__(self, path: str | Path, *, max_entries: int | None = None):
@@ -51,12 +114,22 @@ class HistoryStore:
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           created_at TEXT NOT NULL, mode TEXT NOT NULL,
           detected_language TEXT, raw_text TEXT NOT NULL, final_text TEXT NOT NULL,
-          delivery_status TEXT, cleanup_status TEXT, duration_ms INTEGER)""")
+          delivery_status TEXT, cleanup_status TEXT, duration_ms INTEGER,
+          verb TEXT, rung INTEGER, risk TEXT, status TEXT, confirmed_by TEXT,
+          workspace TEXT, workspace_source TEXT, brain TEXT, evidence TEXT, slots TEXT)""")
         cols = {r[1] for r in self._writer.execute("PRAGMA table_info(history)")}
         if "duration_ms" not in cols:
             self._writer.execute("ALTER TABLE history ADD COLUMN duration_ms INTEGER")
+            cols.add("duration_ms")
         if version < 1:
             self._writer.execute("PRAGMA user_version=1")
+            version = 1
+        for name, decl in _V2_COLUMNS:
+            if name not in cols:
+                self._writer.execute(f"ALTER TABLE history ADD COLUMN {name} {decl}")
+                cols.add(name)
+        if version < 2:
+            self._writer.execute("PRAGMA user_version=2")
         self._writer.execute("CREATE INDEX IF NOT EXISTS idx_history_created ON history(created_at DESC, id DESC)")
         self._writer.execute("COMMIT")
 
@@ -71,12 +144,49 @@ class HistoryStore:
         if self.disabled: return None
         if entry is not None: values = asdict(entry) | values
         created = values.get("created_at") or self._now()
+        evidence = _serialize_evidence(values.get("evidence"))
+        slots = _serialize_slots(values.get("slots"))
+        workspace = values.get("workspace")
+        if workspace is not None and not isinstance(workspace, str):
+            workspace = str(workspace)
+        risk = values.get("risk")
+        if risk is not None and hasattr(risk, "value"):
+            risk = getattr(risk, "value")
+        status = values.get("status")
+        if status is not None and hasattr(status, "value"):
+            status = getattr(status, "value")
         with self._lock:
             try:
                 assert self._writer
                 self._writer.execute("BEGIN IMMEDIATE")
-                cur = self._writer.execute("INSERT INTO history(created_at,mode,detected_language,raw_text,final_text,delivery_status,cleanup_status,duration_ms) VALUES (?,?,?,?,?,?,?,?)",
-                    (created, values.get("mode", "literal"), values.get("detected_language"), values.get("raw_text", ""), values.get("final_text", ""), values.get("delivery_status"), values.get("cleanup_status"), values.get("duration_ms")))
+                cur = self._writer.execute(
+                    """INSERT INTO history(
+                        created_at, mode, detected_language, raw_text, final_text,
+                        delivery_status, cleanup_status, duration_ms,
+                        verb, rung, risk, status, confirmed_by,
+                        workspace, workspace_source, brain, evidence, slots
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        created,
+                        values.get("mode", "literal"),
+                        values.get("detected_language"),
+                        values.get("raw_text", ""),
+                        values.get("final_text", ""),
+                        values.get("delivery_status"),
+                        values.get("cleanup_status"),
+                        values.get("duration_ms"),
+                        values.get("verb"),
+                        values.get("rung"),
+                        risk,
+                        status,
+                        values.get("confirmed_by"),
+                        workspace,
+                        values.get("workspace_source"),
+                        values.get("brain"),
+                        evidence,
+                        slots,
+                    ),
+                )
                 if self.max_entries is not None:
                     self._writer.execute("DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY created_at DESC,id DESC LIMIT ?)", (self.max_entries,))
                 self._writer.execute("COMMIT")

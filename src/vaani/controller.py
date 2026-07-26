@@ -524,7 +524,13 @@ class Controller:
             result = attach_workspace(refuse_interrogative(verb, intent), context)
             self._surface_result(result)
             self._finish_assistant_result(
-                result, raw=raw, audio=audio, verb_name=verb.name, token=token
+                result,
+                raw=raw,
+                audio=audio,
+                verb_name=verb.name,
+                token=token,
+                intent=intent,
+                risk=verb.risk,
             )
             return
 
@@ -532,7 +538,13 @@ class Controller:
         if "dry_run" in intent.modifiers:
             result = dispatch(verb, intent, context)
             self._finish_assistant_result(
-                result, raw=raw, audio=audio, verb_name=verb.name, token=token
+                result,
+                raw=raw,
+                audio=audio,
+                verb_name=verb.name,
+                token=token,
+                intent=intent,
+                risk=verb.risk,
             )
             return
 
@@ -551,6 +563,8 @@ class Controller:
                         audio=audio,
                         verb_name=verb.name,
                         token=token,
+                        intent=intent,
+                        risk=verb.risk,
                     )
                 return
 
@@ -641,7 +655,13 @@ class Controller:
         if result.status is Status.OK:
             self.undo.record_success(verb, intent, result)
         self._finish_assistant_result(
-            result, raw=raw, audio=audio, verb_name=verb.name, token=token
+            result,
+            raw=raw,
+            audio=audio,
+            verb_name=verb.name,
+            token=token,
+            intent=intent,
+            risk=verb.risk,
         )
 
     def _handle_approve(self, action_id: str, *, via: str) -> bool:
@@ -707,6 +727,9 @@ class Controller:
                 verb_name=verb.name,
                 duration_ms=0,
                 token=token,
+                intent=intent,
+                risk=verb.risk,
+                confirmed_by=via,
             )
         except Exception as exc:
             self._fail(exc, getattr(exc, "category", None))
@@ -760,6 +783,8 @@ class Controller:
                     verb_name=verb.name,
                     duration_ms=0,
                     token=token,
+                    intent=intent,
+                    risk=verb.risk,
                 )
                 return True
             if requires_confirm(verb.risk):
@@ -792,6 +817,8 @@ class Controller:
                 verb_name=verb.name,
                 duration_ms=0,
                 token=token,
+                intent=intent,
+                risk=verb.risk,
             )
         except Exception as exc:
             self._fail(exc, getattr(exc, "category", None))
@@ -888,6 +915,8 @@ class Controller:
                 verb_name=verb.name,
                 duration_ms=0,
                 token=token,
+                intent=intent,
+                risk=verb.risk,
             )
             return True
         return False
@@ -901,11 +930,14 @@ class Controller:
         verb_name: str = "",
         duration_ms: int | None = None,
         token: int,
+        intent: Intent | None = None,
+        risk: Any | None = None,
+        confirmed_by: str | None = None,
     ) -> None:
         if result.status is Status.FAILED:
             raise RuntimeError(result.detail or result.summary or "assistant failed")
         final = result.detail or result.summary
-        name = verb_name
+        name = verb_name or (intent.verb if intent is not None else "")
         if not name:
             try:
                 routed = self.router.route(raw, platform=detect_os())
@@ -913,6 +945,7 @@ class Controller:
                     name = routed.verb
             except Exception:
                 name = ""
+        # Compatibility: keep route tags in cleanup_status for one release (T8.1).
         cleanup = {
             "app.open": "app_action",
             "site.open": "browser_action",
@@ -920,6 +953,14 @@ class Controller:
         }.get(name, "skipped")
         if duration_ms is None:
             duration_ms = int(getattr(audio, "duration_seconds", 0) * 1000)
+        workspace = result.workspace
+        if workspace is not None:
+            workspace = str(workspace)
+        risk_value = risk
+        if risk_value is None and name:
+            verb = self.registry.get(name)
+            if verb is not None:
+                risk_value = verb.risk
         with self._lock:
             if self._cancel.is_set() or token != self._token:
                 return
@@ -930,6 +971,16 @@ class Controller:
                 delivery_status="displayed",
                 cleanup_status=cleanup,
                 duration_ms=duration_ms,
+                verb=name or None,
+                rung=result.rung or (intent.rung if intent is not None else None),
+                risk=risk_value,
+                status=result.status,
+                confirmed_by=confirmed_by,
+                workspace=workspace,
+                workspace_source=result.workspace_source or None,
+                brain=(intent.brain if intent is not None else None),
+                evidence=result.evidence or None,
+                slots=(dict(intent.slots) if intent is not None else None),
             )
             self.state = AppState.IDLE
             self._emit("assistant_complete")
