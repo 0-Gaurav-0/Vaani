@@ -11,6 +11,11 @@
 **Branch:** `plat/p1-cross-platform`  
 **Roadmap IDs:** P1-01 … P1-06
 
+**Progress (2026-07-26):** Package A started on this branch.
+`PlatformBundle` / `detect_os` / `build_platform`, per-OS `Settings` roots,
+Linux `runtime.py` boot path, and injectable app/browser launchers are in
+`26adb87`. Next: Packages C/D (macOS / Windows adapters).
+
 ---
 
 ## Sub-agent execution map
