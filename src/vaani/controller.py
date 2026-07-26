@@ -30,6 +30,7 @@ from .indicator_protocol import (
     write_phase,
 )
 from .session_loop import SessionLoop
+from .intent.interrogative import refuse_interrogative, should_refuse_interrogative
 from .intent.router import Router
 from .intent.schema import Context, Intent, Result, Status
 from .platform import detect_os
@@ -405,6 +406,16 @@ class Controller:
             screen=None,
             session=None,
         )
+        # Interrogatives targeting mutating verbs: refuse before confirm/handler.
+        # Guide/screen-offer is deferred (parallel-agents §0 / T2.5 override).
+        if should_refuse_interrogative(verb, intent):
+            result = refuse_interrogative(verb, intent)
+            self._surface_result(result)
+            self._finish_assistant_result(
+                result, raw=raw, audio=audio, verb_name=verb.name, token=token
+            )
+            return
+
         # Dry-run short-circuits before confirm staging or handler execution.
         if "dry_run" in intent.modifiers:
             result = dispatch(verb, intent, context)
@@ -558,6 +569,20 @@ class Controller:
             )
         return tuple(argv)
 
+    def _surface_result(self, result: Result) -> None:
+        """Show a Result on feedback / result window (no confirm UI)."""
+        message = format_result_message(result)
+        if self.feedback is not None:
+            try:
+                show_result(self.feedback, result)
+            except Exception:
+                pass
+        if self.result_window is not None and hasattr(self.result_window, "show_text"):
+            try:
+                self.result_window.show_text(message)
+            except Exception:
+                pass
+
     def _enter_confirming(self, pending: Any, result: Result) -> None:
         try:
             write_pending_id(self.indicator_pending_path, pending.id)
@@ -574,17 +599,7 @@ class Controller:
             write_phase(self.indicator_phase_path, "confirming")
         except Exception:
             pass
-        message = format_result_message(result)
-        if self.feedback is not None:
-            try:
-                show_result(self.feedback, result)
-            except Exception:
-                pass
-        if self.result_window is not None and hasattr(self.result_window, "show_text"):
-            try:
-                self.result_window.show_text(message)
-            except Exception:
-                pass
+        self._surface_result(result)
 
     def _clear_confirm_ui(self) -> None:
         try:

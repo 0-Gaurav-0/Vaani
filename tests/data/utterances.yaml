@@ -268,3 +268,52 @@
   verb: system.wifi.set
   rung: 2
   risk: R2
+
+# T2.5 interrogatives → refuse / say-as-command (parallel-agents §0; no guide)
+- utterance: "how do I free port 3000"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+  interrogative: true
+
+- utterance: "what's on port 3000"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+  interrogative: true
+
+- utterance: "what is on port 8080"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+  interrogative: true
+
+- utterance: "who's using port 3000"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+  interrogative: true
+
+- utterance: "can you free port 3000"
+  verb: system.port.free
+  rung: 2
+  risk: R2
+  interrogative: true
+
+- utterance: "how do I kill the process named node"
+  verb: system.proc.kill
+  rung: 2
+  risk: R2
+  interrogative: true
+
+- utterance: "how do I empty the trash"
+  verb: system.trash.empty
+  rung: 1
+  risk: R2
+  interrogative: true
+
+- utterance: "how do I turn off Wi-Fi"
+  verb: system.wifi.set
+  rung: 2
+  risk: R2
+  interrogative: true
