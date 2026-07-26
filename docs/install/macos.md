@@ -64,34 +64,24 @@ source .venv/bin/activate
 python -m vaani
 ```
 
-Also check **Keyboard → Keyboard Shortcuts → Input Sources**: macOS often binds
-**Control+Space** to “Select previous input source”. Disable that if it steals
-Vaani’s smart-dictation chord.
-
 If Accessibility is denied, Vaani still copies text to the clipboard and returns
 `clipboard_only` instead of pasting.
 
 ## Hotkeys
 
-macOS uses Carbon hotkeys (not pynput). At startup you should see
-`Vaani hotkeys ready:`.
+macOS uses Carbon hotkeys. At startup you should see `Vaani hotkeys ready:`.
 
-These use the **Control** key (⌃), not **Command** (⌘).
-Command+Space stays with Spotlight.
+Defaults avoid Spotlight (⌘Space) and Input Sources (⌃Space):
 
 | Chord | Keys | Action |
 |---|---|---|
-| Control+Space | ⌃Space | Smart dictation toggle |
-| Control+Shift+Space | ⌃⇧Space | Literal dictation toggle |
-| Control+Option+Space | ⌃⌥Space | Assistant toggle |
+| Control+Option+V | ⌃⌥V | Smart dictation toggle |
+| Control+Option+Shift+V | ⌃⌥⇧V | Literal dictation toggle |
+| Control+Option+A | ⌃⌥A | Assistant toggle |
 | Esc | Esc | Cancel in-flight work |
 
 `--record` working only proves mic + Groq. Global hotkeys need `python -m vaani`
 left running.
-
-If Control+Space does nothing: System Settings → Keyboard → Keyboard Shortcuts
-→ **Input Sources** → turn OFF “Select the previous input source”, then restart
-Vaani.
 
 ## Data paths
 
@@ -120,12 +110,12 @@ Run from the repo with the venv active:
 
    - Open TextEdit (or a browser text field)
    - Start Vaani: `python -m vaani`
-   - Press Ctrl+Space, speak, press Ctrl+Space again
+   - Press Control+Option+V, speak, press Control+Option+V again
    - Text should paste into the focused field when Accessibility is granted
 
 3. **Assistant app open**
 
-   - Press Ctrl+Alt+Space
+   - Press Control+Option+A
    - Say “Open Terminal”
    - Terminal.app should launch (`open -a Terminal`)
 
