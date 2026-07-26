@@ -685,13 +685,13 @@ class Controller:
             token = self._token
         try:
             result = dispatch(verb, intent, context)
-            if result.status is Status.NEEDS_DISAMBIGUATE and result.disambiguation:
-                with self._lock:
-                    self.state = AppState.IDLE
-                    self._emit("needs_disambiguate")
-                self._enter_disambiguating(
-                    result.disambiguation, intent, verb, context, result
-                )
+            # Diff-before-apply / second-stage confirms (e.g. agent.task patch).
+            if result.status in {
+                Status.NEEDS_CONFIRM,
+                Status.NEEDS_DISAMBIGUATE,
+            } and self._absorb_policy_gate(
+                result, intent=intent, verb=verb, context=context, token=token
+            ):
                 return True
             if result.status is Status.FAILED:
                 raise RuntimeError(
@@ -824,8 +824,26 @@ class Controller:
                 if result.pending is not None
                 else self._materialize(intent, context.platform)
             )
+            # Prefer handler-provided slots (seeded prompt / proposed_diff).
+            staged_slots = (
+                dict(result.pending.slots)
+                if result.pending is not None
+                else dict(intent.slots)
+            )
+            staged_intent = Intent(
+                verb=intent.verb,
+                slots=staged_slots,
+                rung=intent.rung,
+                confidence=intent.confidence,
+                source=intent.source,
+                mode=intent.mode,
+                utterance=intent.utterance,
+                raw_utterance=intent.raw_utterance,
+                modifiers=intent.modifiers,
+                brain=intent.brain,
+            )
             pending = self.confirm.stage(
-                intent, verb, materialized, context=context
+                staged_intent, verb, materialized, context=context
             )
             gated = attach_workspace(
                 Result(

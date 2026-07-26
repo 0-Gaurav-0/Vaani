@@ -1,4 +1,8 @@
-"""Bounded, cancellable Codex CLI runner and headless result adapter."""
+"""Bounded, cancellable Codex CLI runner and headless result adapter.
+
+TODO(T7.1): wrap behind ``brains.protocol.BrainProtocol`` once pluggable
+adapters (Codex / Claude / Cursor) land; keep timeout/cancel/redaction here.
+"""
 from __future__ import annotations
 import os, subprocess, threading
 from dataclasses import dataclass

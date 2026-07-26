@@ -210,10 +210,9 @@ def materialize_argv(
         return ("nautilus", "--select", "${workspace}")
 
     if verb_name == "agent.task":
-        from vaani.codex import CodexRunner
+        from vaani.verbs.agent_context import materialize_agent_argv
 
-        prompt = str(slots.get("prompt") or "")
-        return tuple(CodexRunner.command_for("codex", prompt))
+        return materialize_agent_argv(slots)
 
     if verb_name == "system.port.free":
         port = str(slots.get("port") or "")
