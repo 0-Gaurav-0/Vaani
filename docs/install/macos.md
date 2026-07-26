@@ -31,16 +31,45 @@ export GROQ_API_KEY='…'
 
 ## Permissions (required for live use)
 
-Grant these to the terminal or app that launches `python -m vaani`
-(System Settings → Privacy & Security):
+If you see:
+
+```text
+This process is not trusted! Input event monitoring will not be possible…
+```
+
+then **Cursor alone is not enough**. macOS trusts the **Python binary** that
+runs Vaani (often a uv-managed `python3.12` path), not only the editor.
+
+Grant **all three** under System Settings → Privacy & Security:
 
 1. **Microphone** — recording via PortAudio / `sounddevice`
-2. **Accessibility** — synthetic ⌘V paste and some focus probes
+2. **Accessibility** — global hotkeys + ⌘V paste
 3. **Input Monitoring** — global hotkeys via `pynput`
 
+Add / enable **both**:
+
+- **Cursor** (or **Terminal** if you start Vaani there)
+- The resolved interpreter printed at startup, typically under  
+  `~/.local/share/uv/python/.../bin/python3.12`
+
+Then **fully quit Cursor (Cmd+Q)** and reopen — toggling a checkbox without
+restarting is not enough.
+
+**Most reliable smoke path:** run Vaani from **Terminal.app** (with Terminal
+allowed in Accessibility + Input Monitoring), not from the Cursor terminal:
+
+```bash
+cd /path/to/Vaani
+source .venv/bin/activate
+python -m vaani
+```
+
+Also check **Keyboard → Keyboard Shortcuts → Input Sources**: macOS often binds
+**Control+Space** to “Select previous input source”. Disable that if it steals
+Vaani’s smart-dictation chord.
+
 If Accessibility is denied, Vaani still copies text to the clipboard and returns
-`clipboard_only` instead of pasting. You will see a notification when paste is
-unavailable or the focused app changed.
+`clipboard_only` instead of pasting.
 
 ## Hotkeys
 

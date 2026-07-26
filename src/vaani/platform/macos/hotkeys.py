@@ -5,15 +5,18 @@ Smart dictation is **Control+Space** (⌃Space), never Command+Space
 """
 from __future__ import annotations
 
+import logging
+import sys
 import threading
 from typing import Any, Callable
+
+from .trust import ensure_input_trust, is_trusted, trust_help_text
 
 SMART = "smart"
 LITERAL = "literal"
 ASSISTANT = "assistant"
 
-# pynput: <ctrl> / <ctrl_l> / <ctrl_r> = Control key.
-# Do NOT use <cmd> here — that is Command (⌘), reserved for Spotlight etc.
+# pynput: <ctrl> / <ctrl_l> = Control key (⌃), not Command (⌘).
 _HOTKEY_MAP = {
     "<ctrl>+<space>": SMART,
     "<ctrl_l>+<space>": SMART,
@@ -33,17 +36,36 @@ class HotkeyService:
         *,
         on_cancel: Callable[[], Any] | None = None,
         listener_factory: Callable[..., Any] | None = None,
+        logger: logging.Logger | None = None,
     ):
         self.on_trigger = on_trigger
         self.on_cancel = on_cancel
         self._listener_factory = listener_factory
         self._listener: Any | None = None
         self._lock = threading.Lock()
+        self.logger = logger or logging.getLogger("vaani")
+        self.trusted: bool | None = None
 
     def register(self) -> None:
         with self._lock:
             if self._listener is not None:
                 return
+
+            # Cursor's Accessibility toggle does NOT cover the uv CPython binary.
+            # Prompt + print the exact paths the user must allowlist.
+            self.trusted = is_trusted()
+            if self.trusted is False:
+                ensure_input_trust(prompt=True, open_settings=True)
+                self.trusted = is_trusted()
+            if self.trusted is False:
+                help_text = trust_help_text()
+                print(help_text, file=sys.stderr)
+                self.logger.error("hotkeys disabled: macOS process not trusted")
+                # Still attempt registration so a later grant can work after restart,
+                # but surface the failure clearly.
+            elif self.trusted is None:
+                ensure_input_trust(prompt=True, open_settings=False)
+
             mapping: dict[str, Callable[[], None]] = {}
             for chord, mode in _HOTKEY_MAP.items():
                 mapping[chord] = self._make_trigger(mode)
@@ -62,6 +84,11 @@ class HotkeyService:
                 raise RuntimeError("hotkey listener has no start()")
             start()
             self._listener = listener
+            if self.trusted is not False:
+                self.logger.info(
+                    "hotkeys armed: Control+Space smart, "
+                    "Control+Shift+Space literal, Control+Alt+Space assistant"
+                )
 
     def unregister(self) -> None:
         with self._lock:

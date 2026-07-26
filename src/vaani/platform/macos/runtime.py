@@ -94,11 +94,14 @@ def run_macos(settings: Settings) -> int:
     controller.hotkeys = hotkeys
 
     try:
+        from .trust import python_paths
+
+        logger.info("hotkey interpreter paths: %s", ", ".join(python_paths()))
         hotkeys.register()
         logger.info(
-            "startup complete; Ctrl+Space toggles dictation; "
-            "Ctrl+Shift+Space toggles literal mode; "
-            "Ctrl+Alt+Space toggles assistant"
+            "startup complete; Control+Space toggles dictation; "
+            "Control+Shift+Space toggles literal mode; "
+            "Control+Alt+Space toggles assistant"
         )
         signal.signal(signal.SIGINT, request_shutdown)
         signal.signal(signal.SIGTERM, request_shutdown)
