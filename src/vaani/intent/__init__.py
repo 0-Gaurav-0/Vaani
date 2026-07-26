@@ -3,6 +3,8 @@
 from .schema import (
     AgentSession,
     Context,
+    DisambiguationOption,
+    DisambiguationPrompt,
     FocusInfo,
     Intent,
     OverlayOp,
@@ -22,6 +24,8 @@ from .schema import (
 __all__ = [
     "AgentSession",
     "Context",
+    "DisambiguationOption",
+    "DisambiguationPrompt",
     "FocusInfo",
     "Intent",
     "OverlayOp",

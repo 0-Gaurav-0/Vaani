@@ -165,7 +165,7 @@ def test_port_free_dry_run() -> None:
     assert not any(c[0] == "kill_pids" for c in system.calls)
 
 
-def test_proc_kill_lists_matches_and_needs_confirm() -> None:
+def test_proc_kill_multiple_matches_needs_disambiguate() -> None:
     system = _FakeSystem()
     system.named["node"] = (
         ProcInfo(pid=11, name="node"),
@@ -176,9 +176,42 @@ def test_proc_kill_lists_matches_and_needs_confirm() -> None:
         _intent("system.proc.kill", {"name": "node"}),
         _context(),
     )
-    assert result.status is Status.NEEDS_CONFIRM
-    assert "2 process" in result.detail
+    assert result.status is Status.NEEDS_DISAMBIGUATE
+    assert result.disambiguation is not None
+    assert len(result.disambiguation.options) == 2
     assert "PID 11" in result.detail and "PID 12" in result.detail
+    assert not any(c[0] == "kill_pids" for c in system.calls)
+
+
+def test_proc_kill_disambiguate_truncates_to_three() -> None:
+    system = _FakeSystem()
+    system.named["node"] = tuple(
+        ProcInfo(pid=20 + i, name="node") for i in range(4)
+    )
+    verbs = _verbs(system)
+    result = verbs["system.proc.kill"].handler(
+        _intent("system.proc.kill", {"name": "node"}),
+        _context(),
+    )
+    assert result.status is Status.NEEDS_DISAMBIGUATE
+    assert result.disambiguation is not None
+    assert len(result.disambiguation.options) == 3
+
+
+def test_proc_kill_after_pid_choice_needs_confirm() -> None:
+    system = _FakeSystem()
+    system.named["node"] = (
+        ProcInfo(pid=11, name="node"),
+        ProcInfo(pid=12, name="node"),
+    )
+    verbs = _verbs(system)
+    result = verbs["system.proc.kill"].handler(
+        _intent("system.proc.kill", {"name": "node", "pid": 12}),
+        _context(),
+    )
+    assert result.status is Status.NEEDS_CONFIRM
+    assert "PID 12" in result.detail
+    assert "PID 11" not in result.detail
     assert not any(c[0] == "kill_pids" for c in system.calls)
 
 

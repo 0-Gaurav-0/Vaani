@@ -19,6 +19,7 @@ class Status(str, Enum):
     OK = "ok"
     DRY_RUN = "dry_run"
     NEEDS_CONFIRM = "needs_confirm"
+    NEEDS_DISAMBIGUATE = "needs_disambiguate"
     REFUSED = "refused"
     UNSUPPORTED = "unsupported"
     FAILED = "failed"
@@ -137,6 +138,27 @@ class PendingAction:
 
 
 @dataclass(frozen=True)
+class DisambiguationOption:
+    """One selectable target in a disambiguation prompt (spec §12.3)."""
+
+    key: str
+    label: str
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class DisambiguationPrompt:
+    """Pill-facing choice of at most 3 options; timeout cancels, never defaults."""
+
+    id: str
+    question: str
+    options: tuple[DisambiguationOption, ...]
+    verb: str
+    slots: Mapping[str, Any]
+    expires_at: float
+
+
+@dataclass(frozen=True)
 class UndoToken:
     verb: str
     inverse_verb: str
@@ -165,6 +187,7 @@ class Result:
     rung: int = 0
     undo: UndoToken | None = None
     pending: PendingAction | None = None
+    disambiguation: DisambiguationPrompt | None = None
     overlay: tuple[OverlayOp, ...] = ()
     # Invariant 7: every result names its workspace source (§5.2 / §13.5.7).
     workspace: Path | None = None
