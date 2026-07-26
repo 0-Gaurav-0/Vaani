@@ -12,11 +12,14 @@ import struct, math, os
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from pathlib import Path
+
 from .types import AppState, DictationMode
 from .observability import exception_category, sanitize
 from .groq import GroqError
 from .apps import launch_app, resolve_app
 from .sites import resolve_site
+from .indicator_protocol import clear_command, read_command
 
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     import re
@@ -36,9 +39,10 @@ class Controller:
                  history: Any, feedback: Any | None = None,
                  key_provider: Callable[[], str | None] | None = None,
                  hotkeys: Any | None = None, logger: logging.Logger | None = None,
-                 max_duration: float = 300.0, join_timeout: float = 5.0,
+                 max_duration: float = 600.0, join_timeout: float = 5.0,
                  codex: Any | None = None, result_window: Any | None = None,
                  amplitude_path: str | os.PathLike[str] | None = None,
+                 indicator_control_path: str | os.PathLike[str] | None = None,
                  browser_launcher: Any | None = None,
                  app_launcher: Any | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
@@ -51,6 +55,16 @@ class Controller:
             or os.environ.get("VAANI_AMPLITUDE_PATH")
             or "/tmp/vaani-amplitude"
         )
+        if indicator_control_path is not None:
+            self.indicator_control_path = str(indicator_control_path)
+        else:
+            env_control = os.environ.get("VAANI_INDICATOR_CONTROL")
+            if env_control:
+                self.indicator_control_path = env_control
+            else:
+                self.indicator_control_path = str(
+                    Path(self.amplitude_path).parent / "indicator_control.json"
+                )
         self.logger = logger or logging.getLogger("vaani")
         self.max_duration, self.join_timeout = max_duration, join_timeout
         self.state = AppState.IDLE; self.mode: str | None = None
@@ -65,8 +79,17 @@ class Controller:
 
     def trigger(self, mode: str = DictationMode.SMART.value) -> bool:
         with self._lock:
-            if self._shutdown or self.state is not AppState.IDLE:
-                self._emit("busy"); self._feedback("busy"); return False
+            if self._shutdown:
+                return False
+            # While Groq is working, ignore new dictation — keep the processing pill.
+            if self.state is AppState.PROCESSING:
+                self._emit("busy")
+                self.logger.info("event=input_blocked reason=processing")
+                return False
+            if self.state is not AppState.IDLE:
+                self._emit("busy")
+                self._feedback("busy")
+                return False
             self.mode = mode.value if isinstance(mode, DictationMode) else str(mode)
             self._cancel.clear(); self._token += 1; token = self._token
             try: self._audio = self.recorder.start()
@@ -88,6 +111,10 @@ class Controller:
     def handle_hotkey(self, mode: str) -> bool:
         """Callback seam for :class:`HotkeyManager`. A second press stops capture."""
         with self._lock:
+            if self.state is AppState.PROCESSING:
+                self._emit("busy")
+                self.logger.info("event=input_blocked reason=processing")
+                return False
             recording = self.state is AppState.RECORDING
         return self.stop() if recording else self.trigger(mode)
 
@@ -102,10 +129,14 @@ class Controller:
         with self._lock:
             if self.state is not AppState.RECORDING: return False
             token = self._token; self.state = AppState.PROCESSING; self._emit("processing"); self._cancel.clear()
+        # Keep the session monitor alive during PROCESSING so the pill can
+        # cancel, and so we can show a processing phase. Mic is released below.
         self._feedback("processing")
-        self._amplitude_stop.set()
         try: audio = self.recorder.stop()
-        except Exception as exc: self._fail(exc, "mic"); return False
+        except Exception as exc:
+            self._amplitude_stop.set()
+            self._fail(exc, "mic")
+            return False
         worker = threading.Thread(target=self._process, args=(token, audio), daemon=True)
         self._worker = worker; worker.start(); return True
 
@@ -116,7 +147,7 @@ class Controller:
             if self.state is AppState.RECORDING:
                 try: self.recorder.cleanup()
                 except Exception: pass
-                self.state = AppState.IDLE; self._emit("cancelled"); self._feedback("processing"); return True
+                self.state = AppState.IDLE; self._emit("cancelled"); self._feedback("busy"); return True
             if self.state is AppState.PROCESSING:
                 self._token += 1
                 try:
@@ -125,25 +156,66 @@ class Controller:
                 except Exception:
                     pass
                 self.state = AppState.IDLE
-                self._feedback("processing"); self._emit("cancelled"); return True
+                self._feedback("busy"); self._emit("cancelled"); return True
         return False
+
+    def _poll_indicator_control(self) -> None:
+        """Honor stop/cancel requests from the floating recording pill."""
+        try:
+            command = read_command(self.indicator_control_path)
+        except Exception:
+            return
+        if command is None:
+            return
+        try:
+            clear_command(self.indicator_control_path)
+        except Exception:
+            pass
+        if command == "stop":
+            self.stop()
+        elif command == "cancel":
+            self.cancel()
 
     def _start_amplitude_monitor(self, path: Any) -> None:
         self._amplitude_stop.clear()
+        try:
+            clear_command(self.indicator_control_path)
+        except Exception:
+            pass
         out = self.amplitude_path
         def monitor():
-            while not self._amplitude_stop.wait(0.08):
+            while not self._amplitude_stop.wait(0.05):
+                self._poll_indicator_control()
+                with self._lock:
+                    recording = self.state is AppState.RECORDING
+                if not recording:
+                    continue
                 try:
-                    with open(path, "rb") as fh:
-                        fh.seek(44); data = fh.read()[-2048:]
-                    if len(data) >= 2:
-                        vals = struct.unpack("<%dh" % (len(data)//2), data[:len(data)//2*2])
-                        level = min(1.0, math.sqrt(sum(v*v for v in vals)/len(vals))/32768.0)
+                    level = None
+                    # Prefer live PortAudio level (macOS/Windows buffer-in-memory).
+                    live = getattr(self.recorder, "level", None)
+                    if isinstance(live, (int, float)):
+                        level = float(live)
+                    if level is None:
+                        with open(path, "rb") as fh:
+                            fh.seek(44)
+                            data = fh.read()[-2048:]
+                        if len(data) >= 2:
+                            vals = struct.unpack(
+                                "<%dh" % (len(data) // 2), data[: len(data) // 2 * 2]
+                            )
+                            level = min(
+                                1.0,
+                                math.sqrt(sum(v * v for v in vals) / len(vals)) / 32768.0,
+                            )
+                    if level is not None:
                         parent = os.path.dirname(out)
                         if parent:
                             os.makedirs(parent, mode=0o700, exist_ok=True)
-                        with open(out, "w") as dst: dst.write(f"{level:.4f}")
-                except Exception: pass
+                        with open(out, "w") as dst:
+                            dst.write(f"{level:.4f}")
+                except Exception:
+                    pass
         self._amplitude_thread = threading.Thread(target=monitor, daemon=True); self._amplitude_thread.start()
 
     def _duration_guard(self, token: int) -> None:
@@ -156,6 +228,16 @@ class Controller:
         try:
             key = self.key_provider()
             if not key: raise RuntimeError("API key required")
+            try:
+                size = Path(audio.path).stat().st_size
+            except OSError:
+                size = -1
+            self.logger.info(
+                "event=process_start mode=%s duration=%.2fs bytes=%s",
+                self.mode,
+                float(getattr(audio, "duration_seconds", 0) or 0),
+                size,
+            )
             result = self.groq.transcribe(audio.path, key, cancel=self._cancel, delete_audio=True,
                                           language="en" if self.mode == "assistant" else None)
             if self._cancel.is_set() or token != self._token: return
@@ -253,10 +335,16 @@ class Controller:
                 self.state = AppState.IDLE; self._emit("delivered")
                 self._feedback("success")
         except Exception as exc:
-            if self._cancel.is_set(): return
-            try: self.recorder.cleanup()
-            except Exception: pass
+            if self._cancel.is_set():
+                return
+            try:
+                self.recorder.cleanup()
+            except Exception:
+                pass
             self._fail(exc, getattr(exc, "category", None))
+        finally:
+            # End session monitor after processing (pill goes away via feedback).
+            self._amplitude_stop.set()
 
     @staticmethod
     def _browser_intent(text: str) -> bool:

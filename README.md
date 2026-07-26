@@ -486,7 +486,7 @@ Current defaults:
 | Purpose | Model or limit |
 |---|---|
 | Transcription | `whisper-large-v3-turbo` |
-| Cleanup and answers | `openai/gpt-oss-120b` |
+| Cleanup and answers | `llama-3.1-8b-instant` (fast) |
 | Recording auto-stop | 300 seconds |
 | WAV validation maximum | 600 seconds |
 | Minimum recording | 250 milliseconds |

@@ -10,8 +10,14 @@ from ..audio_common import SoundDeviceRecorder
 class MacAudioRecorder(SoundDeviceRecorder):
     """Record 16 kHz mono WAV via PortAudio / sounddevice."""
 
-    def __init__(self, audio_dir: Path, *, device: Any = None):
-        super().__init__(audio_dir, device=device)
+    def __init__(
+        self,
+        audio_dir: Path,
+        *,
+        device: Any = None,
+        amplitude_path: Path | str | None = None,
+    ):
+        super().__init__(audio_dir, device=device, amplitude_path=amplitude_path)
 
 
 AudioRecorderImpl = MacAudioRecorder

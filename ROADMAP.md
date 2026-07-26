@@ -171,6 +171,7 @@ PlatformBundle
 | P1-04 | Shared config/paths per OS                  | `partial` | `plat/p1-cross-platform`   | P1-01          | XDG on Linux, `~/Library/Application Support/Vaani` on macOS, `%APPDATA%\Vaani` on Windows; sites/history/logs land in the right place                                                       |
 | P1-05 | Cross-platform install docs                 | `partial` | `docs/p1-05-install-matrix`  | P1-02 or P1-03 | README (or `docs/install/`) matrix: OS → deps → permissions → smoke test                                                                                                                     |
 | P1-06 | CI matrix smoke                             | `todo` | `plat/p1-06-ci-matrix`       | P1-01          | Unit tests run on Linux CI; Mac/Windows jobs run pure-python tests + adapter fakes (live GUI tests remain opt-in/manual)                                                                     |
+| P1-07 | Recording pill on macOS + Windows           | `partial` | `feat/p1-07-recording-indicator` | P1-02, P1-03 | Floating cancel/waveform/stop pill while recording; portable control file (no SIGUSR-only); Linux GTK unchanged; dictation works if pill fails to start |
 
 
 **Phase 1 demo bar:** “Open Terminal/Cursor” and smart dictate-into-browser work on **at least two** of {Linux, macOS, Windows}.

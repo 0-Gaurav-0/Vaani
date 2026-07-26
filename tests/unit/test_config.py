@@ -37,6 +37,7 @@ def test_platform_roots_macos_and_windows(tmp_path):
     assert mac.platform == "macos"
     assert mac.data_dir == tmp_path / "Library" / "Application Support" / "Vaani"
     assert mac.amplitude_path == mac.cache_dir / "amplitude"
+    assert mac.indicator_control_path == mac.cache_dir / "indicator_control.json"
 
     win = Settings.from_home(tmp_path, platform="win32")
     assert win.platform == "windows"

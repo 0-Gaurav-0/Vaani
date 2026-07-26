@@ -16,8 +16,7 @@ SMART = "smart"
 LITERAL = "literal"
 ASSISTANT = "assistant"
 
-_KEY_A = 0
-_KEY_V = 9
+_KEY_SPACE = 49  # kVK_Space
 _KEY_ESCAPE = 53
 
 _CMD = 1 << 8
@@ -25,10 +24,11 @@ _SHIFT = 1 << 9
 _OPTION = 1 << 11
 _CONTROL = 1 << 12
 
+# Hold-to-talk family (2-key smart chord; variants add Shift / Control).
 _BINDINGS: tuple[tuple[int, int, str, str], ...] = (
-    (_KEY_V, _CONTROL | _OPTION, SMART, "Control+Option+V"),
-    (_KEY_V, _CONTROL | _OPTION | _SHIFT, LITERAL, "Control+Option+Shift+V"),
-    (_KEY_A, _CONTROL | _OPTION, ASSISTANT, "Control+Option+A"),
+    (_KEY_SPACE, _OPTION, SMART, "Option+Space"),
+    (_KEY_SPACE, _OPTION | _SHIFT, LITERAL, "Option+Shift+Space"),
+    (_KEY_SPACE, _OPTION | _CONTROL, ASSISTANT, "Control+Option+Space"),
     (_KEY_ESCAPE, 0, "cancel", "Esc"),
 )
 
@@ -46,6 +46,7 @@ def _fourcc(text: str) -> int:
 # CarbonEvents.h
 _K_EVENT_CLASS_KEYBOARD = _fourcc("keyb")
 _K_EVENT_HOT_KEY_PRESSED = 5
+_K_EVENT_HOT_KEY_RELEASED = 6
 _K_EVENT_PARAM_DIRECT_OBJECT = _fourcc("----")  # kEventParamDirectObject
 _TYPE_EVENT_HOT_KEY_ID = _fourcc("hkid")
 
@@ -65,11 +66,13 @@ class HotkeyService:
         self,
         on_trigger: Callable[[str], None],
         *,
+        on_release: Callable[[str], Any] | None = None,
         on_cancel: Callable[[], Any] | None = None,
         listener_factory: Callable[..., Any] | None = None,
         logger: logging.Logger | None = None,
     ):
         self.on_trigger = on_trigger
+        self.on_release = on_release
         self.on_cancel = on_cancel
         self._listener_factory = listener_factory
         self._listener: Any | None = None
@@ -84,8 +87,10 @@ class HotkeyService:
         self._dispatcher_target: int | None = None
         self._registered = False
         self._press_count = 0
+        self._release_count = 0
         self._pump_count = 0
         self._last_loop_error: int | None = None
+        self._held_action: str | None = None
 
     def register(self) -> None:
         with self._lock:
@@ -99,9 +104,9 @@ class HotkeyService:
 
     def _register_test_factory(self) -> None:
         mapping: dict[str, Callable[[], None]] = {
-            "<ctrl>+<alt>+v": self._make_trigger(SMART),
-            "<ctrl>+<alt>+<shift>+v": self._make_trigger(LITERAL),
-            "<ctrl>+<alt>+a": self._make_trigger(ASSISTANT),
+            "<alt>+<space>": self._make_trigger(SMART),
+            "<alt>+<shift>+<space>": self._make_trigger(LITERAL),
+            "<ctrl>+<alt>+<space>": self._make_trigger(ASSISTANT),
         }
         if self.on_cancel is not None:
             mapping["<esc>"] = self._make_cancel()
@@ -164,6 +169,8 @@ class HotkeyService:
         carbon.SendEventToEventTarget.restype = ctypes.c_int32
         carbon.ReleaseEvent.argtypes = [ctypes.c_void_p]
         carbon.ReleaseEvent.restype = ctypes.c_int32
+        carbon.GetEventKind.argtypes = [ctypes.c_void_p]
+        carbon.GetEventKind.restype = ctypes.c_uint32
 
         EventHandlerProc = ctypes.CFUNCTYPE(
             ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
@@ -172,6 +179,7 @@ class HotkeyService:
 
         @EventHandlerProc
         def _handler(_next_handler, event, _user_data):
+            kind = int(carbon.GetEventKind(event))
             hotkey_id = EventHotKeyID()
             actual = ctypes.c_uint32(0)
             err = carbon.GetEventParameter(
@@ -194,24 +202,51 @@ class HotkeyService:
                 service.logger.warning("event=hotkey_unknown_id id=%s", idx)
                 return 0
             _key, _mods, action, label = _BINDINGS[idx]
-            service._press_count += 1
-            service.logger.info(
-                "event=hotkey_pressed action=%s label=%s count=%s",
-                action,
-                label,
-                service._press_count,
-            )
-            print(f"[vaani] hotkey pressed: {label} ({action})", flush=True)
             try:
+                if kind == _K_EVENT_HOT_KEY_RELEASED:
+                    if action == "cancel":
+                        return 0
+                    if service._held_action != action:
+                        return 0
+                    service._held_action = None
+                    service._release_count += 1
+                    service.logger.info(
+                        "event=hotkey_released action=%s label=%s count=%s",
+                        action,
+                        label,
+                        service._release_count,
+                    )
+                    print(f"[vaani] hotkey released: {label} ({action})", flush=True)
+                    if service.on_release is not None:
+                        service.on_release(action)
+                        service.logger.info(
+                            "event=hotkey_release_dispatched action=%s", action
+                        )
+                    return 0
+
+                # Pressed
+                service._press_count += 1
+                service.logger.info(
+                    "event=hotkey_pressed action=%s label=%s count=%s",
+                    action,
+                    label,
+                    service._press_count,
+                )
+                print(f"[vaani] hotkey pressed: {label} ({action})", flush=True)
                 if action == "cancel":
                     if service.on_cancel is not None:
                         service.on_cancel()
                         service.logger.info("event=hotkey_cancel_dispatched")
                 else:
+                    service._held_action = action
                     service.on_trigger(action)
-                    service.logger.info("event=hotkey_trigger_dispatched action=%s", action)
+                    service.logger.info(
+                        "event=hotkey_trigger_dispatched action=%s", action
+                    )
             except Exception as exc:
-                service.logger.exception("event=hotkey_handler_error detail=%s", type(exc).__name__)
+                service.logger.exception(
+                    "event=hotkey_handler_error detail=%s", type(exc).__name__
+                )
             return 0
 
         self._handler_proc = _handler
@@ -221,24 +256,25 @@ class HotkeyService:
         self._app_target = int(app_target) if app_target else None
         self._dispatcher_target = int(dispatcher) if dispatcher else None
         self.logger.info(
-            "event=hotkey_targets app=%s dispatcher=%s pressed_kind=%s param=%s",
+            "event=hotkey_targets app=%s dispatcher=%s pressed_kind=%s released_kind=%s param=%s",
             self._app_target,
             self._dispatcher_target,
             _K_EVENT_HOT_KEY_PRESSED,
+            _K_EVENT_HOT_KEY_RELEASED,
             _K_EVENT_PARAM_DIRECT_OBJECT,
         )
         if not app_target or not dispatcher:
             raise RuntimeError("GetApplicationEventTarget/GetEventDispatcherTarget failed")
 
-        spec = EventTypeSpec(
-            eventClass=_K_EVENT_CLASS_KEYBOARD,
-            eventKind=_K_EVENT_HOT_KEY_PRESSED,
+        specs = (EventTypeSpec * 2)(
+            EventTypeSpec(_K_EVENT_CLASS_KEYBOARD, _K_EVENT_HOT_KEY_PRESSED),
+            EventTypeSpec(_K_EVENT_CLASS_KEYBOARD, _K_EVENT_HOT_KEY_RELEASED),
         )
         err = carbon.InstallEventHandler(
             app_target,
             self._handler_proc,
-            1,
-            ctypes.byref(spec),
+            2,
+            specs,
             None,
             ctypes.byref(self._handler_ref),
         )
@@ -282,7 +318,7 @@ class HotkeyService:
         if not self._hotkey_refs:
             raise RuntimeError(
                 "No macOS hotkeys registered — another app may own "
-                "Control+Option+V / Control+Option+A."
+                "Option+Space / Option+Shift+Space / Control+Option+Space."
             )
 
         self.logger.info(
@@ -290,12 +326,12 @@ class HotkeyService:
             len(self._hotkey_refs),
         )
         print(
-            "Vaani hotkeys ready (main-thread Carbon pump):\n"
-            "  Control+Option+V       → smart dictation\n"
-            "  Control+Option+Shift+V → literal\n"
-            "  Control+Option+A       → assistant\n"
-            "  Esc                    → cancel\n"
-            "Press a chord once — you should see: [vaani] hotkey pressed: ...",
+            "Vaani hotkeys ready (hold-to-talk):\n"
+            "  Hold Option+Space           → smart dictation\n"
+            "  Hold Option+Shift+Space     → literal\n"
+            "  Hold Control+Option+Space   → assistant\n"
+            "  Esc                         → cancel\n"
+            "Release the chord to stop — the pill vanishes on release.",
             flush=True,
         )
 
@@ -340,9 +376,11 @@ class HotkeyService:
             self._registered = False
             self._app_target = None
             self._dispatcher_target = None
+            self._held_action = None
         self.logger.info(
-            "event=hotkey_unregister presses=%s pumps=%s",
+            "event=hotkey_unregister presses=%s releases=%s pumps=%s",
             self._press_count,
+            self._release_count,
             self._pump_count,
         )
         if listener is not None:

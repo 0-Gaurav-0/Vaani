@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import threading
 
@@ -27,12 +28,19 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
     settings = settings or Settings.from_home()
     settings.prepare()
     os.environ.setdefault("VAANI_AMPLITUDE_PATH", str(settings.amplitude_path))
+    os.environ.setdefault("VAANI_INDICATOR_CONTROL", str(settings.indicator_control_path))
     target = MacTargetProbe()
     delivery = MacClipboardDelivery(target=target)
-    feedback = MacFeedback()
+    feedback = MacFeedback(
+        amplitude_path=settings.amplitude_path,
+        control_path=settings.indicator_control_path,
+        log_dir=settings.log_dir,
+    )
     apps = MacAppLauncher()
     browser = MacBrowserLauncher()
-    recorder = MacAudioRecorder(settings.audio_dir)
+    recorder = MacAudioRecorder(
+        settings.audio_dir, amplitude_path=settings.amplitude_path
+    )
     hotkeys = HotkeyService(lambda _mode: None)
     return PlatformBundle(
         id=PlatformId.MACOS,
@@ -52,13 +60,31 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
 def run_macos(settings: Settings) -> int:
     sweep_audio_directory(settings.audio_dir)
     os.environ["VAANI_AMPLITUDE_PATH"] = str(settings.amplitude_path)
+    os.environ["VAANI_INDICATOR_CONTROL"] = str(settings.indicator_control_path)
     logger = configure_logging(settings.log_dir, debug=settings.debug)
+
+    # Reap orphan pills from a previous crash; visual-only, safe to kill.
+    try:
+        subprocess.run(
+            ["pkill", "-f", r"python -m vaani\.platform\.macos\.indicator_app"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
 
     target = MacTargetProbe()
     delivery = MacClipboardDelivery(target=target)
-    recorder = MacAudioRecorder(settings.audio_dir)
+    recorder = MacAudioRecorder(
+        settings.audio_dir, amplitude_path=settings.amplitude_path
+    )
     history = HistoryStore(settings.history_db)
-    feedback = MacFeedback()
+    feedback = MacFeedback(
+        amplitude_path=settings.amplitude_path,
+        control_path=settings.indicator_control_path,
+        log_dir=settings.log_dir,
+    )
     groq = GroqClient()
     store = SecretServiceKeyStore()
     apps = MacAppLauncher()
@@ -71,6 +97,7 @@ def run_macos(settings: Settings) -> int:
         feedback=feedback,
         key_provider=lambda: effective_key(store).value,
         amplitude_path=settings.amplitude_path,
+        indicator_control_path=settings.indicator_control_path,
         browser_launcher=browser,
         app_launcher=apps,
     )
@@ -88,8 +115,26 @@ def run_macos(settings: Settings) -> int:
         controller.shutdown()
         shutdown_event.set()
 
+    def on_hotkey_press(mode: str) -> None:
+        # Hold-to-talk: press starts. Block entirely while PROCESSING.
+        from ...types import AppState
+
+        if controller.state is AppState.PROCESSING:
+            logger.info("event=input_blocked reason=processing source=press")
+            return
+        controller.trigger(mode)
+
+    def on_hotkey_release(_mode: str) -> None:
+        from ...types import AppState
+
+        if controller.state is AppState.PROCESSING:
+            return
+        # Release stops capture; pill switches to processing animation.
+        controller.stop()
+
     hotkeys = HotkeyService(
-        controller.handle_hotkey,
+        on_hotkey_press,
+        on_release=on_hotkey_release,
         on_cancel=controller.cancel,
         logger=logger,
     )
@@ -105,9 +150,9 @@ def run_macos(settings: Settings) -> int:
         logger.info("hotkey interpreter paths: %s", ", ".join(python_paths()))
         hotkeys.register()
         logger.info(
-            "startup complete; Control+Option+V toggles dictation; "
-            "Control+Option+Shift+V toggles literal; "
-            "Control+Option+A toggles assistant"
+            "startup complete; hold Option+Space to dictate "
+            "(release to stop); Option+Shift+Space literal; "
+            "Control+Option+Space assistant"
         )
         signal.signal(signal.SIGINT, request_shutdown)
         signal.signal(signal.SIGTERM, request_shutdown)

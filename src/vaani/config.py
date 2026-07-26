@@ -63,6 +63,10 @@ class Settings:
     def amplitude_path(self) -> Path:
         return self.cache_dir / "amplitude"
 
+    @property
+    def indicator_control_path(self) -> Path:
+        return self.cache_dir / "indicator_control.json"
+
     @classmethod
     def from_home(
         cls,
@@ -122,6 +126,7 @@ def child_environment(environ: Mapping[str, str] | None = None) -> dict[str, str
         "XDG_RUNTIME_DIR",
         "PULSE_SERVER",
         "VAANI_AMPLITUDE_PATH",
+        "VAANI_INDICATOR_CONTROL",
     }
     return {k: v for k, v in source.items() if k in allowed}
 
