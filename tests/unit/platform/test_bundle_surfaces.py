@@ -81,6 +81,7 @@ def test_build_linux_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
 def test_build_macos_optional_surfaces_default_none(tmp_path: Path, monkeypatch):
     from vaani.config import Settings
     from vaani.platform.macos.runtime import build_macos
+    from vaani.platform.macos.system import MacSystemControl
 
     monkeypatch.setattr(
         "vaani.platform.macos.runtime.SecretServiceKeyStore",
@@ -88,7 +89,8 @@ def test_build_macos_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     )
     bundle = build_macos(Settings.from_home(home=tmp_path))
     assert bundle.id is PlatformId.MACOS
-    assert bundle.system is None
+    # T1.2 macOS: system is wired; other optional surfaces stay absent.
+    assert isinstance(bundle.system, MacSystemControl)
     assert bundle.window is None
     assert bundle.input is None
     assert bundle.terminal is None
