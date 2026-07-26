@@ -2,7 +2,7 @@
 
 | OS | Guide | Extra | Status |
 |---|---|---|---|
-| Linux (Ubuntu 22.04 GNOME/X11) | [../../README.md](../../README.md) | `vaani[linux]` / system GTK+Pulse | Production baseline |
+| Linux (Ubuntu 22.04 GNOME/X11) | [linux.md](linux.md) | `vaani[linux]` / Pulse + X11 + tk pill | Production baseline — hold-to-talk |
 | macOS | [macos.md](macos.md) | `uv pip install -e '.[macos]'` | MVP — needs Accessibility / Mic / Input Monitoring |
 | Windows | [windows.md](windows.md) | `uv pip install -e '.[windows]'` | MVP — live smoke still manual |
 
