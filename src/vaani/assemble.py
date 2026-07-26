@@ -76,6 +76,7 @@ def assemble(
         app_launcher=bundle.apps,
         system=bundle.system,
         terminal=getattr(bundle, "terminal", None),
+        input_synth=getattr(bundle, "input", None),
         supervisor=supervisor,
         settings=settings if supervisor is not None else None,
         vocab_path=getattr(settings, "vocab_path", None),

@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from vaani.platform.linux.input import LinuxInputSynth
+from vaani.platform.macos.input import MacInputSynth
 from vaani.platform.protocol import (
     InputSynth,
     PlatformBundle,
@@ -14,6 +16,7 @@ from vaani.platform.protocol import (
     TerminalOpener,
     WindowControl,
 )
+from vaani.platform.windows.input import WindowsInputSynth
 
 
 def _minimal_bundle(**overrides: object) -> PlatformBundle:
@@ -72,10 +75,10 @@ def test_build_linux_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
 
     bundle = build_linux(Settings.from_home(tmp_path, platform="linux"))
     assert bundle.id is PlatformId.LINUX
-    # T1.2 linux half wires SystemControl; other optional surfaces stay None.
+    # T1.2 + T5.2: system and input wired; window/terminal/screen stay None.
     assert isinstance(bundle.system, LinuxSystemControl)
+    assert isinstance(bundle.input, LinuxInputSynth)
     assert bundle.window is None
-    assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None
 
@@ -91,10 +94,10 @@ def test_build_macos_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     )
     bundle = build_macos(Settings.from_home(home=tmp_path))
     assert bundle.id is PlatformId.MACOS
-    # T1.2 macOS: system is wired; other optional surfaces stay absent.
+    # T1.2 + T5.2 macOS: system and input wired; window/terminal/screen absent.
     assert isinstance(bundle.system, MacSystemControl)
+    assert isinstance(bundle.input, MacInputSynth)
     assert bundle.window is None
-    assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None
 
@@ -108,9 +111,9 @@ def test_build_windows_optional_surfaces_default_none(tmp_path: Path, monkeypatc
 
     bundle = build_windows(Settings.from_home(tmp_path, platform="windows"))
     assert bundle.id is PlatformId.WINDOWS
-    # T1.2 windows: system is wired; other optional surfaces stay absent.
+    # T1.2 + T5.2 windows: system and input wired; window/terminal/screen absent.
     assert isinstance(bundle.system, WindowsSystemControl)
+    assert isinstance(bundle.input, WindowsInputSynth)
     assert bundle.window is None
-    assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None

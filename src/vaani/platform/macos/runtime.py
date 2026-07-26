@@ -18,6 +18,7 @@ from .browser import MacBrowserLauncher
 from .delivery import MacClipboardDelivery
 from .feedback import MacFeedback
 from .hotkeys import HotkeyService
+from .input import MacInputSynth
 from .system import MacSystemControl
 from .target import MacTargetProbe
 
@@ -54,6 +55,7 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_macos(settings),
         system=system,
+        input=MacInputSynth(),
     )
 
 

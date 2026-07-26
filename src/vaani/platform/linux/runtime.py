@@ -18,6 +18,7 @@ from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
 from .browser import LinuxBrowserLauncher
 from .feedback import LinuxFeedback
+from .input import LinuxInputSynth
 from .system import LinuxSystemControl
 
 
@@ -63,6 +64,7 @@ def build_linux(settings: Settings | None = None) -> PlatformBundle:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_linux(settings),
         system=LinuxSystemControl(),
+        input=LinuxInputSynth(),
     )
 
 
