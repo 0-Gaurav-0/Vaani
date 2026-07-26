@@ -68,8 +68,8 @@ def _router(*, llm_parse=None) -> Router:
         open_browser_fn=lambda **_k: "Opened browser.",
     )
     patterns = patterns + register_undo(registry, UndoStack())
-    # Installable packs (pkg/docker) — leave enabled (no PackRegistry.apply) so
-    # corpus rows for those packs can resolve in unit tests.
+    # Installable packs — leave enabled (no PackRegistry.apply) so corpus
+    # rows for those packs can resolve in unit tests.
     patterns = patterns + register_stub_packs(registry)
     return Router(
         registry,
