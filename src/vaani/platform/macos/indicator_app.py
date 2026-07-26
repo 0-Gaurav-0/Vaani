@@ -20,12 +20,17 @@ MARGIN_BOTTOM = 0
 BAR_COUNT = 15
 
 
-def _paths() -> tuple[Path, Path, Path, Path]:
-    from ...indicator_protocol import resolve_control_path, resolve_phase_path
+def _paths() -> tuple[Path, Path, Path, Path, Path]:
+    from ...indicator_protocol import (
+        resolve_control_path,
+        resolve_pending_path,
+        resolve_phase_path,
+    )
 
     amp = Path(os.environ.get("VAANI_AMPLITUDE_PATH", "/tmp/vaani-amplitude"))
     control = resolve_control_path()
     phase = resolve_phase_path()
+    pending = resolve_pending_path()
     pos = (
         Path.home()
         / "Library"
@@ -33,7 +38,7 @@ def _paths() -> tuple[Path, Path, Path, Path]:
         / "Vaani"
         / "indicator_bottom.json"
     )
-    return amp, control, phase, pos
+    return amp, control, phase, pending, pos
 
 
 def _load_x(path: Path) -> float | None:
@@ -79,7 +84,11 @@ def _transform_to_foreground() -> None:
 
 
 def _run_appkit(
-    amp_path: Path, control_path: Path, phase_path: Path, pos_path: Path
+    amp_path: Path,
+    control_path: Path,
+    phase_path: Path,
+    pending_path: Path,
+    pos_path: Path,
 ) -> int:
     import objc
     from AppKit import (
@@ -101,7 +110,7 @@ def _run_appkit(
     from Foundation import NSObject, NSTimer
     from PyObjCTools import AppHelper
 
-    from ...indicator_protocol import read_phase
+    from ...indicator_protocol import read_pending_id, read_phase
     from ...waveform import WaveformBuffer
 
     wave = WaveformBuffer(bars=BAR_COUNT)
@@ -140,7 +149,7 @@ def _run_appkit(
             rim.stroke()
 
             if confirming:
-                # S2 foreshadow: Reject (left) / Approve (right). Clicks wired later.
+                # Reject (left) / Approve (right).
                 NSColor.colorWithCalibratedRed_green_blue_alpha_(0.42, 0.12, 0.12, 1.0).set()
                 NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(4, 4, 20, 20)).fill()
                 NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.42, 0.42, 1.0).set()
@@ -232,8 +241,12 @@ def _run_appkit(
             w = float(ui["width"])
             phase = ui["phase"]
             if phase == "confirming":
-                # Placeholder until T2.1 wires approve/reject commands.
-                if x < 28 or x > w - 28:
+                action_id = read_pending_id(pending_path)
+                if action_id and x < 28:
+                    _send(control_path, f"reject:{action_id}")
+                    return
+                if action_id and x > w - 28:
+                    _send(control_path, f"approve:{action_id}")
                     return
                 self._drag_start = NSEvent.mouseLocation()
                 self._origin_x = float(self.window().frame().origin.x)
@@ -380,10 +393,12 @@ def _run_appkit(
 
 
 def main() -> int:
-    amp_path, control_path, phase_path, pos_path = _paths()
+    amp_path, control_path, phase_path, pending_path, pos_path = _paths()
     print(f"[vaani] indicator start amp={amp_path}", flush=True)
     try:
-        return _run_appkit(amp_path, control_path, phase_path, pos_path)
+        return _run_appkit(
+            amp_path, control_path, phase_path, pending_path, pos_path
+        )
     except Exception as exc:
         print(f"[vaani] AppKit pill failed ({exc!r}); tk fallback", flush=True)
         from ...indicator_tk import run_pill
@@ -393,6 +408,7 @@ def main() -> int:
             control_path=control_path,
             position_path=pos_path,
             phase_path=phase_path,
+            pending_path=pending_path,
         )
 
 

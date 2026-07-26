@@ -9,7 +9,14 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ...indicator_protocol import clear_phase, resolve_phase_path, write_phase
+from ...indicator_protocol import (
+    clear_pending_id,
+    clear_phase,
+    resolve_pending_path,
+    resolve_phase_path,
+    write_pending_id,
+    write_phase,
+)
 
 CATEGORIES = {"key", "mic", "Groq", "quota", "cleanup", "target", "paste", "shortcut"}
 
@@ -98,13 +105,11 @@ class WindowsFeedback:
             if control_path is not None
             else os.environ.get("VAANI_INDICATOR_CONTROL")
         )
-        self.phase_path = str(
-            resolve_phase_path(
-                cache_dir=Path(self.amplitude_path).parent
-                if self.amplitude_path
-                else None
-            )
+        cache_dir = (
+            Path(self.amplitude_path).parent if self.amplitude_path else None
         )
+        self.phase_path = str(resolve_phase_path(cache_dir=cache_dir))
+        self.pending_path = str(resolve_pending_path(cache_dir=cache_dir))
         local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         self.log_dir = Path(
             log_dir
@@ -158,6 +163,10 @@ class WindowsFeedback:
     def _stop_indicator(self) -> None:
         try:
             clear_phase(self.phase_path)
+        except Exception:
+            pass
+        try:
+            clear_pending_id(self.pending_path)
         except Exception:
             pass
         if self.indicator is None:
@@ -214,10 +223,16 @@ class WindowsFeedback:
             except Exception:
                 pass
             self.notify("paste", "Transcribing…")
+        elif cue == "confirming":
+            self._spawn_indicator()
+            try:
+                write_phase(self.phase_path, "confirming")
+            except Exception:
+                pass
         elif cue in _DISMISS_CUES:
             self._stop_indicator()
         sounded = self._play_sound(cue)
-        return sounded or cue in {"start", "processing"}
+        return sounded or cue in {"start", "processing", "confirming"}
 
     def notify(self, category: str, message: str = "") -> None:
         if category not in CATEGORIES:
@@ -227,6 +242,15 @@ class WindowsFeedback:
             return
         try:
             self.printer(f"Vaani [{category}]: {text}")
+        except Exception:
+            pass
+
+    def set_pending_id(self, action_id: str | None) -> None:
+        try:
+            if action_id is None:
+                clear_pending_id(self.pending_path)
+            else:
+                write_pending_id(self.pending_path, action_id)
         except Exception:
             pass
 
