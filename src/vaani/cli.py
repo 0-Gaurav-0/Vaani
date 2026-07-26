@@ -17,6 +17,7 @@ from vaani.platform import UnsupportedPlatform, build_platform, detect_os
 from vaani.platform.protocol import AppTarget, PlatformId
 from vaani.secrets import load_env_file
 from vaani.sites import resolve_site
+from vaani.known_folders import resolve_known_folder
 from vaani.verbs.packs.core import build_core_registry
 from vaani.verbs.registry import Registry
 
@@ -170,15 +171,46 @@ def _resolve_launch(platform: PlatformId) -> tuple[Any, Any]:
     return linux_resolve_app, linux_launch_app
 
 
+def _system_for(platform: PlatformId) -> Any:
+    if platform is PlatformId.MACOS:
+        from vaani.platform.macos.system import MacSystemControl
+
+        return MacSystemControl()
+    if platform is PlatformId.WINDOWS:
+        from vaani.platform.windows.system import WindowsSystemControl
+
+        return WindowsSystemControl()
+    from vaani.platform.linux.system import LinuxSystemControl
+
+    return LinuxSystemControl()
+
+
+def _delivery_for(platform: PlatformId) -> Any | None:
+    """Host delivery when the requested platform matches this machine."""
+    try:
+        if detect_os() is not platform:
+            return None
+        settings = Settings.from_home()
+        settings.prepare()
+        return build_platform(settings).delivery
+    except Exception:
+        return None
+
+
 def build_registry(platform: PlatformId | None = None) -> Registry:
     plat = platform if platform is not None else detect_os()
     resolve_app_fn, launch_app_fn = _resolve_launch(plat)
     open_browser_fn = _open_browser_for(plat)
+    system = _system_for(plat)
+    delivery = _delivery_for(plat)
     registry, _patterns = build_core_registry(
         resolve_app_fn=resolve_app_fn,
         launch_app_fn=launch_app_fn,
         resolve_site_fn=resolve_site,
         open_browser_fn=open_browser_fn,
+        get_system=lambda: system,
+        get_delivery=lambda: delivery,
+        get_platform=lambda: plat,
     )
     return registry
 
@@ -216,13 +248,101 @@ def materialize_argv(
         )
         return (executable, *target.arguments)
 
-    if verb_name in {"site.open", "browser.open"}:
-        url = str(slots.get("url") or "about:blank")
+    if verb_name in {"site.open", "browser.open", "site.search"}:
+        if verb_name == "site.search":
+            from urllib.parse import quote_plus
+
+            query = str(slots.get("query") or "")
+            url = f"https://www.google.com/search?q={quote_plus(query)}"
+        elif slots.get("port") and not slots.get("url"):
+            url = f"http://localhost:{slots['port']}"
+        else:
+            url = str(slots.get("url") or "about:blank")
         if platform is PlatformId.MACOS:
             return ("open", url)
         if platform is PlatformId.WINDOWS:
             return ("cmd", "/c", "start", "", url)
         return ("xdg-open", url)
+
+    if verb_name == "browser.window.private":
+        if platform is PlatformId.MACOS:
+            return ("open", "-na", "Brave Browser", "--args", "--incognito")
+        if platform is PlatformId.WINDOWS:
+            return ("brave.exe", "--incognito")
+        return ("brave-browser", "--incognito")
+
+    if verb_name == "app.quit":
+        name = str(slots.get("name") or "App")
+        if platform is PlatformId.MACOS:
+            return ("osascript", "-e", f'tell application "{name}" to quit')
+        if platform is PlatformId.WINDOWS:
+            return ("taskkill", "/IM", f"{name}.exe")
+        return ("wmctrl", "-c", name)
+
+    if verb_name == "system.lock":
+        if platform is PlatformId.MACOS:
+            return (
+                "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
+                "-suspend",
+            )
+        if platform is PlatformId.WINDOWS:
+            return ("rundll32", "user32.dll,LockWorkStation")
+        return ("loginctl", "lock-session")
+
+    if verb_name == "system.display.sleep":
+        if platform is PlatformId.MACOS:
+            return ("pmset", "displaysleepnow")
+        if platform is PlatformId.WINDOWS:
+            return ("powershell", "-Command", "display-sleep")
+        return ("xset", "dpms", "force", "off")
+
+    if verb_name == "system.volume.set":
+        if "muted" in slots:
+            flag = "1" if slots.get("muted") in {True, "true", "1", 1} else "0"
+            if platform is PlatformId.MACOS:
+                muted = "true" if flag == "1" else "false"
+                return ("osascript", "-e", f"set volume output muted {muted}")
+            return ("pactl", "set-sink-mute", "@DEFAULT_SINK@", flag)
+        level = str(slots.get("level") or "0")
+        if platform is PlatformId.MACOS:
+            return ("osascript", "-e", f"set volume output volume {level}")
+        if platform is PlatformId.WINDOWS:
+            return ("volume.set", level)
+        return ("pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{level}%")
+
+    if verb_name == "system.dnd.set":
+        enabled = slots.get("enabled", True) not in {False, "false", "0", 0}
+        if platform is PlatformId.LINUX:
+            banners = "false" if enabled else "true"
+            return (
+                "gsettings",
+                "set",
+                "org.gnome.desktop.notifications",
+                "show-banners",
+                banners,
+            )
+        return ("system.dnd.set", "on" if enabled else "off")
+
+    if verb_name == "system.ip.copy":
+        return ("system.ip.copy",)
+
+    if verb_name == "files.open_dir":
+        folder = str(slots.get("folder") or slots.get("name") or "")
+        path = resolve_known_folder(folder, platform)
+        if path is None:
+            return ("files.open_dir", folder)
+        if platform is PlatformId.MACOS:
+            return ("open", str(path))
+        if platform is PlatformId.WINDOWS:
+            return ("explorer", str(path))
+        return ("xdg-open", str(path))
+
+    if verb_name == "files.reveal":
+        if platform is PlatformId.MACOS:
+            return ("open", "-R", "${workspace}")
+        if platform is PlatformId.WINDOWS:
+            return ("explorer", "/select,${workspace}")
+        return ("nautilus", "--select", "${workspace}")
 
     if verb_name == "agent.task":
         from vaani.codex import CodexRunner

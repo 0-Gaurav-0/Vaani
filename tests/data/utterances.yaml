@@ -150,3 +150,74 @@
   rung: 6
   risk: R2
   not_verb: app.open
+
+# T1.3 core pack — SYS-APP / SYS-AV / SYS-PWR / SYS-NET / SYS-FILE / UI-FM / UI-BROW
+- utterance: "quit Slack"
+  verb: app.quit
+  rung: 1
+  risk: R2
+
+- utterance: "mute"
+  verb: system.volume.set
+  rung: 2
+  risk: R0
+
+- utterance: "unmute"
+  verb: system.volume.set
+  rung: 2
+  risk: R0
+
+- utterance: "set volume to 30 percent"
+  verb: system.volume.set
+  rung: 2
+  risk: R0
+
+- utterance: "turn on Do Not Disturb"
+  verb: system.dnd.set
+  rung: 1
+  risk: R0
+
+- utterance: "lock the screen"
+  verb: system.lock
+  rung: 1
+  risk: R0
+
+- utterance: "sleep the display"
+  verb: system.display.sleep
+  rung: 1
+  risk: R0
+
+- utterance: "copy my local IP address"
+  verb: system.ip.copy
+  rung: 1
+  risk: R0
+
+- utterance: "reveal this project in Finder"
+  verb: files.reveal
+  rung: 3
+  risk: R0
+
+- utterance: "open Downloads"
+  verb: files.open_dir
+  rung: 1
+  risk: R0
+
+- utterance: "open Desktop"
+  verb: files.open_dir
+  rung: 1
+  risk: R0
+
+- utterance: "open localhost 3000"
+  verb: site.open
+  rung: 1
+  risk: R0
+
+- utterance: "search Google for pulseaudio mute microphone"
+  verb: site.search
+  rung: 2
+  risk: R0
+
+- utterance: "open a new incognito window"
+  verb: browser.window.private
+  rung: 1
+  risk: R0

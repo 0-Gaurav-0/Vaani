@@ -50,12 +50,14 @@ class Controller:
                  indicator_control_path: str | os.PathLike[str] | None = None,
                  browser_launcher: Any | None = None,
                  app_launcher: Any | None = None,
+                 system: Any | None = None,
                  vocab_path: str | os.PathLike[str] | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self._codex, self.result_window = codex, result_window
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
+        self.system = system
         self.amplitude_path = str(
             amplitude_path
             or os.environ.get("VAANI_AMPLITUDE_PATH")
@@ -90,6 +92,9 @@ class Controller:
             get_browser_launcher=lambda: self.browser_launcher,
             get_codex=lambda: self.codex,
             get_result_window=lambda: self.result_window,
+            get_system=lambda: self.system,
+            get_delivery=lambda: self.delivery,
+            get_platform=detect_os,
         )
         self.router = Router(
             self.registry,
