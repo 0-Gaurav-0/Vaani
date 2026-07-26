@@ -6,16 +6,13 @@ import signal
 import subprocess
 import sys
 
+from ...assemble import assemble
 from ...audio import AudioRecorderImpl
-from ...codex import CodexRunner, ResultWindow
 from ...config import Settings, sweep_audio_directory
-from ...controller import Controller
 from ...delivery import ClipboardDelivery
-from ...groq import GroqClient
-from ...history import HistoryStore
 from ...hotkeys import HotkeyManager, XInputHotkeyManager
 from ...observability import configure_logging
-from ...secrets import SecretServiceKeyStore, effective_key
+from ...secrets import SecretServiceKeyStore
 from ...x11 import X11Probe
 from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
@@ -111,39 +108,28 @@ def run_linux(settings: Settings) -> int:
 
     probe = X11Probe(display)
     delivery = ClipboardDelivery(target=probe)
-    recorder = AudioRecorderImpl(
-        settings.audio_dir, amplitude_path=settings.amplitude_path
-    )
-    history = HistoryStore(settings.history_db)
-    feedback = LinuxFeedback(
-        amplitude_path=settings.amplitude_path,
-        control_path=settings.indicator_control_path,
-        log_dir=settings.log_dir,
-    )
-    groq = GroqClient()
-    store = SecretServiceKeyStore()
-    apps = LinuxAppLauncher()
-    browser = LinuxBrowserLauncher()
-    controller = Controller(
-        recorder=recorder,
-        groq=groq,
+    bundle = PlatformBundle(
+        id=PlatformId.LINUX,
+        settings=settings,
+        recorder=AudioRecorderImpl(
+            settings.audio_dir, amplitude_path=settings.amplitude_path
+        ),
+        hotkeys=_NoopHotkeys(),
+        target=probe,
         delivery=delivery,
-        history=history,
-        feedback=feedback,
-        key_provider=lambda: effective_key(store).value,
-        amplitude_path=settings.amplitude_path,
-        indicator_control_path=settings.indicator_control_path,
-        browser_launcher=browser,
-        app_launcher=apps,
+        apps=LinuxAppLauncher(),
+        browser=LinuxBrowserLauncher(),
+        feedback=LinuxFeedback(
+            amplitude_path=settings.amplitude_path,
+            control_path=settings.indicator_control_path,
+            log_dir=settings.log_dir,
+        ),
+        key_store=SecretServiceKeyStore(),
+        run=lambda _controller: 0,
     )
-    assistant = CodexRunner()
-
-    def show_assistant_result(text: str) -> None:
-        message = (text or "").strip() or "Assistant returned no output."
-        feedback.notify("paste", message[:160])
-
-    controller.codex = assistant
-    controller.result_window = ResultWindow(show_assistant_result)
+    assembly = assemble(bundle, delivery=delivery, target=probe, logger=logger)
+    controller = assembly.controller
+    logger = assembly.logger
 
     def on_hotkey_press(mode: str) -> None:
         # Hold-to-talk: press starts. Block entirely while PROCESSING.

@@ -7,13 +7,10 @@ import subprocess
 import sys
 import threading
 
-from ...codex import CodexRunner, ResultWindow
+from ...assemble import assemble
 from ...config import Settings, sweep_audio_directory
-from ...controller import Controller
-from ...groq import GroqClient
-from ...history import HistoryStore
 from ...observability import configure_logging
-from ...secrets import SecretServiceKeyStore, effective_key
+from ...secrets import SecretServiceKeyStore
 from ..protocol import PlatformBundle, PlatformId
 from .apps import MacAppLauncher
 from .audio import MacAudioRecorder
@@ -76,40 +73,28 @@ def run_macos(settings: Settings) -> int:
 
     target = MacTargetProbe()
     delivery = MacClipboardDelivery(target=target)
-    recorder = MacAudioRecorder(
-        settings.audio_dir, amplitude_path=settings.amplitude_path
-    )
-    history = HistoryStore(settings.history_db)
-    feedback = MacFeedback(
-        amplitude_path=settings.amplitude_path,
-        control_path=settings.indicator_control_path,
-        log_dir=settings.log_dir,
-    )
-    groq = GroqClient()
-    store = SecretServiceKeyStore()
-    apps = MacAppLauncher()
-    browser = MacBrowserLauncher()
-    controller = Controller(
-        recorder=recorder,
-        groq=groq,
+    bundle = PlatformBundle(
+        id=PlatformId.MACOS,
+        settings=settings,
+        recorder=MacAudioRecorder(
+            settings.audio_dir, amplitude_path=settings.amplitude_path
+        ),
+        hotkeys=HotkeyService(lambda _mode: None),
+        target=target,
         delivery=delivery,
-        history=history,
-        feedback=feedback,
-        key_provider=lambda: effective_key(store).value,
-        amplitude_path=settings.amplitude_path,
-        indicator_control_path=settings.indicator_control_path,
-        browser_launcher=browser,
-        app_launcher=apps,
+        apps=MacAppLauncher(),
+        browser=MacBrowserLauncher(),
+        feedback=MacFeedback(
+            amplitude_path=settings.amplitude_path,
+            control_path=settings.indicator_control_path,
+            log_dir=settings.log_dir,
+        ),
+        key_store=SecretServiceKeyStore(),
+        run=lambda _controller: 0,
     )
-    assistant = CodexRunner()
-
-    def show_assistant_result(text: str) -> None:
-        # Prefer the real assistant reply; never fall back to paste-default copy.
-        message = (text or "").strip() or "Assistant returned no output."
-        feedback.notify("paste", message[:160])
-
-    controller.codex = assistant
-    controller.result_window = ResultWindow(show_assistant_result)
+    assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
+    controller = assembly.controller
+    logger = assembly.logger
 
     shutdown_event = threading.Event()
 
