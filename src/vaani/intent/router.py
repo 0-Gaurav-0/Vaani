@@ -13,9 +13,52 @@ from vaani.intent.interrogative import (
 )
 from vaani.intent.lexicon import Lexicon
 from vaani.intent.normalize import detect_modifiers, normalize
-from vaani.intent.schema import Intent
+from vaani.intent.schema import Context, Intent
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
+
+
+def prefer_verifiable_format(
+    intent: Intent,
+    context: Context,
+    registry: Registry,
+    *,
+    platform: PlatformId,
+) -> Intent:
+    """Prefer ``project.format`` (rung 4) over ``editor.format`` (rung 7) (T5.3).
+
+    When a profile formatter exists, keep/upgrade to ``project.format``.
+    Otherwise fall back to the keystroke macro when the computer-use pack is on.
+    """
+    if intent.verb not in {"project.format", "editor.format"}:
+        return intent
+    has_formatter = bool(
+        context.project is not None
+        and (context.project.format or context.project.lint)
+    )
+    enabled = {verb.name for verb in registry.enabled(platform)}
+
+    def _as(verb_name: str) -> Intent:
+        verb = registry.get(verb_name)
+        rung = verb.rung if verb is not None else (4 if verb_name == "project.format" else 7)
+        return Intent(
+            verb=verb_name,
+            slots=dict(intent.slots),
+            rung=rung,
+            confidence=intent.confidence,
+            source=intent.source,
+            mode=intent.mode,
+            utterance=intent.utterance,
+            raw_utterance=intent.raw_utterance,
+            modifiers=intent.modifiers,
+            brain=intent.brain,
+        )
+
+    if has_formatter and "project.format" in enabled:
+        return intent if intent.verb == "project.format" else _as("project.format")
+    if "editor.format" in enabled:
+        return intent if intent.verb == "editor.format" else _as("editor.format")
+    return intent
 
 
 class Router:

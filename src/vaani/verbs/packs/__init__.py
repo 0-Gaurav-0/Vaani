@@ -1,5 +1,6 @@
 """Installable verb packs. ``core``/``procs``/``project``/``window`` are always on."""
 
+from vaani.verbs.packs.computer_use import COMPUTER_USE_VERB_NAMES
 from vaani.verbs.packs.docker import DOCKER_VERB_NAMES
 from vaani.verbs.packs.forge import FORGE_VERB_NAMES
 from vaani.verbs.packs.pkg import PKG_VERB_NAMES
@@ -21,6 +22,7 @@ from vaani.verbs.packs.window import WINDOW_VERB_NAMES
 __all__ = [
     "ALWAYS_ON_PACKS",
     "BUILTIN_PACKS",
+    "COMPUTER_USE_VERB_NAMES",
     "DOCKER_VERB_NAMES",
     "FORGE_VERB_NAMES",
     "INSTALLABLE_PACKS",

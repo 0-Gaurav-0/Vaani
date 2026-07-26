@@ -16,6 +16,7 @@ from vaani.cli import (
 from vaani.intent.schema import Context, Intent, Result, RiskClass, SlotSpec, Status, Support, Verb
 from vaani.platform.protocol import PlatformId
 from vaani.policy.undo import UNDO_VERB_NAMES
+from vaani.verbs.packs.computer_use import COMPUTER_USE_VERB_NAMES
 from vaani.verbs.packs.core import CORE_VERB_NAMES
 from vaani.verbs.packs.docker import DOCKER_VERB_NAMES
 from vaani.verbs.packs.forge import FORGE_VERB_NAMES
@@ -164,6 +165,7 @@ def test_caps_completeness_json(capsys: pytest.CaptureFixture[str], tmp_path) ->
         | DOCKER_VERB_NAMES
         | GIT_VERB_NAMES
         | FORGE_VERB_NAMES
+        | COMPUTER_USE_VERB_NAMES
         | UNDO_VERB_NAMES
     )
     for verb_name, row in verbs.items():

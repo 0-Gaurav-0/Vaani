@@ -39,7 +39,7 @@ from .context import build_context
 from .exec.runner import run as exec_run
 from .exec.supervisor import Supervisor
 from .intent.interrogative import refuse_interrogative, should_refuse_interrogative
-from .intent.router import Router
+from .intent.router import Router, prefer_verifiable_format
 from .intent.schema import Context, Intent, Result, Status
 from .platform import detect_os
 from .policy.confirm import ConfirmEngine, requires_confirm
@@ -82,6 +82,7 @@ class Controller:
                  system: Any | None = None,
                  window: Any | None = None,
                  terminal: Any | None = None,
+                 input_synth: Any | None = None,
                  supervisor: Any | None = None,
                  settings: Any | None = None,
                  vocab_path: str | os.PathLike[str] | None = None):
@@ -93,6 +94,7 @@ class Controller:
         self.system = system
         self.window = window
         self.terminal = terminal
+        self.input = input_synth
         if supervisor is not None:
             self.supervisor = supervisor
         else:
@@ -170,6 +172,7 @@ class Controller:
             self.registry,
             run_fn=exec_run,
             get_platform=detect_os,
+            get_input=lambda: self.input,
         )
         packs_settings = settings
         if packs_settings is None:
@@ -506,10 +509,13 @@ class Controller:
         intent = self.router.route(raw, platform=platform)
         if intent is None:
             raise RuntimeError("assistant runner unavailable")
+        context = build_context(platform, runner=exec_run)
+        intent = prefer_verifiable_format(
+            intent, context, self.registry, platform=platform
+        )
         verb = self.registry.get(intent.verb)
         if verb is None:
             raise RuntimeError("assistant runner unavailable")
-        context = build_context(platform, runner=exec_run)
         # Interrogatives targeting mutating verbs: refuse before confirm/handler.
         # Guide/screen-offer is deferred (parallel-agents §0 / T2.5 override).
         if should_refuse_interrogative(verb, intent):
