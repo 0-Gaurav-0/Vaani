@@ -11,6 +11,16 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vaani.intent.lexicon import Lexicon
 
+# Longer phrases first so "just show me the command" wins over "just show me".
+_DRY_RUN_PHRASES: tuple[str, ...] = (
+    "don't run it",
+    "dont run it",
+    "don’t run it",
+    "just show me the command",
+    "just show me",
+    "what would you run",
+)
+
 _FILLER_PHRASES: tuple[str, ...] = (
     "can you please",
     "could you please",
@@ -94,10 +104,23 @@ _BARE_PORT = re.compile(r"^\d{2,5}$")
 _LOCALHOST_NUMBER = re.compile(r"(?<!\w)localhost\s+(\d{1,5})(?!\w)")
 
 
-def normalize(text: str, *, lexicon: Lexicon | None = None) -> str:
-    """Casefold, strip fillers, expand separators/numbers, apply lexicon.
+def detect_modifiers(text: str) -> frozenset[str]:
+    """Return intent modifiers present in ``text`` (e.g. ``dry_run``)."""
+    if not text or not text.strip():
+        return frozenset()
+    folded = " ".join(text.casefold().strip().split())
+    for phrase in _DRY_RUN_PHRASES:
+        if re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", folded):
+            return frozenset({"dry_run"})
+    return frozenset()
 
-    Safe to call more than once (idempotent for a fixed lexicon).
+
+def normalize(text: str, *, lexicon: Lexicon | None = None) -> str:
+    """Casefold, strip fillers/dry-run cues, expand separators/numbers, apply lexicon.
+
+    Safe to call more than once (idempotent for a fixed lexicon). Dry-run cue
+    phrases are removed from the matching copy; callers that need the modifier
+    should call :func:`detect_modifiers` on the raw transcript.
     """
     from vaani.intent.lexicon import Lexicon as LexiconCls
 
@@ -106,11 +129,21 @@ def normalize(text: str, *, lexicon: Lexicon | None = None) -> str:
 
     lex = lexicon if lexicon is not None else LexiconCls.builtin()
     result = " ".join(text.casefold().strip().split())
+    result = _strip_dry_run_phrases(result)
     result = _strip_fillers(result)
     result = _replace_separators(result)
     result = _replace_number_words(result)
     result = re.sub(r"\b(\d+)\s+percent\b", r"\1", result)
     result = lex.apply(result)
+    return " ".join(result.split())
+
+
+def _strip_dry_run_phrases(text: str) -> str:
+    result = f" {text} "
+    for phrase in _DRY_RUN_PHRASES:
+        result = re.sub(rf"(?<!\w){re.escape(phrase)}(?!\w)", " ", result)
+    # Drop leftover dash separators left by "don't run it — just show me …".
+    result = re.sub(r"\s[—–]\s", " ", result)
     return " ".join(result.split())
 
 

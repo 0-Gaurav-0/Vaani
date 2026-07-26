@@ -24,6 +24,7 @@ from .session_loop import SessionLoop
 from .intent.router import Router
 from .intent.schema import Context, Status
 from .platform import detect_os
+from .policy.dryrun import dispatch
 from .verbs.packs.core import browser_intent, build_core_registry
 
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
@@ -347,8 +348,8 @@ class Controller:
             screen=None,
             session=None,
         )
-        # Policy engine lands in a later slice; S0 always proceeds.
-        result = verb.handler(intent, context)
+        # Confirm/risk policy lands in T2.1; dry-run is enforced in dispatch.
+        result = dispatch(verb, intent, context)
         if result.status is Status.FAILED:
             raise RuntimeError(result.detail or result.summary or "assistant failed")
         final = result.detail or result.summary

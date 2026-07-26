@@ -4,22 +4,32 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sys
 from typing import Any, Mapping, Sequence
 
-from vaani.apps import APPS as LINUX_APPS
 from vaani.apps import launch_app as linux_launch_app
 from vaani.apps import resolve_app as linux_resolve_app
 from vaani.config import Settings
 from vaani.intent.schema import Context, Intent, Result, Status, Support
 from vaani.platform import UnsupportedPlatform, build_platform, detect_os
-from vaani.platform.protocol import AppTarget, PlatformId
+from vaani.platform.protocol import PlatformId
+from vaani.policy.dryrun import dispatch, materialize_argv
 from vaani.secrets import load_env_file
 from vaani.sites import resolve_site
-from vaani.known_folders import resolve_known_folder
 from vaani.verbs.packs.core import build_core_registry
 from vaani.verbs.registry import Registry
+
+# Re-export for callers/tests that imported materialize from the CLI module.
+__all__ = (
+    "build_parser",
+    "build_registry",
+    "cmd_caps",
+    "cmd_do",
+    "main",
+    "manual_record",
+    "materialize_argv",
+    "run_daemon",
+)
 
 _PLATFORMS = (PlatformId.LINUX, PlatformId.MACOS, PlatformId.WINDOWS)
 
@@ -147,18 +157,6 @@ def _open_browser_for(platform: PlatformId) -> Any:
     return open_browser
 
 
-def _app_catalog(platform: PlatformId) -> tuple[tuple[tuple[str, ...], AppTarget], ...]:
-    if platform is PlatformId.MACOS:
-        from vaani.platform.macos.apps import APPS
-
-        return APPS
-    if platform is PlatformId.WINDOWS:
-        from vaani.platform.windows.apps import APPS
-
-        return APPS
-    return LINUX_APPS
-
-
 def _resolve_launch(platform: PlatformId) -> tuple[Any, Any]:
     if platform is PlatformId.MACOS:
         from vaani.platform.macos.apps import launch_app, resolve_app
@@ -213,144 +211,6 @@ def build_registry(platform: PlatformId | None = None) -> Registry:
         get_platform=lambda: plat,
     )
     return registry
-
-
-def _find_app_target(
-    name: str,
-    catalog: tuple[tuple[tuple[str, ...], AppTarget], ...],
-) -> AppTarget | None:
-    needle = name.casefold().strip()
-    for aliases, target in catalog:
-        if target.name.casefold() == needle:
-            return target
-        if any(alias.casefold() == needle for alias in aliases):
-            return target
-    return None
-
-
-def materialize_argv(
-    verb_name: str,
-    slots: Mapping[str, Any],
-    *,
-    platform: PlatformId,
-) -> tuple[str, ...] | None:
-    """Best-effort argv for dry-run. Returns None when no shape is known."""
-    if verb_name == "app.open":
-        name = str(slots.get("name") or "")
-        target = _find_app_target(name, _app_catalog(platform))
-        if target is None:
-            return None
-        if platform is PlatformId.MACOS:
-            return ("open", "-a", target.native_name or target.name)
-        executable = next(
-            (path for exe in target.executables if (path := shutil.which(exe))),
-            target.executables[0] if target.executables else name,
-        )
-        return (executable, *target.arguments)
-
-    if verb_name in {"site.open", "browser.open", "site.search"}:
-        if verb_name == "site.search":
-            from urllib.parse import quote_plus
-
-            query = str(slots.get("query") or "")
-            url = f"https://www.google.com/search?q={quote_plus(query)}"
-        elif slots.get("port") and not slots.get("url"):
-            url = f"http://localhost:{slots['port']}"
-        else:
-            url = str(slots.get("url") or "about:blank")
-        if platform is PlatformId.MACOS:
-            return ("open", url)
-        if platform is PlatformId.WINDOWS:
-            return ("cmd", "/c", "start", "", url)
-        return ("xdg-open", url)
-
-    if verb_name == "browser.window.private":
-        if platform is PlatformId.MACOS:
-            return ("open", "-na", "Brave Browser", "--args", "--incognito")
-        if platform is PlatformId.WINDOWS:
-            return ("brave.exe", "--incognito")
-        return ("brave-browser", "--incognito")
-
-    if verb_name == "app.quit":
-        name = str(slots.get("name") or "App")
-        if platform is PlatformId.MACOS:
-            return ("osascript", "-e", f'tell application "{name}" to quit')
-        if platform is PlatformId.WINDOWS:
-            return ("taskkill", "/IM", f"{name}.exe")
-        return ("wmctrl", "-c", name)
-
-    if verb_name == "system.lock":
-        if platform is PlatformId.MACOS:
-            return (
-                "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
-                "-suspend",
-            )
-        if platform is PlatformId.WINDOWS:
-            return ("rundll32", "user32.dll,LockWorkStation")
-        return ("loginctl", "lock-session")
-
-    if verb_name == "system.display.sleep":
-        if platform is PlatformId.MACOS:
-            return ("pmset", "displaysleepnow")
-        if platform is PlatformId.WINDOWS:
-            return ("powershell", "-Command", "display-sleep")
-        return ("xset", "dpms", "force", "off")
-
-    if verb_name == "system.volume.set":
-        if "muted" in slots:
-            flag = "1" if slots.get("muted") in {True, "true", "1", 1} else "0"
-            if platform is PlatformId.MACOS:
-                muted = "true" if flag == "1" else "false"
-                return ("osascript", "-e", f"set volume output muted {muted}")
-            return ("pactl", "set-sink-mute", "@DEFAULT_SINK@", flag)
-        level = str(slots.get("level") or "0")
-        if platform is PlatformId.MACOS:
-            return ("osascript", "-e", f"set volume output volume {level}")
-        if platform is PlatformId.WINDOWS:
-            return ("volume.set", level)
-        return ("pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{level}%")
-
-    if verb_name == "system.dnd.set":
-        enabled = slots.get("enabled", True) not in {False, "false", "0", 0}
-        if platform is PlatformId.LINUX:
-            banners = "false" if enabled else "true"
-            return (
-                "gsettings",
-                "set",
-                "org.gnome.desktop.notifications",
-                "show-banners",
-                banners,
-            )
-        return ("system.dnd.set", "on" if enabled else "off")
-
-    if verb_name == "system.ip.copy":
-        return ("system.ip.copy",)
-
-    if verb_name == "files.open_dir":
-        folder = str(slots.get("folder") or slots.get("name") or "")
-        path = resolve_known_folder(folder, platform)
-        if path is None:
-            return ("files.open_dir", folder)
-        if platform is PlatformId.MACOS:
-            return ("open", str(path))
-        if platform is PlatformId.WINDOWS:
-            return ("explorer", str(path))
-        return ("xdg-open", str(path))
-
-    if verb_name == "files.reveal":
-        if platform is PlatformId.MACOS:
-            return ("open", "-R", "${workspace}")
-        if platform is PlatformId.WINDOWS:
-            return ("explorer", "/select,${workspace}")
-        return ("nautilus", "--select", "${workspace}")
-
-    if verb_name == "agent.task":
-        from vaani.codex import CodexRunner
-
-        prompt = str(slots.get("prompt") or "")
-        return tuple(CodexRunner.command_for("codex", prompt))
-
-    return None
 
 
 def _make_context(platform: PlatformId) -> Context:
@@ -466,30 +326,9 @@ def cmd_do(
         brain=None,
     )
     context = _make_context(plat)
-
-    if dry_run:
-        dry_handler = getattr(verb.handler, "dry_run", None)
-        if callable(dry_handler):
-            result = dry_handler(intent, context)
-            argv = list(result.evidence) if result.evidence else None
-            _print_result(result, as_json=as_json, verb=verb_name, slots=slots, argv=argv)
-            return 0 if result.status is not Status.FAILED else 1
-
-        argv = materialize_argv(verb_name, slots, platform=plat)
-        if argv is None:
-            argv = (verb_name, *[f"{k}={slots[k]}" for k in sorted(slots)])
-        result = Result(
-            status=Status.DRY_RUN,
-            summary=" ".join(argv)[:80],
-            detail=" ".join(argv),
-            evidence=argv,
-            rung=verb.rung,
-        )
-        _print_result(result, as_json=as_json, verb=verb_name, slots=slots, argv=argv)
-        return 0
-
-    result = verb.handler(intent, context)
-    _print_result(result, as_json=as_json, verb=verb_name, slots=slots)
+    result = dispatch(verb, intent, context)
+    argv = list(result.evidence) if result.status is Status.DRY_RUN else None
+    _print_result(result, as_json=as_json, verb=verb_name, slots=slots, argv=argv)
     if result.status is Status.FAILED:
         return 1
     if result.status is Status.UNSUPPORTED:

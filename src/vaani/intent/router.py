@@ -7,7 +7,7 @@ from typing import Any
 
 from vaani.intent.grammar import Pattern, match
 from vaani.intent.lexicon import Lexicon
-from vaani.intent.normalize import normalize
+from vaani.intent.normalize import detect_modifiers, normalize
 from vaani.intent.schema import Intent
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
@@ -41,12 +41,13 @@ class Router:
     def route(self, transcript: str, *, platform: PlatformId) -> Intent | None:
         """Map ``transcript`` to an Intent for ``platform``, or None."""
         raw = transcript
+        modifiers = detect_modifiers(transcript)
         utterance = normalize(transcript, lexicon=self.lexicon)
         enabled = {verb.name for verb in self.registry.enabled(platform)}
 
         # Rung 1 — today's resolver order (app before site) preserves §4.2.
         if "app.open" in enabled and self.resolve_app is not None:
-            app = self.resolve_app(raw)
+            app = self.resolve_app(utterance or raw)
             if app is not None:
                 name = getattr(app, "name", None) or str(app)
                 return self._intent(
@@ -55,10 +56,11 @@ class Router:
                     rung=1,
                     utterance=utterance,
                     raw=raw,
+                    modifiers=modifiers,
                 )
 
         if "site.open" in enabled and self.resolve_site is not None:
-            site = self.resolve_site(raw)
+            site = self.resolve_site(utterance or raw)
             if site is not None:
                 return self._intent(
                     "site.open",
@@ -70,6 +72,7 @@ class Router:
                     rung=1,
                     utterance=utterance,
                     raw=raw,
+                    modifiers=modifiers,
                 )
 
         hit = match(utterance, self.patterns, lexicon=self.lexicon)
@@ -85,6 +88,7 @@ class Router:
                     rung=rung,
                     utterance=utterance,
                     raw=raw,
+                    modifiers=modifiers,
                 )
 
         if "agent.task" in enabled:
@@ -96,6 +100,7 @@ class Router:
                 raw=raw,
                 confidence=0.5,
                 source="fallback",
+                modifiers=modifiers,
             )
         return None
 
@@ -109,6 +114,7 @@ class Router:
         raw: str,
         confidence: float = 1.0,
         source: str = "grammar",
+        modifiers: frozenset[str] = frozenset(),
     ) -> Intent:
         return Intent(
             verb=verb,
@@ -119,6 +125,6 @@ class Router:
             mode="act",
             utterance=utterance,
             raw_utterance=raw,
-            modifiers=frozenset(),
+            modifiers=modifiers,
             brain=None,
         )
