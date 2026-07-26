@@ -33,7 +33,8 @@ def test_classify_role_editor_and_terminal() -> None:
     assert classify_role("Code", "Visual Studio Code") == "editor"
     assert classify_role("Terminal", "zsh — vaani") == "terminal"
     assert classify_role("kitty", None) == "terminal"
-    assert classify_role("Safari", "Apple") == "other"
+    assert classify_role("Safari", "Apple") == "browser"
+    assert classify_role("Finder", "Desktop") == "other"
 
 
 def test_project_root_from_document(tmp_path: Path) -> None:

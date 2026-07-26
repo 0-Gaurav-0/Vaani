@@ -20,6 +20,7 @@ from .browser import WindowsBrowserLauncher
 from .delivery import WindowsDelivery
 from .feedback import WindowsFeedback
 from .hotkeys import WindowsHotkeyService
+from .input import WindowsInputSynth
 from .system import WindowsSystemControl
 from .target import WindowsTargetProbe
 
@@ -49,6 +50,7 @@ def build_windows(settings: Settings | None = None) -> PlatformBundle:
         key_store=SecretServiceKeyStore(),
         run=lambda _controller: run_windows(settings),
         system=WindowsSystemControl(),
+        input=WindowsInputSynth(),
     )
 
 

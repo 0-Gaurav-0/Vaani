@@ -42,6 +42,7 @@ PROJECT_VERB_NAMES: frozenset[str] = frozenset(
         "project.build",
         "project.typecheck",
         "project.deps.install",
+        "project.format",
         "job.list",
         "job.logs",
         "app.terminal.open",
@@ -237,6 +238,22 @@ def project_patterns() -> tuple[Pattern, ...]:
             priority=54,
         ),
         Pattern(
+            verb="project.format",
+            any_of=(
+                (
+                    "format this file",
+                    "format the file",
+                    "format file",
+                    "format the current file",
+                    "format the project",
+                    "run the formatter",
+                ),
+            ),
+            exact=True,
+            # Higher than editor.format (rung 7) — T5.3 ladder preference.
+            priority=60,
+        ),
+        Pattern(
             verb="job.list",
             any_of=(
                 (
@@ -399,16 +416,27 @@ def _command_from_context(
     field: str,
 ) -> tuple[str, ...] | ProfileMiss:
     """Prefer Context.project argv; otherwise detect from workspace root."""
-    if field not in {"test", "build", "dev", "typecheck", "lint"}:
+    if field not in {"test", "build", "dev", "typecheck", "lint", "format"}:
         raise ValueError(f"unknown project command field: {field!r}")
     if context.project is not None:
-        argv = getattr(context.project, field)
+        argv = getattr(context.project, field, None)
+        if field == "format" and not argv:
+            # Prefer dedicated format; lint is a weaker verifiable fallback.
+            argv = context.project.lint
         if argv:
             return tuple(argv)
         return ProfileMiss(root=Path(context.project.root))
     root = _resolve_workspace_root(context)
     if root is None:
         return ProfileMiss(root=Path("."), checked=())
+    if field == "format":
+        detected = detect_project(root)
+        if isinstance(detected, ProjectProfile):
+            argv = detected.format or detected.lint
+            if argv:
+                return tuple(argv)
+            return ProfileMiss(root=detected.root)
+        return detected
     return require_command(root, field)
 
 
@@ -845,6 +873,7 @@ def build_project_verbs(
         argv: tuple[str, ...],
         root: Path,
         timeout: float = _ONESHOT_TIMEOUT_S,
+        rung: int = 3,
     ) -> Result:
         if "dry_run" in intent.modifiers:
             return _result(
@@ -853,6 +882,7 @@ def build_project_verbs(
                 detail=_display(argv),
                 evidence=argv,
                 context=context,
+                rung=rung,
             )
         if runner is None:
             return _result(
@@ -861,6 +891,7 @@ def build_project_verbs(
                 detail="project pack requires an injected run_fn",
                 evidence=argv,
                 context=context,
+                rung=rung,
             )
         cancel = get_cancel() if get_cancel is not None else None
         completed = runner(
@@ -887,6 +918,7 @@ def build_project_verbs(
                 detail="Cancelled mid-run",
                 evidence=argv + (f"exit={completed.returncode}",),
                 context=context,
+                rung=rung,
             )
         if completed.timed_out:
             return _result(
@@ -895,6 +927,7 @@ def build_project_verbs(
                 detail=f"Timed out after {timeout:.0f}s",
                 evidence=argv + ("timed_out",),
                 context=context,
+                rung=rung,
             )
         failing = parse_failing_names(log_text)
         if completed.returncode == 0:
@@ -904,6 +937,7 @@ def build_project_verbs(
                 detail=log_text[-4000:] if log_text else f"{field} ok",
                 evidence=argv + ("exit=0",),
                 context=context,
+                rung=rung,
             )
         fail_bit = f"; failing: {', '.join(failing)}" if failing else ""
         detail_parts = [
@@ -919,6 +953,7 @@ def build_project_verbs(
             detail="\n".join(detail_parts),
             evidence=argv + (f"exit={completed.returncode}", *failing),
             context=context,
+            rung=rung,
         )
 
     def handle_test_run(intent: Intent, context: Context) -> Result:
@@ -1032,6 +1067,39 @@ def build_project_verbs(
             job_key="project.typecheck",
             argv=tuple(cmd),
             root=root,
+        )
+
+    def handle_format(intent: Intent, context: Context) -> Result:
+        """Rung-4 verifiable formatter (T5.3) — preferred over editor.format."""
+        root = _resolve_workspace_root(context)
+        if root is None:
+            return _result(
+                status=Status.REFUSED,
+                summary="No workspace",
+                detail="project.format requires a workspace",
+                context=context,
+                rung=4,
+            )
+        cmd = _command_from_context(context, "format")
+        if isinstance(cmd, ProfileMiss):
+            miss = _refuse_miss(cmd, context=context, field="format")
+            return _result(
+                status=miss.status,
+                summary=miss.summary,
+                detail=miss.detail,
+                evidence=miss.evidence,
+                context=context,
+                rung=4,
+            )
+        return _run_oneshot(
+            intent,
+            context,
+            field="Format",
+            verb="project.format",
+            job_key="project.format",
+            argv=tuple(cmd),
+            root=root,
+            rung=4,
         )
 
     def handle_deps_install(intent: Intent, context: Context) -> Result:
@@ -1382,6 +1450,7 @@ def build_project_verbs(
         handle_test_run,
         handle_build,
         handle_typecheck,
+        handle_format,
         handle_deps_install,
         handle_job_list,
         handle_job_logs,
@@ -1479,6 +1548,18 @@ def build_project_verbs(
             undo=None,
             pack="project",
             handler=handle_deps_install,
+        ),
+        Verb(
+            name="project.format",
+            title="Run the project formatter",
+            slots={},
+            rung=4,
+            risk=RiskClass.R1,
+            requires=frozenset({"workspace"}),
+            support=_ALL_SUPPORT,
+            undo=None,
+            pack="project",
+            handler=handle_format,
         ),
         Verb(
             name="job.list",

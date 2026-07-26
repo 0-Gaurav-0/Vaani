@@ -75,6 +75,22 @@ _TERMINAL_NAMES = frozenset(
     }
 )
 
+_BROWSER_NAMES = frozenset(
+    {
+        "chrome",
+        "google chrome",
+        "chromium",
+        "firefox",
+        "safari",
+        "edge",
+        "microsoft edge",
+        "brave",
+        "opera",
+        "vivaldi",
+        "arc",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ActiveFocus:
@@ -118,6 +134,9 @@ def classify_role(app_id: str | None, window_title: str | None = None) -> str:
     for name in _TERMINAL_NAMES:
         if name in blob:
             return "terminal"
+    for name in _BROWSER_NAMES:
+        if name in blob:
+            return "browser"
     for name in _EDITOR_NAMES:
         if name in blob:
             return "editor"

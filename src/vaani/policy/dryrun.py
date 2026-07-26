@@ -72,6 +72,29 @@ def materialize_argv(
 
         return materialize_forge_argv(verb_name, slots, context=context)
 
+    if verb_name in {
+        "browser.tab.reload",
+        "browser.tab.close",
+        "editor.format",
+        "editor.nav",
+        "terminal.cd",
+        "terminal.clear",
+        "terminal.repeat",
+        "terminal.env.export",
+    }:
+        from vaani.verbs.packs.computer_use import materialize_computer_use_argv
+
+        return materialize_computer_use_argv(
+            verb_name, slots, platform=platform, context=context
+        )
+
+    if verb_name == "project.format":
+        if context is not None and context.project is not None:
+            argv = context.project.format or context.project.lint
+            if argv:
+                return tuple(argv)
+        return ("project.format", "<profile.format>")
+
     if verb_name == "app.open":
         name = str(slots.get("name") or "")
         target = _find_app_target(name, _app_catalog(platform))
