@@ -42,10 +42,9 @@ def test_read_missing_or_corrupt(tmp_path: Path):
 
 def test_phase_roundtrip(tmp_path: Path):
     path = tmp_path / "indicator_phase"
-    write_phase(path, "recording")
-    assert read_phase(path) == "recording"
-    write_phase(path, "processing")
-    assert read_phase(path) == "processing"
+    for phase in ("recording", "processing", "confirming", "working"):
+        write_phase(path, phase)
+        assert read_phase(path) == phase
     clear_phase(path)
     assert read_phase(path) == "recording"
 
@@ -54,3 +53,11 @@ def test_reject_unknown_phase(tmp_path: Path):
     path = tmp_path / "indicator_phase"
     with pytest.raises(ValueError):
         write_phase(path, "done")
+
+
+def test_unknown_phase_falls_back_to_recording(tmp_path: Path):
+    path = tmp_path / "indicator_phase"
+    path.write_text("done", encoding="utf-8")
+    assert read_phase(path) == "recording"
+    path.write_text("not-a-phase", encoding="utf-8")
+    assert read_phase(path) == "recording"
