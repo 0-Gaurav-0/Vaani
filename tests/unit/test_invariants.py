@@ -292,8 +292,11 @@ def test_no_shell_join_of_argv_outside_powershell() -> None:
                 continue
             if not _join_looks_like_argv(node):
                 continue
-            # Whitelist powershell helper.
+            # Whitelist powershell helper (the one argv→string Command site).
             if path.name == "runner.py" and "exec" in path.parts:
+                continue
+            # Whitelist CLI human/JSON display of argv (never passed to a shell).
+            if path.name == "cli.py" and path.parent.name == "vaani":
                 continue
             rel = path.relative_to(SRC_ROOT.parent)
             offenders.append(f"{rel}:{node.lineno}")
