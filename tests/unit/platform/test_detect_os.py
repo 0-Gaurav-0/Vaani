@@ -18,13 +18,25 @@ def test_detect_os_unknown():
         detect_os("plan9")
 
 
-def test_build_platform_rejects_macos(monkeypatch):
+def test_build_platform_dispatches_macos(monkeypatch):
+    sentinel = object()
     monkeypatch.setattr("vaani.platform.detect_os", lambda: PlatformId.MACOS)
-    with pytest.raises(UnsupportedPlatform, match="macOS"):
-        build_platform()
+
+    def _fake_build(settings=None):
+        return sentinel
+
+    monkeypatch.setattr(
+        "vaani.platform.macos.runtime.build_macos",
+        _fake_build,
+    )
+    assert build_platform() is sentinel
 
 
-def test_build_platform_rejects_windows(monkeypatch):
+def test_build_platform_dispatches_windows(monkeypatch):
+    sentinel = object()
     monkeypatch.setattr("vaani.platform.detect_os", lambda: PlatformId.WINDOWS)
-    with pytest.raises(UnsupportedPlatform, match="Windows"):
-        build_platform()
+    monkeypatch.setattr(
+        "vaani.platform.windows.runtime.build_windows",
+        lambda settings=None: sentinel,
+    )
+    assert build_platform() is sentinel

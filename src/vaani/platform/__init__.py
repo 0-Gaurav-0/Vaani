@@ -37,11 +37,11 @@ def build_platform(settings: Settings | None = None) -> PlatformBundle:
 
         return build_linux(settings)
     if os_id is PlatformId.MACOS:
-        raise UnsupportedPlatform(
-            "macOS adapter is not implemented yet; see docs/install once P1-02 lands"
-        )
+        from .macos.runtime import build_macos
+
+        return build_macos(settings)
     if os_id is PlatformId.WINDOWS:
-        raise UnsupportedPlatform(
-            "Windows adapter is not implemented yet; see docs/install once P1-03 lands"
-        )
+        from .windows.runtime import build_windows
+
+        return build_windows(settings)
     raise UnsupportedPlatform(f"unsupported platform: {os_id}")
