@@ -6,7 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "vaani"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["httpx", "keyring", "python-xlib"]
+dependencies = [
+  "httpx",
+  "keyring",
+  "python-xlib; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+macos = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
+windows = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
+linux = ["python-xlib"]
 
 [project.scripts]
 vaani = "vaani.__main__:main"

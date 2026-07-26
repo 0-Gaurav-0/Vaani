@@ -1,7 +1,7 @@
 """Recording indicator model and optional GTK pill view."""
 from __future__ import annotations
 from collections import deque
-import math, struct, subprocess, threading, json, os, signal
+import math, struct, subprocess, threading, json, os, signal, time
 from pathlib import Path
 
 class RecordingIndicator:
@@ -51,9 +51,20 @@ class AmplitudeChannel:
         except Exception: return None
     def close(self): self.closed=True
 def dispatch_control(action: str, pid: int | None = None):
-    target = pid or os.getppid(); sig = signal.SIGUSR2 if action == "cancel" else signal.SIGUSR1
-    try: os.kill(target, sig)
-    except Exception: return False
+    """Ask the parent daemon to stop or cancel (file + optional SIGUSR)."""
+    try:
+        from .indicator_protocol import resolve_control_path, write_command
+        write_command(resolve_control_path(), action)
+    except Exception:
+        pass
+    if not hasattr(signal, "SIGUSR1"):
+        return True
+    target = pid or os.getppid()
+    sig = signal.SIGUSR2 if action == "cancel" else signal.SIGUSR1
+    try:
+        os.kill(target, sig)
+    except Exception:
+        return False
     return True
 
 def pcm16_rms(data: bytes) -> float:
@@ -136,40 +147,59 @@ class GtkRecordingIndicator(RecordingIndicator):
 
 
 def main() -> None:
-    """Standalone indicator process used by Feedback."""
+    """Standalone GTK indicator (legacy). Prefer ``linux.indicator_app`` (tk)."""
     try:
         from gi.repository import Gtk, GLib
+        from .indicator_protocol import read_phase, resolve_phase_path
+
         app = Gtk.Application(application_id="com.vaani.RecordingIndicator")
+        phase_path = resolve_phase_path()
+
         def activate(application):
             indicator = GtkRecordingIndicator(
                 on_cancel=lambda: dispatch_control("cancel"),
                 on_stop=lambda: dispatch_control("stop"),
-            ); indicator.start()
+            )
+            indicator.start()
             indicator.widget.set_application(application)
             indicator.widget.present()
             # Do not open a second parec stream: PulseAudio source contention
             # can starve the primary recorder and produce silence transcripts.
-            proc = None; stop = threading.Event()
+            t0 = time.monotonic()
+
             def refresh():
                 try:
-                    level = float(Path('/tmp/vaani-amplitude').read_text())
-                    indicator.update_amplitude(level)
-                except Exception: pass
+                    phase = read_phase(phase_path)
+                    if phase == "processing":
+                        # Animate a gentle pulse so the pill is not dismissed.
+                        pulse = 0.35 + 0.65 * abs(math.sin((time.monotonic() - t0) * 3.2))
+                        indicator.update_amplitude(pulse)
+                    else:
+                        amp = Path(os.environ.get("VAANI_AMPLITUDE_PATH", "/tmp/vaani-amplitude"))
+                        level = float(amp.read_text())
+                        indicator.update_amplitude(level)
+                except Exception:
+                    pass
                 return bool(indicator.visible)
+
             GLib.timeout_add(50, refresh)
+
             def cleanup(*_):
-                stop.set()
-                if proc and proc.poll() is None: proc.terminate()
+                return False
+
             indicator.widget.connect("close-request", cleanup)
+
         app.connect("activate", activate)
         app.run([])
     except Exception:
         # On headless systems the process remains alive so lifecycle semantics
         # are consistent; parent termination still stops it deterministically.
-        import signal, time
-        def _exit(*_): raise SystemExit(0)
+        def _exit(*_):
+            raise SystemExit(0)
+
         signal.signal(signal.SIGTERM, _exit)
-        while True: time.sleep(60)
+        while True:
+            time.sleep(60)
 
 
 if __name__ == "__main__":

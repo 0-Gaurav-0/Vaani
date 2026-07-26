@@ -31,11 +31,27 @@ def test_retry_429_requires_valid_header():
     c=client(h); c.models('k'); assert len(calls)==2
 
 def test_cleanup_strict_and_temperature():
+    from vaani.groq import _cleanup_too_divergent
+
     def h(req):
-        payload=json.loads(req.read()); assert payload['model']=='openai/gpt-oss-120b'; assert payload['max_tokens']==4096; assert payload['temperature']==0.1; assert 'untrusted' in payload['messages'][0]['content']
-        return httpx.Response(200,json={'choices':[{'message':{'content':'```ok```'},'finish_reason':'stop'}]})
-    result = client(h).cleanup('raw','k')
-    assert result.text=='ok' and not result.used_fallback
+        payload=json.loads(req.read()); assert payload['model']=='llama-3.1-8b-instant'; assert payload['max_tokens']==4096; assert payload['temperature']==0
+        instruction = payload['messages'][0]['content']
+        assert 'untrusted' in instruction
+        assert 'Keep the speaker' in instruction
+        assert 'Do not replace words' in instruction
+        assert 'uh, um, umm, ah, ahh, hmm' in instruction
+        return httpx.Response(200,json={'choices':[{'message':{'content':'```I went to the store yesterday```'},'finish_reason':'stop'}]})
+    result = client(h).cleanup('I went to the store uh yesterday','k')
+    assert result.text=='I went to the store yesterday' and not result.used_fallback
+    assert not _cleanup_too_divergent('I went uh home', 'I went home')
+    assert _cleanup_too_divergent('I went to the store yesterday', 'I visited the shop earlier today')
+
+
+def test_cleanup_falls_back_when_model_rewrites_words():
+    def h(req):
+        return httpx.Response(200,json={'choices':[{'message':{'content':'I visited the shop earlier today'},'finish_reason':'stop'}]})
+    result = client(h).cleanup('I went to the store yesterday','k')
+    assert result.used_fallback and result.text == 'I went to the store yesterday'
 
 def test_cleanup_rejects_bad_finish_and_cancellation():
     def h(req): return httpx.Response(200,json={'choices':[{'message':{'content':'new'},'finish_reason':'length'}]})

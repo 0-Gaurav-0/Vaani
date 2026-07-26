@@ -16,7 +16,9 @@ class DictationMode(str, Enum):
 class GroqModelSettings:
     base_url: str = "https://api.groq.com/openai/v1"
     transcription_model: str = "whisper-large-v3-turbo"
-    cleanup_model: str = "openai/gpt-oss-120b"
+    # Instant 8B is much faster than gpt-oss-120b for cleanup; quality is enough
+    # for punctuation / light Hinglish cleanup.
+    cleanup_model: str = "llama-3.1-8b-instant"
     response_format: str = "verbose_json"
     max_completion_tokens: int = 4096
 
