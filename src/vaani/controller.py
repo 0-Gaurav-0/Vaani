@@ -19,11 +19,22 @@ from .observability import exception_category, sanitize
 from .groq import GroqError
 from .apps import launch_app, resolve_app
 from .sites import resolve_site
-from .indicator_protocol import clear_command, read_command
+from .indicator_protocol import (
+    clear_command,
+    clear_pending_id,
+    parse_confirm_command,
+    read_command,
+    resolve_pending_path,
+    resolve_phase_path,
+    write_pending_id,
+    write_phase,
+)
 from .session_loop import SessionLoop
 from .intent.router import Router
-from .intent.schema import Context, Status
+from .intent.schema import Context, Result, Status
 from .platform import detect_os
+from .policy.confirm import ConfirmEngine, requires_confirm
+from .surface.result import format_result_message, show_result
 from .verbs.packs.core import browser_intent, build_core_registry
 
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
@@ -79,9 +90,14 @@ class Controller:
         self.events: list[ControllerEvent] = []; self._lock = threading.RLock()
         self._cancel = threading.Event(); self._token = 0; self._worker: threading.Thread | None = None
         self._record_started = 0.0; self._audio = None; self._shutdown = False
+        cache_dir = Path(self.amplitude_path).parent
+        self.indicator_phase_path = str(resolve_phase_path(cache_dir=cache_dir))
+        self.indicator_pending_path = str(resolve_pending_path(cache_dir=cache_dir))
+        self.confirm = ConfirmEngine()
         self._session = SessionLoop(logger=self.logger)
         self._session.add("indicator_control", self._poll_indicator_control)
         self._session.add("amplitude", self._write_amplitude)
+        self._session.add("confirm_expire", self._expire_confirm, every=0.25)
         self._session.start()
         self.registry, patterns = build_core_registry(
             resolve_app_fn=lambda text: resolve_app(text),
@@ -133,6 +149,9 @@ class Controller:
                 self._emit("busy")
                 self._feedback("busy")
                 return False
+            # New utterance cancels a pending confirm (never approves).
+            if self.confirm.peek() is not None:
+                self._invalidate_pending(reason="utterance")
             self.mode = mode.value if isinstance(mode, DictationMode) else str(mode)
             self._cancel.clear(); self._token += 1; token = self._token
             try: self._audio = self.recorder.start()
@@ -185,6 +204,10 @@ class Controller:
         self._worker = worker; worker.start(); return True
 
     def cancel(self) -> bool:
+        """Cancel capture/processing, or reject a pending confirm (Esc family)."""
+        pending = self.confirm.peek()
+        if pending is not None and self.state is AppState.IDLE:
+            return self.reject_pending(pending.id, via="hotkey")
         self._cancel.set()
         with self._lock:
             if self.state is AppState.RECORDING:
@@ -202,8 +225,31 @@ class Controller:
                 self._feedback("busy"); self._emit("cancelled"); return True
         return False
 
+    def approve_pending(self, action_id: str | None = None, *, via: str = "hotkey") -> bool:
+        """Approve the staged PendingAction (Enter / pill Approve)."""
+        pending = self.confirm.peek()
+        if pending is None:
+            return False
+        target = action_id or pending.id
+        return self._handle_approve(target, via=via)
+
+    def reject_pending(self, action_id: str | None = None, *, via: str = "hotkey") -> bool:
+        """Reject the staged PendingAction (Esc / pill Reject)."""
+        pending = self.confirm.peek()
+        if pending is None:
+            return False
+        target = action_id or pending.id
+        rejected = self.confirm.reject(target)
+        if rejected is None:
+            return False
+        self.logger.info("event=confirm_rejected id=%s via=%s", rejected.id, via)
+        self._emit("confirm_rejected")
+        self._clear_confirm_ui()
+        self._feedback("busy")
+        return True
+
     def _poll_indicator_control(self) -> None:
-        """Honor stop/cancel requests from the floating recording pill."""
+        """Honor stop/cancel/approve/reject requests from the floating pill."""
         try:
             command = read_command(self.indicator_control_path)
         except Exception:
@@ -214,6 +260,14 @@ class Controller:
             clear_command(self.indicator_control_path)
         except Exception:
             pass
+        confirm = parse_confirm_command(command)
+        if confirm is not None:
+            kind, action_id = confirm
+            if kind == "approve":
+                self._handle_approve(action_id, via="pill")
+            else:
+                self.reject_pending(action_id, via="pill")
+            return
         if command == "stop":
             self.stop()
         elif command == "cancel":
@@ -330,6 +384,9 @@ class Controller:
 
     def _dispatch(self, raw: str, audio: Any, token: int) -> None:
         """Route assistant speech through the verb registry and execute the hit."""
+        # A new transcript always invalidates any leftover pending confirm.
+        if self.confirm.peek() is not None:
+            self._invalidate_pending(reason="utterance")
         platform = detect_os()
         intent = self.router.route(raw, platform=platform)
         if intent is None:
@@ -347,16 +404,109 @@ class Controller:
             screen=None,
             session=None,
         )
-        # Policy engine lands in a later slice; S0 always proceeds.
+        if requires_confirm(verb.risk):
+            materialized = self._materialize(intent, platform)
+            pending = self.confirm.stage(
+                intent, verb, materialized, context=context
+            )
+            result = Result(
+                status=Status.NEEDS_CONFIRM,
+                summary=f"Confirm {verb.title}?",
+                detail=" ".join(pending.materialized),
+                evidence=pending.materialized,
+                rung=verb.rung,
+                pending=pending,
+            )
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    self.confirm.invalidate()
+                    return
+                self.state = AppState.IDLE
+                self._emit("needs_confirm")
+            self._enter_confirming(pending, result)
+            self.logger.info(
+                "event=confirm_staged id=%s verb=%s risk=%s",
+                pending.id,
+                verb.name,
+                verb.risk.value,
+            )
+            return
+
         result = verb.handler(intent, context)
+        self._finish_assistant_result(
+            result, raw=raw, audio=audio, verb_name=verb.name, token=token
+        )
+
+    def _handle_approve(self, action_id: str, *, via: str) -> bool:
+        approved = self.confirm.approve(action_id, via=via)
+        if approved is None:
+            self.logger.info(
+                "event=confirm_approve_rejected id=%s via=%s", action_id, via
+            )
+            return False
+        bundle = self.confirm.claim_execution()
+        if bundle is None:
+            return False
+        intent, verb, context, pending = bundle
+        self.logger.info(
+            "event=confirm_approved id=%s via=%s verb=%s",
+            pending.id,
+            via,
+            verb.name,
+        )
+        self._emit("confirm_approved")
+        self._clear_confirm_ui()
+        with self._lock:
+            if self.state is not AppState.IDLE:
+                return False
+            self.state = AppState.PROCESSING
+            self._token += 1
+            token = self._token
+        try:
+            result = verb.handler(intent, context)
+            if result.status is Status.FAILED:
+                raise RuntimeError(
+                    result.detail or result.summary or "assistant failed"
+                )
+            self._finish_assistant_result(
+                result,
+                raw=intent.raw_utterance,
+                verb_name=verb.name,
+                duration_ms=0,
+                token=token,
+            )
+        except Exception as exc:
+            self._fail(exc, getattr(exc, "category", None))
+        return True
+
+    def _finish_assistant_result(
+        self,
+        result: Result,
+        *,
+        raw: str,
+        audio: Any | None = None,
+        verb_name: str = "",
+        duration_ms: int | None = None,
+        token: int,
+    ) -> None:
         if result.status is Status.FAILED:
             raise RuntimeError(result.detail or result.summary or "assistant failed")
         final = result.detail or result.summary
+        name = verb_name
+        if not name:
+            try:
+                routed = self.router.route(raw, platform=detect_os())
+                if routed is not None:
+                    name = routed.verb
+            except Exception:
+                name = ""
         cleanup = {
             "app.open": "app_action",
             "site.open": "browser_action",
             "browser.open": "browser_action",
-        }.get(intent.verb, "skipped")
+        }.get(name, "skipped")
+        if duration_ms is None:
+            duration_ms = int(getattr(audio, "duration_seconds", 0) * 1000)
         with self._lock:
             if self._cancel.is_set() or token != self._token:
                 return
@@ -366,11 +516,86 @@ class Controller:
                 mode="assistant",
                 delivery_status="displayed",
                 cleanup_status=cleanup,
-                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+                duration_ms=duration_ms,
             )
             self.state = AppState.IDLE
             self._emit("assistant_complete")
             self._feedback("success")
+
+    def _materialize(self, intent: Any, platform: Any) -> tuple[str, ...]:
+        try:
+            from .cli import materialize_argv
+
+            argv = materialize_argv(
+                intent.verb, dict(intent.slots), platform=platform
+            )
+        except Exception:
+            argv = None
+        if argv is None:
+            argv = (
+                intent.verb,
+                *[f"{k}={intent.slots[k]}" for k in sorted(intent.slots)],
+            )
+        return tuple(argv)
+
+    def _enter_confirming(self, pending: Any, result: Result) -> None:
+        try:
+            write_pending_id(self.indicator_pending_path, pending.id)
+        except Exception:
+            pass
+        setter = getattr(self.feedback, "set_pending_id", None)
+        if callable(setter):
+            try:
+                setter(pending.id)
+            except Exception:
+                pass
+        self._feedback("confirming")
+        try:
+            write_phase(self.indicator_phase_path, "confirming")
+        except Exception:
+            pass
+        message = format_result_message(result)
+        if self.feedback is not None:
+            try:
+                show_result(self.feedback, result)
+            except Exception:
+                pass
+        if self.result_window is not None and hasattr(self.result_window, "show_text"):
+            try:
+                self.result_window.show_text(message)
+            except Exception:
+                pass
+
+    def _clear_confirm_ui(self) -> None:
+        try:
+            clear_pending_id(self.indicator_pending_path)
+        except Exception:
+            pass
+        setter = getattr(self.feedback, "set_pending_id", None)
+        if callable(setter):
+            try:
+                setter(None)
+            except Exception:
+                pass
+
+    def _invalidate_pending(self, *, reason: str) -> None:
+        rejected = self.confirm.invalidate()
+        if rejected is None:
+            return
+        self.logger.info(
+            "event=confirm_invalidated id=%s reason=%s", rejected.id, reason
+        )
+        self._emit("confirm_invalidated")
+        self._clear_confirm_ui()
+
+    def _expire_confirm(self) -> None:
+        expired = self.confirm.expire_tick()
+        if expired is None:
+            return
+        self.logger.info("event=confirm_expired id=%s", expired.id)
+        self._emit("confirm_expired")
+        self._clear_confirm_ui()
+        self._feedback("busy")
 
     @staticmethod
     def _browser_intent(text: str) -> bool:

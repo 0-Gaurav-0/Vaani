@@ -158,6 +158,7 @@ def run_windows(settings: Settings) -> int:
         on_hotkey_press,
         on_release=on_hotkey_release,
         on_cancel=controller.cancel,
+        on_approve=controller.approve_pending,
         logger=logger,
     )
     controller.hotkeys = hotkeys

@@ -4,11 +4,15 @@ import pytest
 
 from vaani.indicator_protocol import (
     clear_command,
+    clear_pending_id,
     clear_phase,
     control_path,
+    parse_confirm_command,
     read_command,
+    read_pending_id,
     read_phase,
     write_command,
+    write_pending_id,
     write_phase,
 )
 
@@ -31,6 +35,28 @@ def test_reject_unknown_command(tmp_path: Path):
     path = tmp_path / "indicator_control.json"
     with pytest.raises(ValueError):
         write_command(path, "explode")
+
+
+def test_approve_reject_commands_roundtrip(tmp_path: Path):
+    path = tmp_path / "indicator_control.json"
+    write_command(path, "approve:abc123")
+    assert read_command(path) == "approve:abc123"
+    assert parse_confirm_command("approve:abc123") == ("approve", "abc123")
+    write_command(path, "reject:abc123")
+    assert read_command(path) == "reject:abc123"
+    assert parse_confirm_command("reject:abc123") == ("reject", "abc123")
+    with pytest.raises(ValueError):
+        write_command(path, "approve:")
+    with pytest.raises(ValueError):
+        write_command(path, "approve:bad id")
+
+
+def test_pending_id_roundtrip(tmp_path: Path):
+    path = tmp_path / "indicator_pending"
+    write_pending_id(path, "deadbeef")
+    assert read_pending_id(path) == "deadbeef"
+    clear_pending_id(path)
+    assert read_pending_id(path) is None
 
 
 def test_read_missing_or_corrupt(tmp_path: Path):
