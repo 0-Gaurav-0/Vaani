@@ -328,3 +328,145 @@ def test_agent_via_blocked_on_r3(tmp_path: Path):
     assert calls == []
     assert c.approve_pending(pending.id, via="pill")
     assert calls == ["ran"]
+
+
+def test_proc_kill_stages_disambiguation_not_confirm(tmp_path: Path):
+    from vaani.platform.protocol import ProcInfo
+
+    class Sys:
+        def list_named(self, name: str):
+            return (
+                ProcInfo(pid=11, name="node"),
+                ProcInfo(pid=12, name="node"),
+            )
+
+        def kill_pids(self, pids, *, signal="term"):
+            raise AssertionError("must not kill during disambiguation")
+
+    c, _h, w, _control = _controller(
+        tmp_path, text="kill the process named node", system=Sys()
+    )
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(2)
+    assert c.confirm.peek() is None
+    prompt = c.disambiguate.peek()
+    assert prompt is not None
+    assert len(prompt.options) == 2
+    assert read_phase(c.indicator_phase_path) == "confirming"
+    assert w.results
+    # Approve must not default-pick.
+    assert c.approve_pending(via="hotkey") is False
+    assert c.disambiguate.peek() is not None
+
+
+def test_disambiguation_timeout_cancels_without_selecting(tmp_path: Path):
+    from vaani.intent.schema import DisambiguationOption, DisambiguationPrompt
+    from vaani.platform.protocol import PlatformId
+    from vaani.intent.schema import Context, Intent, SlotSpec, Support, Verb
+
+    c, _h, _w, _control = _controller(tmp_path)
+    c.disambiguate._ttl = 0.1
+
+    def handler(intent, context):
+        raise AssertionError("handler must not run on timeout")
+
+    verb = Verb(
+        name="system.proc.kill",
+        title="Kill",
+        slots={"name": SlotSpec(type="str")},
+        rung=2,
+        risk=RiskClass.R2,
+        requires=frozenset(),
+        support={
+            PlatformId.LINUX: Support.SUPPORTED,
+            PlatformId.MACOS: Support.SUPPORTED,
+            PlatformId.WINDOWS: Support.SUPPORTED,
+        },
+        undo=None,
+        pack="procs",
+        handler=handler,
+    )
+    intent = Intent(
+        verb="system.proc.kill",
+        slots={"name": "node"},
+        rung=2,
+        confidence=1.0,
+        source="test",
+        mode="act",
+        utterance="kill node",
+        raw_utterance="kill node",
+        modifiers=frozenset(),
+        brain=None,
+    )
+    context = Context(
+        platform=PlatformId.LINUX,
+        workspace=None,
+        workspace_source="home",
+        repo=None,
+        project=None,
+        focus=None,
+        screen=None,
+        session=None,
+    )
+    prompt = DisambiguationPrompt(
+        id="dx1",
+        question="Which node?",
+        options=(
+            DisambiguationOption(key="11", label="node 11", payload={"pid": 11}),
+            DisambiguationOption(key="12", label="node 12", payload={"pid": 12}),
+        ),
+        verb="system.proc.kill",
+        slots={"name": "node"},
+        expires_at=0.0,
+    )
+    c.disambiguate.stage(intent, verb, prompt, context=context)
+    time.sleep(0.15)
+    c._expire_disambiguate()
+    assert c.disambiguate.peek() is None
+    assert c.disambiguate.claim_selection() is None
+    assert any(e.name == "disambiguate_expired" for e in c.events)
+
+
+def test_disambiguation_voice_ordinal_then_confirm(tmp_path: Path):
+    from vaani.platform.protocol import ProcInfo
+
+    killed: list[tuple] = []
+
+    class Sys:
+        def list_named(self, name: str):
+            all_procs = (
+                ProcInfo(pid=11, name="node"),
+                ProcInfo(pid=12, name="node"),
+            )
+            # After ordinal selection, slots include pid.
+            return all_procs
+
+        def kill_pids(self, pids, *, signal="term"):
+            killed.append((tuple(pids), signal))
+            from vaani.intent.schema import Result
+
+            return Result(status=Status.OK, summary="Signaled", rung=2)
+
+    c, _h, _w, control = _controller(
+        tmp_path, text="kill the process named node", system=Sys()
+    )
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(2)
+    prompt = c.disambiguate.peek()
+    assert prompt is not None
+
+    # Voice ordinal via a follow-up assistant utterance.
+    c.groq.text = "the first one"
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(2)
+    assert c.disambiguate.peek() is None
+    pending = c.confirm.peek()
+    assert pending is not None
+    assert pending.slots.get("pid") == 11
+
+    write_command(control, f"approve:{pending.id}")
+    c._poll_indicator_control()
+    assert killed == [((11,), "term")]

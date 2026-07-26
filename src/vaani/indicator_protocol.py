@@ -3,8 +3,9 @@
 Linux historically used SIGUSR1/2. Windows has no equivalent, so the daemon
 and indicator share a small JSON control file under the cache directory.
 
-Confirm commands are ``approve:<id>`` / ``reject:<id>`` (plan T2.1). Static
-commands remain ``stop`` / ``cancel``.
+Confirm commands are ``approve:<id>`` / ``reject:<id>`` (plan T2.1).
+Disambiguation adds ``select:<id>:<n>`` (1-based option index, plan T4.5).
+Static commands remain ``stop`` / ``cancel``.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -23,13 +25,16 @@ ALLOWED_PHASES: frozenset[str] = frozenset(
 )
 
 _CONFIRM_COMMAND = re.compile(r"^(approve|reject):([A-Za-z0-9_-]{1,64})$")
+_SELECT_COMMAND = re.compile(r"^select:([A-Za-z0-9_-]{1,64}):([1-3])$")
 
 
 def is_allowed_command(command: str) -> bool:
-    """True for static stop/cancel or approve:<id> / reject:<id>."""
+    """True for static stop/cancel, confirm, or select:<id>:<n>."""
     if command in ALLOWED:
         return True
-    return _CONFIRM_COMMAND.match(command) is not None
+    if _CONFIRM_COMMAND.match(command) is not None:
+        return True
+    return _SELECT_COMMAND.match(command) is not None
 
 
 def parse_confirm_command(command: str) -> tuple[str, str] | None:
@@ -38,6 +43,14 @@ def parse_confirm_command(command: str) -> tuple[str, str] | None:
     if match is None:
         return None
     return match.group(1), match.group(2)
+
+
+def parse_select_command(command: str) -> tuple[str, int] | None:
+    """Return ``(id, 0-based index)`` for ``select:<id>:<n>``, else None."""
+    match = _SELECT_COMMAND.match(command)
+    if match is None:
+        return None
+    return match.group(1), int(match.group(2)) - 1
 
 
 def control_path(cache_dir: Path | str) -> Path:
@@ -50,6 +63,10 @@ def phase_path(cache_dir: Path | str) -> Path:
 
 def pending_path(cache_dir: Path | str) -> Path:
     return Path(cache_dir) / "indicator_pending"
+
+
+def options_path(cache_dir: Path | str) -> Path:
+    return Path(cache_dir) / "indicator_options.json"
 
 
 def resolve_control_path(
@@ -205,6 +222,60 @@ def read_pending_id(path: Path | str) -> str | None:
 
 
 def clear_pending_id(path: Path | str) -> None:
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+
+
+def resolve_options_path(
+    *,
+    explicit: str | os.PathLike[str] | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    env = os.environ.get("VAANI_INDICATOR_OPTIONS")
+    if env:
+        return Path(env)
+    control = resolve_control_path(cache_dir=cache_dir)
+    return control.parent / "indicator_options.json"
+
+
+def write_options(path: Path | str, labels: Sequence[str]) -> None:
+    """Write pill option labels (at most 3) for disambiguation UI."""
+    if isinstance(labels, (str, bytes)):
+        raise TypeError("labels must be a sequence of strings")
+    trimmed = [str(label) for label in list(labels)[:3]]
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"options": trimmed, "ts_ms": int(time.time() * 1000)}
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, target)
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+
+
+def read_options(path: Path | str) -> list[str]:
+    target = Path(path)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("options")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw[:3]]
+
+
+def clear_options(path: Path | str) -> None:
     try:
         Path(path).unlink()
     except FileNotFoundError:
