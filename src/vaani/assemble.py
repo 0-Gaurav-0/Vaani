@@ -12,6 +12,7 @@ from .history import HistoryStore
 from .observability import configure_logging
 from .platform.protocol import PlatformBundle
 from .secrets import effective_key
+from .surface.result import make_assistant_sink
 
 
 @dataclass(frozen=True)
@@ -63,13 +64,8 @@ def assemble(
         app_launcher=bundle.apps,
     )
     assistant = CodexRunner()
-
-    def show_assistant_result(text: str) -> None:
-        message = (text or "").strip() or "Assistant returned no output."
-        bundle.feedback.notify("paste", message[:160])
-
     controller.codex = assistant
-    controller.result_window = ResultWindow(show_assistant_result)
+    controller.result_window = ResultWindow(make_assistant_sink(bundle.feedback))
     return Assembly(
         controller=controller,
         history=history,

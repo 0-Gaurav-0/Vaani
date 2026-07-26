@@ -16,6 +16,7 @@ from .waveform import WaveformBuffer
 
 # Compact + flush to the bottom so it barely eats content space.
 WIDTH = 148
+CONFIRM_WIDTH = 220
 HEIGHT = 28
 MARGIN_BOTTOM = 0
 BAR_COUNT = 15
@@ -101,39 +102,93 @@ def run_pill(
         "start": None,
         "origin_x": None,
     }
+    layout: dict[str, int] = {"width": WIDTH}
+
+    def _phase() -> str:
+        return read_phase(phase_file) if phase_file is not None else "recording"
+
+    def _width_for(phase: str) -> int:
+        return CONFIRM_WIDTH if phase == "confirming" else WIDTH
+
+    def _sync_geometry(phase: str) -> None:
+        target_w = _width_for(phase)
+        if target_w == layout["width"]:
+            return
+        layout["width"] = target_w
+        canvas.config(width=target_w)
+        cur_x = root.winfo_x()
+        max_x = max(0, root.winfo_screenwidth() - target_w)
+        nx = max(0, min(cur_x, max_x))
+        root.geometry(f"{target_w}x{HEIGHT}+{nx}+{_bottom_y(root.winfo_screenheight())}")
+
+    def _draw_stadium(w: int) -> None:
+        canvas.create_oval(0, 0, HEIGHT, HEIGHT, fill="#000000", outline="#2a2a2a")
+        canvas.create_oval(
+            w - HEIGHT, 0, w, HEIGHT, fill="#000000", outline="#2a2a2a"
+        )
+        canvas.create_rectangle(
+            HEIGHT // 2, 0, w - HEIGHT // 2, HEIGHT, fill="#000000", outline=""
+        )
+        canvas.create_line(HEIGHT // 2, 1, w - HEIGHT // 2, 1, fill="#2a2a2a")
+        canvas.create_line(
+            HEIGHT // 2, HEIGHT - 1, w - HEIGHT // 2, HEIGHT - 1, fill="#2a2a2a"
+        )
 
     def draw() -> None:
         canvas.delete("all")
-        canvas.create_oval(0, 0, HEIGHT, HEIGHT, fill="#000000", outline="#2a2a2a")
-        canvas.create_oval(
-            WIDTH - HEIGHT, 0, WIDTH, HEIGHT, fill="#000000", outline="#2a2a2a"
-        )
-        canvas.create_rectangle(
-            HEIGHT // 2, 0, WIDTH - HEIGHT // 2, HEIGHT, fill="#000000", outline=""
-        )
-        canvas.create_line(HEIGHT // 2, 1, WIDTH - HEIGHT // 2, 1, fill="#2a2a2a")
-        canvas.create_line(
-            HEIGHT // 2, HEIGHT - 1, WIDTH - HEIGHT // 2, HEIGHT - 1, fill="#2a2a2a"
-        )
+        phase = _phase()
+        w = layout["width"]
+        _draw_stadium(w)
+
+        if phase == "confirming":
+            # S2 foreshadow: Reject / Approve controls (clicks wired later).
+            canvas.create_text(
+                40,
+                HEIGHT // 2,
+                text="Reject",
+                fill="#ff6b6b",
+                font=("Helvetica", 9),
+            )
+            canvas.create_text(
+                w // 2,
+                HEIGHT // 2,
+                text="Confirm?",
+                fill="#ffffff",
+                font=("Helvetica", 9),
+            )
+            canvas.create_text(
+                w - 44,
+                HEIGHT // 2,
+                text="Approve",
+                fill="#7dffa3",
+                font=("Helvetica", 9),
+            )
+            return
 
         cx, cy, r = 14, HEIGHT // 2, 10
         canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#2c2c2e", outline="")
         canvas.create_line(cx - 3.5, cy - 3.5, cx + 3.5, cy + 3.5, fill="#ffffff", width=1.4)
         canvas.create_line(cx + 3.5, cy - 3.5, cx - 3.5, cy + 3.5, fill="#ffffff", width=1.4)
 
-        phase = read_phase(phase_file) if phase_file is not None else "recording"
-        if phase == "processing":
+        if phase in {"processing", "working"}:
             t = time.monotonic() - t0
             for i in range(3):
                 pulse = 0.35 + 0.65 * abs(math.sin(t * 3.2 + i * 0.9))
                 gray = int(255 * pulse)
                 color = f"#{gray:02x}{gray:02x}{gray:02x}"
-                cx = WIDTH / 2 - 14 + i * 14
-                r = 2.6 + 1.2 * pulse
-                canvas.create_oval(cx - r, HEIGHT / 2 - r, cx + r, HEIGHT / 2 + r, fill=color, outline="")
+                dot_x = w / 2 - 14 + i * 14
+                dot_r = 2.6 + 1.2 * pulse
+                canvas.create_oval(
+                    dot_x - dot_r,
+                    HEIGHT / 2 - dot_r,
+                    dot_x + dot_r,
+                    HEIGHT / 2 + dot_r,
+                    fill=color,
+                    outline="",
+                )
             return
 
-        kx, ky, kr = WIDTH - 14, HEIGHT // 2, 10
+        kx, ky, kr = w - 14, HEIGHT // 2, 10
         canvas.create_oval(kx - kr, ky - kr, kx + kr, ky + kr, fill="#ffffff", outline="")
         canvas.create_line(
             kx - 4, ky, kx - 1, ky + 3, fill="#111111", width=1.5, capstyle="round"
@@ -143,7 +198,7 @@ def run_pill(
         )
 
         samples = wave.bars_now()
-        inner_left, inner_right = 32, WIDTH - 32
+        inner_left, inner_right = 32, w - 32
         span = inner_right - inner_left
         max_h = HEIGHT - 6
         for i, level in enumerate(samples):
@@ -157,7 +212,8 @@ def run_pill(
             )
 
     def tick() -> None:
-        phase = read_phase(phase_file) if phase_file is not None else "recording"
+        phase = _phase()
+        _sync_geometry(phase)
         if phase == "recording":
             try:
                 level = float(amplitude_path.read_text(encoding="utf-8").strip())
@@ -171,12 +227,20 @@ def run_pill(
         root.after(33, tick)
 
     def on_press(event: tk.Event) -> None:
-        phase = read_phase(phase_file) if phase_file is not None else "recording"
+        phase = _phase()
+        w = layout["width"]
+        if phase == "confirming":
+            # Placeholder until T2.1 wires approve/reject commands.
+            if event.x < HIT_PAD or event.x > w - HIT_PAD:
+                return
+            drag_state["start"] = (event.x_root, event.y_root)
+            drag_state["origin_x"] = root.winfo_x()
+            return
         if event.x < HIT_PAD:
             _send(control_path, "cancel")
             root.destroy()
             return
-        if phase != "processing" and event.x > WIDTH - HIT_PAD:
+        if phase not in {"processing", "working"} and event.x > w - HIT_PAD:
             _send(control_path, "stop")
             root.destroy()
             return
@@ -189,8 +253,9 @@ def run_pill(
         if not isinstance(start, tuple) or not isinstance(origin_x, int):
             return
         sx, _sy = start
+        w = layout["width"]
         nx = origin_x + event.x_root - sx
-        nx = max(0, min(nx, max(0, root.winfo_screenwidth() - WIDTH)))
+        nx = max(0, min(nx, max(0, root.winfo_screenwidth() - w)))
         root.geometry(f"+{nx}+{_bottom_y(root.winfo_screenheight())}")
 
     def on_release(_event: tk.Event) -> None:

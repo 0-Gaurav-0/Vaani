@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Literal
 
 Command = Literal["stop", "cancel"]
-Phase = Literal["recording", "processing"]
+Phase = Literal["recording", "processing", "confirming", "working"]
 ALLOWED: frozenset[str] = frozenset({"stop", "cancel"})
-ALLOWED_PHASES: frozenset[str] = frozenset({"recording", "processing"})
+ALLOWED_PHASES: frozenset[str] = frozenset(
+    {"recording", "processing", "confirming", "working"}
+)
 
 
 def control_path(cache_dir: Path | str) -> Path:
