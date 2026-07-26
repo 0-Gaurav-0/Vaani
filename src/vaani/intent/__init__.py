@@ -1,0 +1,39 @@
+"""Intent stack: contracts, routing, and parsing."""
+
+from .schema import (
+    AgentSession,
+    Context,
+    FocusInfo,
+    Intent,
+    OverlayOp,
+    PendingAction,
+    ProjectProfile,
+    RepoInfo,
+    Result,
+    RiskClass,
+    ScreenFrame,
+    SlotSpec,
+    Status,
+    Support,
+    UndoToken,
+    Verb,
+)
+
+__all__ = [
+    "AgentSession",
+    "Context",
+    "FocusInfo",
+    "Intent",
+    "OverlayOp",
+    "PendingAction",
+    "ProjectProfile",
+    "RepoInfo",
+    "Result",
+    "RiskClass",
+    "ScreenFrame",
+    "SlotSpec",
+    "Status",
+    "Support",
+    "UndoToken",
+    "Verb",
+]
