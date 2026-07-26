@@ -26,6 +26,7 @@ logs, and machine-specific paths are intentionally not stored in Git.
 - [Shortcuts and controls](#shortcuts-and-controls)
 - [Operating modes](#operating-modes)
 - [Configuration](#configuration)
+- [Local control bridge](#local-control-bridge)
 - [Data and privacy](#data-and-privacy)
 - [Safe operation](#safe-operation)
 - [Troubleshooting](#troubleshooting)
@@ -415,6 +416,37 @@ Codex requests are intentionally isolated:
 This mode does not reuse an interactive Codex session and does not dynamically
 load MCPs. Treat spoken assistant tasks as commands executed with your user
 permissions.
+
+## Local control bridge
+
+`vaani bridge` exposes the same verb policy over a localhost HTTP API (Phase 3).
+It binds **loopback only** (`127.0.0.1` / `::1`) and **refuses** public binds
+such as `0.0.0.0`. A bearer token is required on every request.
+
+```bash
+export VAANI_BRIDGE_TOKEN="$(openssl rand -hex 32)"
+vaani bridge --host 127.0.0.1 --port 32123
+```
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `POST` | `/v1/intent` | Run a verb (`{"verb","slots"}`); R2+ returns `needs_confirm` |
+| `POST` | `/v1/confirm/{id}` | Approve or reject a pending action |
+| `GET`  | `/v1/caps` | Capability matrix (same as `vaani caps --json`) |
+| `GET`  | `/v1/jobs` | Supervisor job list |
+| `POST` | `/v1/overlay` | Stub (clear no-op; other ops `501`) |
+| `GET`  | `/events` | Server-sent events |
+
+Authorization header: `Authorization: Bearer $VAANI_BRIDGE_TOKEN`.
+
+Remote R2+ intents use the same `ConfirmEngine` gate as local voice / `vaani do`
+— they never auto-approve. Audit rows attribute the caller (see
+`X-Vaani-Caller`).
+
+**Exposure:** keep the bridge on loopback. To reach it from a phone or another
+machine, publish only over a private mesh such as [Tailscale](https://tailscale.com/)
+(or an equivalent LAN VPN) and never open the port on a public interface. Prefer
+Tailscale Serve/Funnel-off patterns or SSH tunnels over raw LAN port forwards.
 
 ## Configuration
 
