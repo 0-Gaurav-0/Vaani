@@ -166,6 +166,44 @@ def materialize_argv(
         prompt = str(slots.get("prompt") or "")
         return tuple(CodexRunner.command_for("codex", prompt))
 
+    if verb_name == "system.port.free":
+        port = str(slots.get("port") or "")
+        if platform is PlatformId.MACOS:
+            return ("lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t")
+        if platform is PlatformId.WINDOWS:
+            return ("Get-NetTCPConnection", "-LocalPort", port, "-State", "Listen")
+        return ("ss", "-lptnH", f"sport = :{port}")
+
+    if verb_name == "system.proc.kill":
+        name = str(slots.get("name") or "")
+        if platform is PlatformId.WINDOWS:
+            return ("Stop-Process", "-Name", name, "-Force")
+        return ("pkill", "-f", name)
+
+    if verb_name == "system.proc.top":
+        if platform is PlatformId.MACOS:
+            return ("open", "-a", "Activity Monitor")
+        if platform is PlatformId.WINDOWS:
+            return ("taskmgr.exe",)
+        return ("gnome-system-monitor",)
+
+    if verb_name == "system.trash.empty":
+        if platform is PlatformId.MACOS:
+            return ("osascript", "-e", 'tell application "Finder" to empty trash')
+        if platform is PlatformId.WINDOWS:
+            return ("Clear-RecycleBin", "-Force")
+        return ("gio", "trash", "--empty")
+
+    if verb_name == "system.wifi.set":
+        enabled = slots.get("enabled", True) not in {False, "false", "0", 0}
+        state = "on" if enabled else "off"
+        if platform is PlatformId.MACOS:
+            return ("networksetup", "-setairportpower", "<device>", state)
+        if platform is PlatformId.WINDOWS:
+            cmdlet = "Enable-NetAdapter" if enabled else "Disable-NetAdapter"
+            return (cmdlet, "-Name", "Wi-Fi", "-Confirm:$false")
+        return ("nmcli", "radio", "wifi", state)
+
     return None
 
 

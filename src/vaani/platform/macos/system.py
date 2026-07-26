@@ -1,11 +1,16 @@
-"""macOS SystemControl — volume, lock, wifi, trash, IP (T1.2 / spec §7.2)."""
+"""macOS SystemControl — volume, lock, wifi, trash, IP, ports/procs (T1.2 / T2.4)."""
 from __future__ import annotations
 
+import os
 import re
+import signal as signal_mod
 import subprocess
+import time
+from collections.abc import Sequence
 from typing import Any, Callable, Mapping
 
 from vaani.intent.schema import Result, Status, Support
+from vaani.platform.protocol import ProcInfo
 
 # Classic lock path; argv only — never shell-joined.
 _CGSESSION = (
@@ -35,7 +40,13 @@ _SUPPORT: dict[str, tuple[Support, str]] = {
     ),
     "trash_empty": (Support.SUPPORTED, ""),
     "local_ip": (Support.SUPPORTED, ""),
+    "list_listeners": (Support.SUPPORTED, "lsof -nP -iTCP:<port> -sTCP:LISTEN"),
+    "list_named": (Support.SUPPORTED, "pgrep -af"),
+    "kill_pids": (Support.SUPPORTED, "SIGTERM then SIGKILL after 2s"),
+    "open_process_monitor": (Support.SUPPORTED, "open -a Activity Monitor"),
 }
+
+_KILL_WAIT_S = 2.0
 
 
 def _default_runner(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -49,8 +60,14 @@ class MacSystemControl:
         self,
         *,
         runner: Callable[..., Any] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+        killer: Callable[[int, int], None] | None = None,
+        pid_alive: Callable[[int], bool] | None = None,
     ) -> None:
         self._runner = runner or _default_runner
+        self._sleep = sleeper or time.sleep
+        self._killer = killer or os.kill
+        self._pid_alive = pid_alive or _pid_alive
 
     def support(self) -> Mapping[str, tuple[Support, str]]:
         """Capability matrix cells for this surface (support, note)."""
@@ -165,6 +182,123 @@ class MacSystemControl:
                 return ip
         return ""
 
+    def list_listeners(self, port: int) -> tuple[ProcInfo, ...]:
+        argv = [
+            "lsof",
+            "-nP",
+            f"-iTCP:{int(port)}",
+            "-sTCP:LISTEN",
+            "-Fpcu",
+        ]
+        try:
+            completed = self._runner(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+        except Exception:
+            return ()
+        # lsof returns 1 when nothing matches — treat as empty.
+        text = getattr(completed, "stdout", None) or ""
+        return _parse_lsof_fpcu(text)
+
+    def list_named(self, name: str) -> tuple[ProcInfo, ...]:
+        needle = name.strip()
+        if not needle:
+            return ()
+        argv = ["pgrep", "-af", needle]
+        try:
+            completed = self._runner(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+        except Exception:
+            return ()
+        if getattr(completed, "returncode", 1) not in {0, 1}:
+            return ()
+        out: list[ProcInfo] = []
+        for line in (getattr(completed, "stdout", None) or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            pid_s, _, rest = line.partition(" ")
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            cmdline = rest.strip() or needle
+            base = os.path.basename(cmdline.split()[0]) if cmdline.split() else needle
+            out.append(ProcInfo(pid=pid, name=base, detail=cmdline))
+        return tuple(out)
+
+    def kill_pids(
+        self,
+        pids: Sequence[int],
+        *,
+        signal: str = "term",
+    ) -> Result:
+        unique = tuple(dict.fromkeys(int(p) for p in pids if int(p) > 0))
+        if not unique:
+            return Result(
+                status=Status.FAILED,
+                summary="No PIDs to kill",
+                detail="kill_pids requires at least one pid",
+                rung=2,
+            )
+        sig_name = (signal or "term").casefold()
+        immediate = sig_name in {"kill", "sigkill", "9"}
+        first = signal_mod.SIGKILL if immediate else signal_mod.SIGTERM
+        failed: list[str] = []
+        for pid in unique:
+            try:
+                self._killer(pid, first)
+            except ProcessLookupError:
+                continue
+            except PermissionError as exc:
+                failed.append(f"{pid}:{exc}")
+            except OSError as exc:
+                failed.append(f"{pid}:{exc}")
+        if not immediate:
+            self._sleep(_KILL_WAIT_S)
+            for pid in unique:
+                if not self._pid_alive(pid):
+                    continue
+                try:
+                    self._killer(pid, signal_mod.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError) as exc:
+                    if not isinstance(exc, ProcessLookupError):
+                        failed.append(f"{pid}:{exc}")
+        evidence = tuple(str(p) for p in unique)
+        if failed:
+            return Result(
+                status=Status.FAILED,
+                summary="Could not kill all processes",
+                detail="; ".join(failed),
+                evidence=evidence,
+                rung=2,
+            )
+        label = ", ".join(evidence)
+        return Result(
+            status=Status.OK,
+            summary=f"Signaled PID {label}",
+            detail=f"signal={sig_name}",
+            evidence=evidence,
+            rung=2,
+        )
+
+    def open_process_monitor(self) -> Result:
+        return self._run_ok(
+            ["open", "-a", "Activity Monitor"],
+            summary="Opened Activity Monitor",
+            fail_summary="Could not open Activity Monitor",
+            rung=1,
+        )
+
     def _wifi_device(self) -> str | None:
         try:
             completed = self._runner(
@@ -223,3 +357,48 @@ class MacSystemControl:
             evidence=evidence or tuple(argv[:3]),
             rung=rung,
         )
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _parse_lsof_fpcu(text: str) -> tuple[ProcInfo, ...]:
+    """Parse ``lsof -Fpcu`` output into listeners."""
+    current_pid: int | None = None
+    current_cmd = ""
+    current_uid: int | None = None
+    seen: dict[int, ProcInfo] = {}
+    for raw in text.splitlines():
+        if not raw:
+            continue
+        code, payload = raw[0], raw[1:]
+        if code == "p":
+            try:
+                current_pid = int(payload)
+            except ValueError:
+                current_pid = None
+            current_cmd = ""
+            current_uid = None
+        elif code == "c":
+            current_cmd = payload
+        elif code == "u":
+            try:
+                current_uid = int(payload)
+            except ValueError:
+                current_uid = None
+        if current_pid is not None and current_cmd:
+            seen[current_pid] = ProcInfo(
+                pid=current_pid,
+                name=current_cmd,
+                uid=current_uid,
+            )
+    return tuple(seen.values())

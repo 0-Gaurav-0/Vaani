@@ -23,6 +23,7 @@ from vaani.intent.schema import (
 from vaani.known_folders import canonical_folder, resolve_known_folder
 from vaani.platform.protocol import PlatformId
 from vaani.sites import PUBLIC_SITES
+from vaani.verbs.packs.procs import register_procs_pack
 from vaani.verbs.registry import Registry
 
 # Exact allowlist from the former Controller._browser_intent (plus natural variants).
@@ -1072,7 +1073,7 @@ def build_core_registry(
     popen: Popen | None = None,
     patterns: Sequence[Pattern] | None = None,
 ) -> tuple[Registry, tuple[Pattern, ...]]:
-    """Register core verbs and return ``(registry, patterns)``."""
+    """Register core + procs verbs and return ``(registry, patterns)``."""
     _ = resolve_site_fn  # reserved for future site-slot resolvers
     registry = Registry()
     for verb in build_core_verbs(
@@ -1096,4 +1097,10 @@ def build_core_registry(
         popen=popen,
     ):
         registry.register(verb)
-    return registry, tuple(patterns) if patterns is not None else core_patterns()
+    procs = register_procs_pack(
+        registry,
+        get_system=get_system,
+        get_platform=get_platform,
+    )
+    base = tuple(patterns) if patterns is not None else core_patterns()
+    return registry, base + procs

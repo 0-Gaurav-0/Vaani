@@ -1,13 +1,22 @@
-"""Windows SystemControl — volume/DND/lock/network/trash (T1.2)."""
+"""Windows SystemControl — volume/DND/lock/network/trash/ports/procs (T1.2 / T2.4)."""
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Mapping, Sequence
 from typing import Final
 
 from vaani.exec.runner import Command, Completed, powershell, run
 from vaani.intent.schema import Result, Status, Support
+from vaani.platform.protocol import ProcInfo
 
 Runner = Callable[[Command], Completed]
+
+_PORT_HOLDER_RE = re.compile(
+    r"PID=(?P<pid>\d+);Name=(?P<name>[^;]*);User=(?P<user>[^;]*)"
+)
+_NAMED_PROC_RE = re.compile(
+    r"PID=(?P<pid>\d+);Name=(?P<name>[^;]*)"
+)
 
 _VOLUME_REASON = "no built-in volume CLI; needs pycaw or a bundled helper"
 _DND_REASON = "Focus Assist has no stable public API"
@@ -103,6 +112,98 @@ class WindowsSystemControl:
             return ""
         return (completed.stdout or "").strip().splitlines()[0].strip() if completed.stdout else ""
 
+    def list_listeners(self, port: int) -> tuple[ProcInfo, ...]:
+        port_i = int(port)
+        script = (
+            f"Get-NetTCPConnection -LocalPort {port_i} -State Listen -ErrorAction SilentlyContinue |"
+            " ForEach-Object {"
+            "  $p = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue;"
+            "  $u = (Get-Process -Id $_.OwningProcess -IncludeUserName -ErrorAction SilentlyContinue).UserName;"
+            "  if ($null -eq $p) { return };"
+            "  'PID={0};Name={1};User={2}' -f $p.Id, $p.ProcessName, ($u)"
+            " }"
+        )
+        completed = self._run(Command(argv=powershell([script])))
+        if completed.returncode != 0 or completed.timed_out or completed.cancelled:
+            return ()
+        out: list[ProcInfo] = []
+        seen: set[int] = set()
+        for line in (completed.stdout or "").splitlines():
+            match = _PORT_HOLDER_RE.search(line.strip())
+            if match is None:
+                continue
+            pid = int(match.group("pid"))
+            if pid in seen:
+                continue
+            seen.add(pid)
+            out.append(
+                ProcInfo(
+                    pid=pid,
+                    name=match.group("name") or "unknown",
+                    detail=match.group("user") or "",
+                )
+            )
+        return tuple(out)
+
+    def list_named(self, name: str) -> tuple[ProcInfo, ...]:
+        needle = name.strip()
+        if not needle:
+            return ()
+        # Strip accidental .exe for Get-Process -Name.
+        bare = needle[:-4] if needle.casefold().endswith(".exe") else needle
+        script = (
+            f"Get-Process -Name '{bare.replace(chr(39), chr(39)+chr(39))}' "
+            "-ErrorAction SilentlyContinue |"
+            " ForEach-Object { 'PID={0};Name={1}' -f $_.Id, $_.ProcessName }"
+        )
+        completed = self._run(Command(argv=powershell([script])))
+        if completed.returncode != 0 or completed.timed_out or completed.cancelled:
+            return ()
+        out: list[ProcInfo] = []
+        for line in (completed.stdout or "").splitlines():
+            match = _NAMED_PROC_RE.search(line.strip())
+            if match is None:
+                continue
+            out.append(
+                ProcInfo(
+                    pid=int(match.group("pid")),
+                    name=match.group("name") or bare,
+                )
+            )
+        return tuple(out)
+
+    def kill_pids(
+        self,
+        pids: Sequence[int],
+        *,
+        signal: str = "term",
+    ) -> Result:
+        _ = signal  # Windows Stop-Process has no SIGTERM/SIGKILL split.
+        unique = tuple(dict.fromkeys(int(p) for p in pids if int(p) > 0))
+        if not unique:
+            return Result(
+                status=Status.FAILED,
+                summary="No PIDs to kill",
+                detail="kill_pids requires at least one pid",
+                evidence=(),
+                rung=2,
+            )
+        id_list = ",".join(str(p) for p in unique)
+        script = f"Stop-Process -Id {id_list} -Force -ErrorAction Stop"
+        return _from_completed(
+            self._run(Command(argv=powershell([script]))),
+            ok_summary=f"Stopped PID {', '.join(str(p) for p in unique)}.",
+            fail_summary="Could not stop process.",
+        )
+
+    def open_process_monitor(self) -> Result:
+        argv = ("taskmgr.exe",)
+        return _from_completed(
+            self._run(Command(argv=argv)),
+            ok_summary="Opened Task Manager.",
+            fail_summary="Could not open Task Manager.",
+        )
+
 
 def _degraded(op: str, reason: str) -> Result:
     """Honest refusal for DEGRADED cells — never escalates rung."""
@@ -161,4 +262,8 @@ _SUPPORT: Final[Mapping[str, tuple[Support, str]]] = {
     "dns_flush": (Support.SUPPORTED, ""),
     "trash_empty": (Support.SUPPORTED, ""),
     "local_ip": (Support.SUPPORTED, ""),
+    "list_listeners": (Support.SUPPORTED, "Get-NetTCPConnection -State Listen"),
+    "list_named": (Support.SUPPORTED, "Get-Process -Name"),
+    "kill_pids": (Support.SUPPORTED, "Stop-Process -Force"),
+    "open_process_monitor": (Support.SUPPORTED, "taskmgr.exe"),
 }

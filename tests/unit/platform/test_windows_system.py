@@ -170,3 +170,31 @@ def test_build_windows_wires_system(tmp_path: Path, monkeypatch):
     assert bundle.input is None
     assert bundle.terminal is None
     assert bundle.screen is None
+
+
+def test_list_listeners_parses_powershell_rows():
+    def handler(cmd: Command) -> Completed:
+        return _ok(cmd.argv, stdout="PID=4242;Name=node;User=DESKTOP\\dev\n")
+
+    ctrl = WindowsSystemControl(runner=_FakeRunner(handler))
+    holders = ctrl.list_listeners(3000)
+    assert len(holders) == 1
+    assert holders[0].pid == 4242
+    assert holders[0].name == "node"
+
+
+def test_kill_pids_stop_process_script():
+    fake = _FakeRunner()
+    ctrl = WindowsSystemControl(runner=fake)
+    result = ctrl.kill_pids([11, 12], signal="term")
+    assert result.status is Status.OK
+    assert "Stop-Process" in fake.calls[0].argv[-1]
+    assert "11" in fake.calls[0].argv[-1]
+    assert "12" in fake.calls[0].argv[-1]
+
+
+def test_open_process_monitor_taskmgr():
+    fake = _FakeRunner()
+    ctrl = WindowsSystemControl(runner=fake)
+    assert ctrl.open_process_monitor().status is Status.OK
+    assert fake.calls[0].argv == ("taskmgr.exe",)
