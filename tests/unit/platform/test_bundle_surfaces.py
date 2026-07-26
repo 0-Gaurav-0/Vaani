@@ -68,10 +68,12 @@ def test_build_linux_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
     from vaani.config import Settings
     from vaani.platform.linux.runtime import build_linux
+    from vaani.platform.linux.system import LinuxSystemControl
 
     bundle = build_linux(Settings.from_home(tmp_path, platform="linux"))
     assert bundle.id is PlatformId.LINUX
-    assert bundle.system is None
+    # T1.2 linux half wires SystemControl; other optional surfaces stay None.
+    assert isinstance(bundle.system, LinuxSystemControl)
     assert bundle.window is None
     assert bundle.input is None
     assert bundle.terminal is None
