@@ -152,7 +152,8 @@ def main() -> None:
             proc = None; stop = threading.Event()
             def refresh():
                 try:
-                    level = float(Path('/tmp/vaani-amplitude').read_text())
+                    amp = Path(os.environ.get("VAANI_AMPLITUDE_PATH", "/tmp/vaani-amplitude"))
+                    level = float(amp.read_text())
                     indicator.update_amplitude(level)
                 except Exception: pass
                 return bool(indicator.visible)
