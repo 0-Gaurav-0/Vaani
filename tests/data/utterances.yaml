@@ -461,3 +461,81 @@
   verb: container.logs
   rung: 4
   risk: R0
+
+# T4.2 git pack (append-only)
+- utterance: "create a new branch called assistant use cases"
+  verb: vcs.branch.create
+  rung: 4
+  risk: R1
+
+- utterance: "make a branch for the linux fix"
+  verb: vcs.branch.create
+  rung: 4
+  risk: R1
+
+- utterance: "new branch feature slash port killer"
+  verb: vcs.branch.create
+  rung: 4
+  risk: R1
+
+- utterance: "switch to main"
+  verb: vcs.checkout
+  rung: 4
+  risk: R1
+  not_verb: vcs.branch.create
+
+- utterance: "pull latest"
+  verb: vcs.pull
+  rung: 4
+  risk: R1
+
+- utterance: "commit my changes with a reasonable message"
+  verb: vcs.commit
+  rung: 4
+  risk: R2
+
+- utterance: "amend the last commit message"
+  verb: vcs.commit.amend
+  rung: 4
+  risk: R2
+
+- utterance: "push this branch"
+  verb: vcs.push
+  rung: 4
+  risk: R1
+
+- utterance: "force push"
+  verb: vcs.push.force
+  rung: 4
+  risk: R3
+
+- utterance: "discard the changes in this file"
+  verb: vcs.restore
+  rung: 4
+  risk: R3
+
+- utterance: "stash my changes"
+  verb: vcs.stash.push
+  rung: 4
+  risk: R1
+
+- utterance: "pop the stash"
+  verb: vcs.stash.pop
+  rung: 4
+  risk: R1
+
+- utterance: "show the diff"
+  verb: vcs.diff.show
+  rung: 4
+  risk: R0
+
+- utterance: "git status"
+  verb: vcs.status
+  rung: 4
+  risk: R0
+
+- utterance: "delete the branch"
+  verb: vcs.branch.delete
+  rung: 4
+  risk: R3
+  not_verb: vcs.branch.create
