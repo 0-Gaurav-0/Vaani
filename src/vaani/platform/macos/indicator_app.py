@@ -14,6 +14,7 @@ from pathlib import Path
 
 # Compact + flush to the absolute screen bottom (may sit over the Dock edge).
 WIDTH = 148
+CONFIRM_WIDTH = 220
 HEIGHT = 28
 MARGIN_BOTTOM = 0
 BAR_COUNT = 15
@@ -104,7 +105,10 @@ def _run_appkit(
     from ...waveform import WaveformBuffer
 
     wave = WaveformBuffer(bars=BAR_COUNT)
-    ui = {"phase": "recording", "t0": time.monotonic()}
+    ui = {"phase": "recording", "t0": time.monotonic(), "width": WIDTH}
+
+    def _width_for(phase: str) -> int:
+        return CONFIRM_WIDTH if phase == "confirming" else WIDTH
 
     class PillView(NSView):
         def initWithFrame_(self, frame):  # noqa: N802
@@ -119,8 +123,10 @@ def _run_appkit(
             return True
 
         def drawRect_(self, _rect):  # noqa: N802
-            w, h = WIDTH, HEIGHT
-            processing = ui["phase"] == "processing"
+            w, h = int(ui["width"]), HEIGHT
+            phase = ui["phase"]
+            busy = phase in {"processing", "working"}
+            confirming = phase == "confirming"
             # Black stadium
             NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 0.0, 0.0, 0.96).set()
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
@@ -133,7 +139,41 @@ def _run_appkit(
             rim.setLineWidth_(1.0)
             rim.stroke()
 
-            # Cancel always available (recording or processing)
+            if confirming:
+                # S2 foreshadow: Reject (left) / Approve (right). Clicks wired later.
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.42, 0.12, 0.12, 1.0).set()
+                NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(4, 4, 20, 20)).fill()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.42, 0.42, 1.0).set()
+                reject = NSBezierPath.bezierPath()
+                reject.setLineWidth_(1.5)
+                reject.setLineCapStyle_(1)
+                reject.moveToPoint_((10, 10))
+                reject.lineToPoint_((18, 18))
+                reject.moveToPoint_((18, 10))
+                reject.lineToPoint_((10, 18))
+                reject.stroke()
+
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.55, 0.55, 0.55, 1.0).set()
+                for i in range(3):
+                    cx = w / 2 - 10 + i * 10
+                    NSBezierPath.bezierPathWithOvalInRect_(
+                        NSMakeRect(cx - 1.5, h / 2 - 1.5, 3, 3)
+                    ).fill()
+
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.12, 0.42, 0.22, 1.0).set()
+                NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(w - 24, 4, 20, 20)).fill()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.49, 1.0, 0.64, 1.0).set()
+                approve = NSBezierPath.bezierPath()
+                approve.setLineWidth_(1.5)
+                approve.setLineCapStyle_(1)
+                approve.setLineJoinStyle_(1)
+                approve.moveToPoint_((w - 18, 14))
+                approve.lineToPoint_((w - 15, 17))
+                approve.lineToPoint_((w - 10, 11))
+                approve.stroke()
+                return
+
+            # Cancel always available (recording or processing/working)
             NSColor.colorWithCalibratedRed_green_blue_alpha_(0.17, 0.17, 0.18, 1.0).set()
             NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(4, 4, 20, 20)).fill()
             NSColor.whiteColor().set()
@@ -146,7 +186,7 @@ def _run_appkit(
             x_path.lineToPoint_((10, 18))
             x_path.stroke()
 
-            if processing:
+            if busy:
                 # Three pulsing dots — "still working on your words"
                 t = time.monotonic() - float(ui["t0"])
                 for i in range(3):
@@ -189,12 +229,21 @@ def _run_appkit(
         def mouseDown_(self, event):  # noqa: N802
             loc = self.convertPoint_fromView_(event.locationInWindow(), None)
             x = float(loc.x)
+            w = float(ui["width"])
+            phase = ui["phase"]
+            if phase == "confirming":
+                # Placeholder until T2.1 wires approve/reject commands.
+                if x < 28 or x > w - 28:
+                    return
+                self._drag_start = NSEvent.mouseLocation()
+                self._origin_x = float(self.window().frame().origin.x)
+                return
             if x < 28:
                 _send(control_path, "cancel")
                 NSApplication.sharedApplication().terminate_(None)
                 return
-            # Check only stops while recording; ignored while processing.
-            if ui["phase"] != "processing" and x > WIDTH - 28:
+            # Check only stops while recording; ignored while processing/working.
+            if phase not in {"processing", "working"} and x > w - 28:
                 _send(control_path, "stop")
                 NSApplication.sharedApplication().terminate_(None)
                 return
@@ -208,10 +257,11 @@ def _run_appkit(
             dx = float(mouse.x) - float(self._drag_start.x)
             # Use full screen frame so the pill can sit under the Dock area.
             screen = NSScreen.mainScreen().frame()
+            w = float(ui["width"])
             nx = self._origin_x + dx
             nx = max(
                 float(screen.origin.x),
-                min(nx, float(screen.origin.x) + float(screen.size.width) - WIDTH),
+                min(nx, float(screen.origin.x) + float(screen.size.width) - w),
             )
             ny = float(screen.origin.y) + MARGIN_BOTTOM
             self.window().setFrameOrigin_((nx, ny))
@@ -270,8 +320,25 @@ def _run_appkit(
                 0.033, self, "tick:", None, True
             )
 
+        def _sync_width(self, phase: str) -> None:
+            target = _width_for(phase)
+            if int(ui["width"]) == target or self.window is None or self.view is None:
+                ui["width"] = target
+                return
+            ui["width"] = target
+            frame = self.window.frame()
+            screen = NSScreen.mainScreen().frame()
+            nx = float(frame.origin.x)
+            max_x = float(screen.origin.x) + float(screen.size.width) - target
+            nx = max(float(screen.origin.x), min(nx, max_x))
+            self.window.setFrame_display_(
+                NSMakeRect(nx, float(frame.origin.y), target, HEIGHT), True
+            )
+            self.view.setFrame_(NSMakeRect(0, 0, target, HEIGHT))
+
         def tick_(self, _t):  # noqa: N802
             ui["phase"] = read_phase(phase_path)
+            self._sync_width(ui["phase"])
             if ui["phase"] == "recording":
                 try:
                     level = float(amp_path.read_text(encoding="utf-8").strip())
@@ -279,9 +346,17 @@ def _run_appkit(
                 except Exception:
                     wave.push(0.0)
             if self.status_item is not None and self.status_item.button() is not None:
-                if ui["phase"] == "processing":
+                if ui["phase"] in {"processing", "working"}:
                     self.status_item.button().setTitle_("…")
-                    self.status_item.button().setToolTip_("Vaani is transcribing")
+                    tip = (
+                        "Vaani is working"
+                        if ui["phase"] == "working"
+                        else "Vaani is transcribing"
+                    )
+                    self.status_item.button().setToolTip_(tip)
+                elif ui["phase"] == "confirming":
+                    self.status_item.button().setTitle_("?")
+                    self.status_item.button().setToolTip_("Vaani needs confirmation")
                 else:
                     self.status_item.button().setTitle_("●")
                     self.status_item.button().setToolTip_("Vaani recording")
