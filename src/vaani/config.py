@@ -67,6 +67,22 @@ class Settings:
     def indicator_control_path(self) -> Path:
         return self.cache_dir / "indicator_control.json"
 
+    @property
+    def jobs_path(self) -> Path:
+        return self.data_dir / "jobs.json"
+
+    @property
+    def packs_path(self) -> Path:
+        return self.data_dir / "packs.json"
+
+    @property
+    def overlay_path(self) -> Path:
+        return self.cache_dir / "overlay.json"
+
+    @property
+    def vocab_path(self) -> Path:
+        return self.data_dir / "vocab.json"
+
     @classmethod
     def from_home(
         cls,
