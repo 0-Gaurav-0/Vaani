@@ -9,13 +9,10 @@ import threading
 import time
 from typing import Any, Callable
 
-from ...codex import CodexRunner, ResultWindow
+from ...assemble import assemble
 from ...config import Settings, sweep_audio_directory
-from ...controller import Controller
-from ...groq import GroqClient
-from ...history import HistoryStore
 from ...observability import configure_logging
-from ...secrets import SecretServiceKeyStore, effective_key
+from ...secrets import SecretServiceKeyStore
 from ..protocol import PlatformBundle, PlatformId
 from .apps import WindowsAppLauncher
 from .audio import WindowsAudioRecorder
@@ -108,39 +105,28 @@ def run_windows(settings: Settings) -> int:
 
     target = WindowsTargetProbe()
     delivery = WindowsDelivery(target=target)
-    recorder = WindowsAudioRecorder(
-        settings.audio_dir, amplitude_path=settings.amplitude_path
-    )
-    history = HistoryStore(settings.history_db)
-    feedback = WindowsFeedback(
-        amplitude_path=settings.amplitude_path,
-        control_path=settings.indicator_control_path,
-        log_dir=settings.log_dir,
-    )
-    groq = GroqClient()
-    store = SecretServiceKeyStore()
-    apps = WindowsAppLauncher()
-    browser = WindowsBrowserLauncher()
-    controller = Controller(
-        recorder=recorder,
-        groq=groq,
+    bundle = PlatformBundle(
+        id=PlatformId.WINDOWS,
+        settings=settings,
+        recorder=WindowsAudioRecorder(
+            settings.audio_dir, amplitude_path=settings.amplitude_path
+        ),
+        hotkeys=_NoopHotkeys(),
+        target=target,
         delivery=delivery,
-        history=history,
-        feedback=feedback,
-        key_provider=lambda: effective_key(store).value,
-        amplitude_path=settings.amplitude_path,
-        indicator_control_path=settings.indicator_control_path,
-        browser_launcher=browser,
-        app_launcher=apps,
+        apps=WindowsAppLauncher(),
+        browser=WindowsBrowserLauncher(),
+        feedback=WindowsFeedback(
+            amplitude_path=settings.amplitude_path,
+            control_path=settings.indicator_control_path,
+            log_dir=settings.log_dir,
+        ),
+        key_store=SecretServiceKeyStore(),
+        run=lambda _controller: 0,
     )
-    assistant = CodexRunner()
-
-    def show_assistant_result(text: str) -> None:
-        message = (text or "").strip() or "Assistant returned no output."
-        feedback.notify("paste", message[:160])
-
-    controller.codex = assistant
-    controller.result_window = ResultWindow(show_assistant_result)
+    assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
+    controller = assembly.controller
+    logger = assembly.logger
 
     shutdown_event = threading.Event()
 
