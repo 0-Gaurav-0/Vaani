@@ -1,14 +1,17 @@
 """Global hotkeys for macOS.
 
 Uses Carbon ``RegisterEventHotKey`` (HIToolbox) instead of pynput.
-pynput's CGEventTap path frequently fails for Control/Option chords on
-macOS and requires Accessibility/"trusted" that Cursor-launched Python
-often does not get. Carbon hotkeys are delivered by the system and work
-from Terminal without that tap trust message.
 
-Smart dictation: **Control+Space** (⌃Space), never Command+Space (Spotlight).
-If macOS Input Sources also binds Control+Space, disable that shortcut in
-System Settings → Keyboard → Keyboard Shortcuts → Input Sources.
+Default chords avoid macOS collisions:
+- Command+Space → Spotlight
+- Control+Space → Input Sources
+- Control+Shift+Space → often reserved / awkward in terminals
+
+Vaani macOS defaults (Control+Option family):
+- Control+Option+V       → smart dictation
+- Control+Option+Shift+V → literal
+- Control+Option+A       → assistant
+- Esc                    → cancel
 """
 from __future__ import annotations
 
@@ -22,8 +25,9 @@ SMART = "smart"
 LITERAL = "literal"
 ASSISTANT = "assistant"
 
-# HIToolbox virtual key code
-_KEY_SPACE = 49
+# HIToolbox virtual key codes (ANSI)
+_KEY_A = 0
+_KEY_V = 9
 _KEY_ESCAPE = 53
 
 # EventModifiers (Carbon)
@@ -34,9 +38,9 @@ _CONTROL = 1 << 12
 
 # (key_code, modifiers, mode_or_cancel)
 _BINDINGS: tuple[tuple[int, int, str], ...] = (
-    (_KEY_SPACE, _CONTROL, SMART),
-    (_KEY_SPACE, _CONTROL | _SHIFT, LITERAL),
-    (_KEY_SPACE, _CONTROL | _OPTION, ASSISTANT),
+    (_KEY_V, _CONTROL | _OPTION, SMART),
+    (_KEY_V, _CONTROL | _OPTION | _SHIFT, LITERAL),
+    (_KEY_A, _CONTROL | _OPTION, ASSISTANT),
     (_KEY_ESCAPE, 0, "cancel"),
 )
 
@@ -90,9 +94,9 @@ class HotkeyService:
 
     def _register_test_factory(self) -> None:
         mapping: dict[str, Callable[[], None]] = {
-            "<ctrl>+<space>": self._make_trigger(SMART),
-            "<ctrl>+<shift>+<space>": self._make_trigger(LITERAL),
-            "<ctrl>+<alt>+<space>": self._make_trigger(ASSISTANT),
+            "<ctrl>+<alt>+v": self._make_trigger(SMART),
+            "<ctrl>+<alt>+<shift>+v": self._make_trigger(LITERAL),
+            "<ctrl>+<alt>+a": self._make_trigger(ASSISTANT),
         }
         if self.on_cancel is not None:
             mapping["<esc>"] = self._make_cancel()
@@ -232,26 +236,24 @@ class HotkeyService:
 
         if not self._hotkey_refs:
             raise RuntimeError(
-                "No macOS hotkeys registered. Disable Control+Space under "
-                "System Settings → Keyboard → Keyboard Shortcuts → Input Sources, "
-                "then restart Vaani."
+                "No macOS hotkeys registered — another app may own "
+                "Control+Option+V / Control+Option+A. Quit conflicting shortcuts and retry."
             )
 
         self._stop.clear()
         self._thread = threading.Thread(target=self._run_loop, name="vaani-mac-hotkeys", daemon=True)
         self._thread.start()
         self.logger.info(
-            "hotkeys armed (Carbon): Control+Space smart, "
-            "Control+Shift+Space literal, Control+Option+Space assistant, Esc cancel"
+            "hotkeys armed (Carbon): Control+Option+V smart, "
+            "Control+Option+Shift+V literal, Control+Option+A assistant, Esc cancel"
         )
         print(
             "Vaani hotkeys ready:\n"
-            "  Control+Space        → smart dictation\n"
-            "  Control+Shift+Space  → literal\n"
-            "  Control+Option+Space → assistant\n"
-            "  Esc                  → cancel\n"
-            "If Control+Space does nothing, turn OFF “Select previous input source” "
-            "in System Settings → Keyboard → Keyboard Shortcuts → Input Sources.",
+            "  Control+Option+V       → smart dictation\n"
+            "  Control+Option+Shift+V → literal\n"
+            "  Control+Option+A       → assistant\n"
+            "  Esc                    → cancel\n"
+            "(Avoids Spotlight ⌘Space and Input Sources ⌃Space.)",
             flush=True,
         )
 

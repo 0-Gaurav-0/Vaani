@@ -232,8 +232,8 @@ def test_hotkey_service_register_unregister():
     # Simulate chords.
     # Find callbacks by inspecting the factory-built listener.
     listener = service._listener
-    assert "<ctrl>+<space>" in listener.mapping
-    listener.mapping["<ctrl>+<space>"]()
+    assert "<ctrl>+<alt>+v" in listener.mapping
+    listener.mapping["<ctrl>+<alt>+v"]()
     listener.mapping["<esc>"]()
     assert triggers == ["smart"]
     assert cancels == ["cancel"]
