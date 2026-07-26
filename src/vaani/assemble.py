@@ -5,12 +5,14 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from .codex import CodexRunner, ResultWindow
+from .codex import ResultWindow
 from .controller import Controller
+from .exec.agent import AgentRunner
 from .exec.supervisor import Supervisor
 from .groq import GroqClient
 from .history import HistoryStore
 from .observability import configure_logging
+from .platform import detect_os
 from .platform.protocol import PlatformBundle
 from .secrets import effective_key
 from .surface.result import make_assistant_sink
@@ -32,7 +34,7 @@ def assemble(
     hotkeys: Any | None = None,
     logger: logging.Logger | None = None,
 ) -> Assembly:
-    """Wire HistoryStore, GroqClient, Controller, CodexRunner, and ResultWindow.
+    """Wire HistoryStore, GroqClient, Controller, AgentRunner, and ResultWindow.
 
     OS runtimes keep display/hotkey/signal loops and call this for shared wiring.
     Optional ``delivery`` / ``target`` / ``hotkeys`` override bundle placeholders
@@ -82,9 +84,16 @@ def assemble(
         settings=settings if supervisor is not None else None,
         vocab_path=getattr(settings, "vocab_path", None),
     )
-    assistant = CodexRunner()
-    controller.codex = assistant
-    controller.result_window = ResultWindow(make_assistant_sink(bundle.feedback))
+    result_window = ResultWindow(make_assistant_sink(bundle.feedback))
+    controller.result_window = result_window
+    agent = AgentRunner(
+        registry=controller.registry,
+        confirm=controller.confirm,
+        platform=detect_os,
+        on_progress=lambda text: result_window.show_text(text),
+    )
+    controller.codex = agent
+    controller.agent = agent
     return Assembly(
         controller=controller,
         history=history,

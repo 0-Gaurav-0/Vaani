@@ -151,6 +151,27 @@
   risk: R2
   not_verb: app.open
 
+# T7.1 agent wake / brain select (spec §12.5)
+- utterance: "Vaani, agent: fix the failing test"
+  verb: agent.task
+  rung: 6
+  risk: R2
+
+- utterance: "use Claude for this: draft a reply"
+  verb: agent.task
+  rung: 6
+  risk: R2
+
+- utterance: "use Codex for this rewrite the README"
+  verb: agent.task
+  rung: 6
+  risk: R2
+
+- utterance: "use Cursor for this"
+  verb: agent.task
+  rung: 6
+  risk: R2
+
 # T1.3 core pack — SYS-APP / SYS-AV / SYS-PWR / SYS-NET / SYS-FILE / UI-FM / UI-BROW
 - utterance: "quit Slack"
   verb: app.quit
