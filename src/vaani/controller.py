@@ -20,6 +20,7 @@ from .groq import GroqError
 from .apps import launch_app, resolve_app
 from .sites import resolve_site
 from .indicator_protocol import clear_command, read_command
+from .session_loop import SessionLoop
 
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     import re
@@ -71,7 +72,10 @@ class Controller:
         self.events: list[ControllerEvent] = []; self._lock = threading.RLock()
         self._cancel = threading.Event(); self._token = 0; self._worker: threading.Thread | None = None
         self._record_started = 0.0; self._audio = None; self._shutdown = False
-        self._amplitude_stop = threading.Event(); self._amplitude_thread = None
+        self._session = SessionLoop(logger=self.logger)
+        self._session.add("indicator_control", self._poll_indicator_control)
+        self._session.add("amplitude", self._write_amplitude)
+        self._session.start()
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))
@@ -95,7 +99,10 @@ class Controller:
             try: self._audio = self.recorder.start()
             except Exception as exc: self._fail(exc, "mic"); return False
             self.state = AppState.RECORDING; self._record_started = time.monotonic(); self._emit("recording")
-            self._start_amplitude_monitor(self._audio.path)
+            try:
+                clear_command(self.indicator_control_path)
+            except Exception:
+                pass
             self._feedback("start")
             threading.Thread(target=self._duration_guard, args=(token,), daemon=True).start()
             return True
@@ -129,12 +136,10 @@ class Controller:
         with self._lock:
             if self.state is not AppState.RECORDING: return False
             token = self._token; self.state = AppState.PROCESSING; self._emit("processing"); self._cancel.clear()
-        # Keep the session monitor alive during PROCESSING so the pill can
-        # cancel, and so we can show a processing phase. Mic is released below.
+        # SessionLoop keeps polling indicator control during PROCESSING/IDLE.
         self._feedback("processing")
         try: audio = self.recorder.stop()
         except Exception as exc:
-            self._amplitude_stop.set()
             self._fail(exc, "mic")
             return False
         worker = threading.Thread(target=self._process, args=(token, audio), daemon=True)
@@ -142,7 +147,6 @@ class Controller:
 
     def cancel(self) -> bool:
         self._cancel.set()
-        self._amplitude_stop.set()
         with self._lock:
             if self.state is AppState.RECORDING:
                 try: self.recorder.cleanup()
@@ -176,47 +180,43 @@ class Controller:
         elif command == "cancel":
             self.cancel()
 
-    def _start_amplitude_monitor(self, path: Any) -> None:
-        self._amplitude_stop.clear()
+    def _write_amplitude(self) -> None:
+        """Sample mic level while RECORDING; no-op in other states."""
+        with self._lock:
+            recording = self.state is AppState.RECORDING
+            audio = self._audio
+        if not recording or audio is None:
+            return
+        path = getattr(audio, "path", None)
+        if path is None:
+            return
+        out = self.amplitude_path
         try:
-            clear_command(self.indicator_control_path)
+            level = None
+            # Prefer live PortAudio level (macOS/Windows buffer-in-memory).
+            live = getattr(self.recorder, "level", None)
+            if isinstance(live, (int, float)):
+                level = float(live)
+            if level is None:
+                with open(path, "rb") as fh:
+                    fh.seek(44)
+                    data = fh.read()[-2048:]
+                if len(data) >= 2:
+                    vals = struct.unpack(
+                        "<%dh" % (len(data) // 2), data[: len(data) // 2 * 2]
+                    )
+                    level = min(
+                        1.0,
+                        math.sqrt(sum(v * v for v in vals) / len(vals)) / 32768.0,
+                    )
+            if level is not None:
+                parent = os.path.dirname(out)
+                if parent:
+                    os.makedirs(parent, mode=0o700, exist_ok=True)
+                with open(out, "w") as dst:
+                    dst.write(f"{level:.4f}")
         except Exception:
             pass
-        out = self.amplitude_path
-        def monitor():
-            while not self._amplitude_stop.wait(0.05):
-                self._poll_indicator_control()
-                with self._lock:
-                    recording = self.state is AppState.RECORDING
-                if not recording:
-                    continue
-                try:
-                    level = None
-                    # Prefer live PortAudio level (macOS/Windows buffer-in-memory).
-                    live = getattr(self.recorder, "level", None)
-                    if isinstance(live, (int, float)):
-                        level = float(live)
-                    if level is None:
-                        with open(path, "rb") as fh:
-                            fh.seek(44)
-                            data = fh.read()[-2048:]
-                        if len(data) >= 2:
-                            vals = struct.unpack(
-                                "<%dh" % (len(data) // 2), data[: len(data) // 2 * 2]
-                            )
-                            level = min(
-                                1.0,
-                                math.sqrt(sum(v * v for v in vals) / len(vals)) / 32768.0,
-                            )
-                    if level is not None:
-                        parent = os.path.dirname(out)
-                        if parent:
-                            os.makedirs(parent, mode=0o700, exist_ok=True)
-                        with open(out, "w") as dst:
-                            dst.write(f"{level:.4f}")
-                except Exception:
-                    pass
-        self._amplitude_thread = threading.Thread(target=monitor, daemon=True); self._amplitude_thread.start()
 
     def _duration_guard(self, token: int) -> None:
         time.sleep(max(0.0, self.max_duration))
@@ -342,9 +342,6 @@ class Controller:
             except Exception:
                 pass
             self._fail(exc, getattr(exc, "category", None))
-        finally:
-            # End session monitor after processing (pill goes away via feedback).
-            self._amplitude_stop.set()
 
     @staticmethod
     def _browser_intent(text: str) -> bool:
@@ -395,6 +392,7 @@ class Controller:
         with self._lock:
             if self._shutdown: return
             self._shutdown = True; self._token += 1; self._cancel.set()
+        self._session.stop()
         for obj, method in ((self.hotkeys, "unregister"), (self.recorder, "cleanup"), (self.delivery, "cancel")):
             try:
                 if obj and hasattr(obj, method): getattr(obj, method)()

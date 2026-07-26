@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from vaani.controller import Controller
@@ -167,3 +168,75 @@ def test_browser_defaults_to_brave(monkeypatch):
     )
     assert Controller._open_browser().startswith("Opened")
     assert "brave" in seen[0][0]
+
+
+def test_indicator_control_honored_while_idle(tmp_path):
+    """SessionLoop polls control while IDLE — new capability vs per-request monitor."""
+    from vaani.indicator_protocol import read_command, write_command
+
+    control = tmp_path / "indicator_control.json"
+    amp = tmp_path / "amplitude"
+    h = History()
+    c = Controller(
+        recorder=Rec(),
+        groq=Groq(),
+        delivery=Delivery(),
+        history=h,
+        key_provider=lambda: "key",
+        amplitude_path=amp,
+        indicator_control_path=control,
+        max_duration=60,
+    )
+    assert c.state is AppState.IDLE
+    assert not hasattr(c, "_amplitude_thread")
+    write_command(control, "cancel")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if read_command(control) is None:
+            break
+        time.sleep(0.02)
+    assert read_command(control) is None
+    c.shutdown()
+
+
+def test_amplitude_written_during_recording(tmp_path):
+    wav = tmp_path / "a.wav"
+    # Minimal WAV header + a few non-zero PCM samples so RMS > 0.
+    pcm = (b"\x00\x10" * 512)
+    wav.write_bytes(b"RIFF" + b"\x00" * 40 + pcm)
+    control = tmp_path / "indicator_control.json"
+    amp = tmp_path / "amplitude"
+
+    class RecFile:
+        def start(self):
+            return SimpleNamespace(path=wav, duration_seconds=1)
+
+        def stop(self):
+            return SimpleNamespace(path=wav, duration_seconds=1)
+
+        def cleanup(self):
+            pass
+
+    h = History()
+    c = Controller(
+        recorder=RecFile(),
+        groq=Groq(),
+        delivery=Delivery(),
+        history=h,
+        key_provider=lambda: "key",
+        amplitude_path=amp,
+        indicator_control_path=control,
+        max_duration=60,
+    )
+    assert c.trigger("smart")
+    assert c.state is AppState.RECORDING
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if amp.exists() and amp.read_text().strip():
+            break
+        time.sleep(0.02)
+    assert amp.exists()
+    level = float(amp.read_text().strip())
+    assert 0.0 < level <= 1.0
+    c.cancel()
+    c.shutdown()
