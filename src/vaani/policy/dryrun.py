@@ -250,6 +250,21 @@ def materialize_argv(
             return (editor, "-g", f"{path}:{line}")
         return (editor, path)
 
+    if verb_name in {
+        "pkg.add",
+        "pkg.remove",
+        "pkg.lock",
+        "pkg.script.run",
+        "pkg.reinstall",
+        "container.engine.start",
+        "container.list",
+        "container.stop",
+        "container.stop_all",
+        "container.compose.rebuild",
+        "container.logs",
+    }:
+        return _fallback_argv(verb_name, slots)
+
     return None
 
 

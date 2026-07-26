@@ -17,6 +17,8 @@ from vaani.intent.schema import Context, Intent, Result, RiskClass, SlotSpec, St
 from vaani.platform.protocol import PlatformId
 from vaani.policy.undo import UNDO_VERB_NAMES
 from vaani.verbs.packs.core import CORE_VERB_NAMES
+from vaani.verbs.packs.docker import DOCKER_VERB_NAMES
+from vaani.verbs.packs.pkg import PKG_VERB_NAMES
 from vaani.verbs.packs.procs import PROCS_VERB_NAMES
 from vaani.verbs.packs.project import PROJECT_VERB_NAMES
 from vaani.verbs.registry import Registry
@@ -151,7 +153,12 @@ def test_caps_completeness_json(capsys: pytest.CaptureFixture[str], tmp_path) ->
         assert payload["packs"][name]["always_on"] is True
     verbs = payload["verbs"]
     assert set(verbs) == (
-        CORE_VERB_NAMES | PROCS_VERB_NAMES | PROJECT_VERB_NAMES | UNDO_VERB_NAMES
+        CORE_VERB_NAMES
+        | PROCS_VERB_NAMES
+        | PROJECT_VERB_NAMES
+        | PKG_VERB_NAMES
+        | DOCKER_VERB_NAMES
+        | UNDO_VERB_NAMES
     )
     for verb_name, row in verbs.items():
         assert set(row) == {"linux", "macos", "windows"}, verb_name

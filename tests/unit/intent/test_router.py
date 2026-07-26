@@ -59,6 +59,7 @@ def _parse_scalar(value: str) -> object:
 
 def _router(*, llm_parse=None) -> Router:
     from vaani.policy.undo import UndoStack, register_undo
+    from vaani.verbs.packs.registry import register_stub_packs
 
     registry, patterns = build_core_registry(
         resolve_app_fn=resolve_app,
@@ -67,6 +68,9 @@ def _router(*, llm_parse=None) -> Router:
         open_browser_fn=lambda **_k: "Opened browser.",
     )
     patterns = patterns + register_undo(registry, UndoStack())
+    # Installable packs (pkg/docker) — leave enabled (no PackRegistry.apply) so
+    # corpus rows for those packs can resolve in unit tests.
+    patterns = patterns + register_stub_packs(registry)
     return Router(
         registry,
         patterns,
