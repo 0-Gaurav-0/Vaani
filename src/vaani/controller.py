@@ -49,7 +49,8 @@ class Controller:
                  amplitude_path: str | os.PathLike[str] | None = None,
                  indicator_control_path: str | os.PathLike[str] | None = None,
                  browser_launcher: Any | None = None,
-                 app_launcher: Any | None = None):
+                 app_launcher: Any | None = None,
+                 vocab_path: str | os.PathLike[str] | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self._codex, self.result_window = codex, result_window
@@ -99,6 +100,7 @@ class Controller:
                 else resolve_app(text)
             ),
             resolve_site=lambda text: resolve_site(text),
+            vocab_path=Path(vocab_path) if vocab_path is not None else None,
         )
 
     @property

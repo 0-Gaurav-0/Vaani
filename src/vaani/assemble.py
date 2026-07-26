@@ -61,6 +61,7 @@ def assemble(
         indicator_control_path=settings.indicator_control_path,
         browser_launcher=bundle.browser,
         app_launcher=bundle.apps,
+        vocab_path=getattr(settings, "vocab_path", None),
     )
     assistant = CodexRunner()
 
