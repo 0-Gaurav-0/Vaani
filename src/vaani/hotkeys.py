@@ -26,6 +26,7 @@ class HotkeyManager:
         self.root = display.screen().root if display is not None else None
         self._registrations: list[HotkeyRegistration] = []
         self._down = False
+        self._held_mode: str | None = None
         self._keycode = None
 
     @staticmethod
@@ -62,13 +63,18 @@ class HotkeyManager:
         if self.display is not None:
             try: self.display.sync()
             except Exception: pass
-        self._registrations.clear(); self._down = False
+        self._registrations.clear()
+        self._down = False
+        self._held_mode = None
 
     def handle_event(self, event: Any) -> bool:
         if event.type == getattr(X, "KeyRelease", 3):
             if event.detail == self._keycode and self._down:
                 self._down = False
-                if self.on_release: self.on_release(SMART)
+                mode = self._held_mode
+                self._held_mode = None
+                if self.on_release and mode is not None:
+                    self.on_release(mode)
             return False
         if event.type != getattr(X, "KeyPress", 2) or event.detail != self._keycode:
             return False
@@ -81,7 +87,10 @@ class HotkeyManager:
         elif clean == (X.ControlMask | X.ShiftMask): mode = LITERAL
         elif clean == (X.ControlMask | X.Mod1Mask): mode = ASSISTANT
         if mode:
-            self.on_trigger(mode); return True
+            self._held_mode = mode
+            self.on_trigger(mode)
+            return True
+        self._down = False
         return False
 
     # Names convenient for event-loop adapters.

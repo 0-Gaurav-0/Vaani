@@ -30,3 +30,16 @@ def test_child_environment_excludes_key():
     assert "GROQ_API_KEY" not in child_environment({"PATH":"x", "GROQ_API_KEY":"CANARY_KEY", "AWS_SECRET_ACCESS_KEY":"x"})
     assert child_environment({}) == {}
     assert "GROQ_API_KEY" not in child_environment(None)
+
+
+def test_platform_roots_macos_and_windows(tmp_path):
+    mac = Settings.from_home(tmp_path, platform="darwin")
+    assert mac.platform == "macos"
+    assert mac.data_dir == tmp_path / "Library" / "Application Support" / "Vaani"
+    assert mac.amplitude_path == mac.cache_dir / "amplitude"
+    assert mac.indicator_control_path == mac.cache_dir / "indicator_control.json"
+
+    win = Settings.from_home(tmp_path, platform="win32")
+    assert win.platform == "windows"
+    assert win.data_dir.name == "Vaani"
+    assert win.cache_dir.name == "Cache"

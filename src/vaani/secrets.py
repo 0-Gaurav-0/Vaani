@@ -1,6 +1,7 @@
 """Secret Service backed API-key handling and non-destructive validation."""
 from dataclasses import dataclass
 import os
+from pathlib import Path
 from typing import Any, Mapping
 
 import httpx
@@ -8,6 +9,29 @@ import keyring
 
 SERVICE = "vaani"
 ACCOUNT = "groq"
+
+
+def load_env_file(path: Path | None = None) -> None:
+    """Load KEY=value pairs from a local .env into os.environ (no overwrite)."""
+    env_path = path or Path.cwd() / ".env"
+    if not env_path.is_file():
+        # Also try repo root relative to this package: src/vaani/../../.env
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        key, value = text.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 class KeyringUnavailable(RuntimeError): pass
 class KeyringLocked(KeyringUnavailable): pass

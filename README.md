@@ -12,11 +12,12 @@ logs, and machine-specific paths are intentionally not stored in Git.
 
 > [!IMPORTANT]
 > Vaani currently targets **Ubuntu 22.04, GNOME, Xorg/X11, and x86_64**. It is
-> not a Windows, macOS, or Wayland application. The workflow-learning system
-> discussed in historical design notes is not implemented in this repository.
+> not yet a Windows, macOS, or Wayland application. Planned cross-platform
+> operator and remote work lives in [ROADMAP.md](ROADMAP.md).
 
 ## Contents
 
+- [Roadmap](ROADMAP.md)
 - [What works](#what-works)
 - [How Vaani works](#how-vaani-works)
 - [Requirements](#requirements)
@@ -485,7 +486,7 @@ Current defaults:
 | Purpose | Model or limit |
 |---|---|
 | Transcription | `whisper-large-v3-turbo` |
-| Cleanup and answers | `openai/gpt-oss-120b` |
+| Cleanup and answers | `llama-3.1-8b-instant` (fast) |
 | Recording auto-stop | 300 seconds |
 | WAV validation maximum | 600 seconds |
 | Minimum recording | 250 milliseconds |
@@ -934,6 +935,8 @@ install -Dm600 /path/to/backup/history.sqlite3 \
 Skip a command when that backup file does not exist.
 
 ## Current limitations
+
+See [ROADMAP.md](ROADMAP.md) for planned work beyond this list.
 
 - Linux/X11 only; no Windows, macOS, or Wayland backend.
 - Ubuntu 22.04 GNOME/Xorg x86_64 is the validated platform.

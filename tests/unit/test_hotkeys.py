@@ -31,13 +31,25 @@ def test_bad_access_rolls_back():
     assert len([x for x in d.root.calls if x[0]=="ungrab"])==2
 
 def test_exact_modes_repeat_and_release():
-    out=[]; h=HotkeyManager(out.append,Display()); h._keycode=38
+    out=[]; releases=[]
+    h=HotkeyManager(out.append,Display(), on_release=releases.append); h._keycode=38
     smart=X.ControlMask
     assert h.handle_event(ev(X.KeyPress,smart)); assert not h.handle_event(ev(X.KeyPress,smart))
     assert not h.handle_event(ev(X.KeyRelease,0)); assert h.handle_event(ev(X.KeyPress,X.ControlMask|X.ShiftMask))
     assert out==[SMART,LITERAL]
+    assert releases==[SMART]
     h.handle_event(ev(X.KeyRelease,0)); assert h.handle_event(ev(X.KeyPress,smart|X.Mod1Mask))
     assert out==[SMART,LITERAL,"assistant"]
+    assert releases==[SMART,LITERAL]
+
+
+def test_hold_release_passes_held_mode():
+    presses=[]; releases=[]
+    h=HotkeyManager(presses.append,Display(), on_release=releases.append); h._keycode=38
+    assert h.handle_event(ev(X.KeyPress,X.ControlMask|X.ShiftMask))
+    assert presses==[LITERAL]
+    h.handle_event(ev(X.KeyRelease,0))
+    assert releases==[LITERAL]
 
 def test_none_display_is_rejected():
     with pytest.raises(RuntimeError): HotkeyManager(lambda _:None).register()
