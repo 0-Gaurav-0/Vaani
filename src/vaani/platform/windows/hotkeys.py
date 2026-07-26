@@ -33,10 +33,14 @@ def _normalize_key(key: Any) -> str | None:
             return "space"
         if lowered in {"esc", "escape"}:
             return "esc"
+        if lowered in {"enter", "return"}:
+            return "enter"
         return lowered
     char = getattr(key, "char", None)
     if char == " ":
         return "space"
+    if char in {"\r", "\n"}:
+        return "enter"
     return None
 
 
@@ -52,12 +56,14 @@ class WindowsHotkeyService:
         *,
         on_release: Callable[[str], Any] | None = None,
         on_cancel: Callable[[], Any] | None = None,
+        on_approve: Callable[[], Any] | None = None,
         listener_factory: Callable[..., Any] | None = None,
         logger: logging.Logger | None = None,
     ):
         self.on_trigger = on_trigger
         self.on_release = on_release
         self.on_cancel = on_cancel
+        self.on_approve = on_approve
         self._listener_factory = listener_factory
         self._listener: Any | None = None
         self._lock = threading.Lock()
@@ -91,6 +97,8 @@ class WindowsHotkeyService:
         }
         if self.on_cancel is not None:
             press_mapping["<esc>"] = self._make_cancel()
+        if self.on_approve is not None:
+            press_mapping["<enter>"] = self._make_approve()
         factory = self._listener_factory
         try:
             listener = factory(press_mapping, release_mapping)
@@ -119,6 +127,15 @@ class WindowsHotkeyService:
                         service.on_cancel()
                     except Exception:
                         service.logger.exception("event=hotkey_cancel_error")
+                return
+            if token == "enter":
+                service.logger.info("event=hotkey_pressed action=approve label=Enter")
+                print("[vaani] hotkey pressed: Enter (approve)", flush=True)
+                if service.on_approve is not None:
+                    try:
+                        service.on_approve()
+                    except Exception:
+                        service.logger.exception("event=hotkey_approve_error")
                 return
             service._pressed.add(token)
             action = service._match_action()
@@ -193,7 +210,8 @@ class WindowsHotkeyService:
             "  Hold Ctrl+Space           → smart dictation\n"
             "  Hold Ctrl+Shift+Space     → literal\n"
             "  Hold Ctrl+Alt+Space       → assistant\n"
-            "  Esc                       → cancel\n"
+            "  Esc                       → cancel / reject confirm\n"
+            "  Enter                     → approve confirm\n"
             "Release the chord to stop — the pill switches to processing.",
             flush=True,
         )
@@ -272,6 +290,17 @@ class WindowsHotkeyService:
                 return
             try:
                 self.on_cancel()
+            except Exception:
+                pass
+
+        return _cb
+
+    def _make_approve(self) -> Callable[[], None]:
+        def _cb() -> None:
+            if self.on_approve is None:
+                return
+            try:
+                self.on_approve()
             except Exception:
                 pass
 

@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from .indicator_protocol import read_phase
+from .indicator_protocol import read_pending_id, read_phase, resolve_pending_path
 from .waveform import WaveformBuffer
 
 # Compact + flush to the bottom so it barely eats content space.
@@ -59,6 +59,7 @@ def run_pill(
     control_path: Path,
     position_path: Path,
     phase_path: Path | None = None,
+    pending_path: Path | None = None,
 ) -> int:
     try:
         import tkinter as tk
@@ -70,6 +71,9 @@ def run_pill(
 
     wave = WaveformBuffer(bars=BAR_COUNT)
     phase_file = phase_path
+    pending_file = pending_path or resolve_pending_path(
+        cache_dir=control_path.parent
+    )
     t0 = time.monotonic()
     root = tk.Tk()
     root.title("Vaani")
@@ -141,7 +145,6 @@ def run_pill(
         _draw_stadium(w)
 
         if phase == "confirming":
-            # S2 foreshadow: Reject / Approve controls (clicks wired later).
             canvas.create_text(
                 40,
                 HEIGHT // 2,
@@ -230,8 +233,12 @@ def run_pill(
         phase = _phase()
         w = layout["width"]
         if phase == "confirming":
-            # Placeholder until T2.1 wires approve/reject commands.
-            if event.x < HIT_PAD or event.x > w - HIT_PAD:
+            action_id = read_pending_id(pending_file)
+            if action_id and event.x < HIT_PAD:
+                _send(control_path, f"reject:{action_id}")
+                return
+            if action_id and event.x > w - HIT_PAD:
+                _send(control_path, f"approve:{action_id}")
                 return
             drag_state["start"] = (event.x_root, event.y_root)
             drag_state["origin_x"] = root.winfo_x()

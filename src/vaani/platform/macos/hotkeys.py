@@ -18,6 +18,7 @@ ASSISTANT = "assistant"
 
 _KEY_SPACE = 49  # kVK_Space
 _KEY_ESCAPE = 53
+_KEY_RETURN = 36  # kVK_Return — approve while PendingAction is staged
 
 _CMD = 1 << 8
 _SHIFT = 1 << 9
@@ -25,11 +26,13 @@ _OPTION = 1 << 11
 _CONTROL = 1 << 12
 
 # Hold-to-talk family (2-key smart chord; variants add Shift / Control).
+# Esc rejects a pending confirm (same cancel family); Return approves.
 _BINDINGS: tuple[tuple[int, int, str, str], ...] = (
     (_KEY_SPACE, _OPTION, SMART, "Option+Space"),
     (_KEY_SPACE, _OPTION | _SHIFT, LITERAL, "Option+Shift+Space"),
     (_KEY_SPACE, _OPTION | _CONTROL, ASSISTANT, "Control+Option+Space"),
     (_KEY_ESCAPE, 0, "cancel", "Esc"),
+    (_KEY_RETURN, 0, "approve", "Enter"),
 )
 
 _EVENT_LOOP_TIMED_OUT = -9875
@@ -68,12 +71,14 @@ class HotkeyService:
         *,
         on_release: Callable[[str], Any] | None = None,
         on_cancel: Callable[[], Any] | None = None,
+        on_approve: Callable[[], Any] | None = None,
         listener_factory: Callable[..., Any] | None = None,
         logger: logging.Logger | None = None,
     ):
         self.on_trigger = on_trigger
         self.on_release = on_release
         self.on_cancel = on_cancel
+        self.on_approve = on_approve
         self._listener_factory = listener_factory
         self._listener: Any | None = None
         self._lock = threading.Lock()
@@ -110,6 +115,9 @@ class HotkeyService:
         }
         if self.on_cancel is not None:
             mapping["<esc>"] = self._make_cancel()
+        if self.on_approve is not None:
+            mapping["<enter>"] = self._make_approve()
+            mapping["<return>"] = self._make_approve()
         listener = self._listener_factory(mapping)
         listener.start()
         self._listener = listener
@@ -204,7 +212,7 @@ class HotkeyService:
             _key, _mods, action, label = _BINDINGS[idx]
             try:
                 if kind == _K_EVENT_HOT_KEY_RELEASED:
-                    if action == "cancel":
+                    if action in {"cancel", "approve"}:
                         return 0
                     if service._held_action != action:
                         return 0
@@ -237,6 +245,10 @@ class HotkeyService:
                     if service.on_cancel is not None:
                         service.on_cancel()
                         service.logger.info("event=hotkey_cancel_dispatched")
+                elif action == "approve":
+                    if service.on_approve is not None:
+                        service.on_approve()
+                        service.logger.info("event=hotkey_approve_dispatched")
                 else:
                     service._held_action = action
                     service.on_trigger(action)
@@ -420,6 +432,17 @@ class HotkeyService:
                 return
             try:
                 self.on_cancel()
+            except Exception:
+                pass
+
+        return _cb
+
+    def _make_approve(self) -> Callable[[], None]:
+        def _cb() -> None:
+            if self.on_approve is None:
+                return
+            try:
+                self.on_approve()
             except Exception:
                 pass
 

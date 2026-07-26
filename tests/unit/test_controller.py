@@ -110,26 +110,37 @@ def test_processing_blocks_new_input_without_dismiss_feedback():
     assert any(e.name == "busy" for e in c.events)
 
 def test_assistant_uses_runner_displays_and_persists():
+    """agent.task is R2 — stages PendingAction, then runs after approve (T2.1)."""
     class Runner:
         def run(self, prompt): return SimpleNamespace(stdout='answer', cancelled=False, timed_out=False)
     class Window:
         def __init__(self): self.results=[]
         def show(self, result): self.results.append(result.stdout)
+        def show_text(self, text): self.results.append(text)
     h=History(); w=Window()
     c=Controller(recorder=Rec(), groq=Groq(), delivery=Delivery(), history=h,
                  codex=Runner(), result_window=w, key_provider=lambda:'key')
     assert c.trigger_assistant(); assert c.stop(); c._worker.join(1)
-    assert w.results == ['answer']
+    pending = c.confirm.peek()
+    assert pending is not None and pending.verb == "agent.task"
+    assert not h.rows  # not executed until approved
+    assert c.approve_pending(via="pill")
     assert h.rows[0]['mode'] == 'assistant' and h.rows[0]['final_text'] == 'answer'
+    assert 'answer' in w.results
     assert c.state is AppState.IDLE
 
 
 def test_assistant_launches_resolved_desktop_app(monkeypatch):
+    """R0 app.open still runs immediately (no confirm)."""
     class Window:
         def __init__(self): self.results=[]
         def show_text(self, result): self.results.append(result)
+    class OpenGroq:
+        def transcribe(self, *a, **k): return SimpleNamespace(text='open Terminal', language='en')
+        def cleanup(self, text, *a, **k): return SimpleNamespace(text=text, used_fallback=False)
+        def close(self): pass
     h=History(); w=Window()
-    c=Controller(recorder=Rec(), groq=Groq(), delivery=Delivery(), history=h,
+    c=Controller(recorder=Rec(), groq=OpenGroq(), delivery=Delivery(), history=h,
                  result_window=w, key_provider=lambda:'key')
     app = SimpleNamespace(name="Terminal")
     monkeypatch.setattr("vaani.controller.resolve_app", lambda text: app)
@@ -140,6 +151,7 @@ def test_assistant_launches_resolved_desktop_app(monkeypatch):
     assert w.results == ["Opened Terminal."]
     assert h.rows[0]["cleanup_status"] == "app_action"
     assert c.state is AppState.IDLE
+    assert c.confirm.peek() is None
 
 
 def test_browser_intent_safe_action(monkeypatch):

@@ -11,12 +11,17 @@ from pathlib import Path
 
 
 def main() -> int:
-    from ...indicator_protocol import resolve_control_path, resolve_phase_path
+    from ...indicator_protocol import (
+        resolve_control_path,
+        resolve_pending_path,
+        resolve_phase_path,
+    )
     from ...indicator_tk import run_pill
 
     amp = Path(os.environ.get("VAANI_AMPLITUDE_PATH", "/tmp/vaani-amplitude"))
     control = resolve_control_path()
     phase = resolve_phase_path()
+    pending = resolve_pending_path()
     xdg = os.environ.get("XDG_CONFIG_HOME")
     config = Path(xdg) if xdg else Path.home() / ".config"
     pos = config / "vaani" / "indicator.json"
@@ -25,6 +30,7 @@ def main() -> int:
         control_path=control,
         position_path=pos,
         phase_path=phase,
+        pending_path=pending,
     )
 
 

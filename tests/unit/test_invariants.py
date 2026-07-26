@@ -449,18 +449,74 @@ def test_rung_1_2_corpus_resolves_with_brain_mocked_to_raise() -> None:
         assert router.llm_parse is boom
 
 
-# --- §13.5.4 R2+ requires PendingAction (deferred) --------------------------------
+# --- §13.5.4 R2+ requires PendingAction -------------------------------------------
 
 
-@pytest.mark.skip(
-    reason=(
-        "PendingAction create/consume gating lands with the confirmation engine "
-        "(plan T2.1 / ROADMAP P2-05). S0 Controller._dispatch always proceeds; "
-        "agent.task is R2 and executes without a PendingAction today."
-    )
-)
 def test_r2_plus_verb_requires_pending_action() -> None:
-    raise AssertionError("unreachable until policy engine exists")
+    """Invariant 4: R2+ verbs stage a PendingAction; handler runs only after approve."""
+    from types import SimpleNamespace
+    from vaani.controller import Controller
+    from vaani.policy.confirm import requires_confirm
+
+    calls: list[str] = []
+
+    def handler(intent: Intent, context: Context) -> Result:
+        calls.append(intent.verb)
+        return Result(status=Status.OK, summary="quit", rung=1)
+
+    class Rec:
+        def start(self):
+            return SimpleNamespace(path=Path("/tmp/a.wav"), duration_seconds=1)
+
+        def stop(self):
+            return SimpleNamespace(path=Path("/tmp/a.wav"), duration_seconds=1)
+
+        def cleanup(self):
+            pass
+
+    class Groq:
+        def transcribe(self, *a, **k):
+            return SimpleNamespace(text="quit Slack", language="en")
+
+        def close(self):
+            pass
+
+    class Delivery:
+        def deliver(self, text, snapshot=None):
+            return "ok"
+
+        def cancel(self):
+            pass
+
+    class History:
+        def insert(self, **kw):
+            return 1
+
+        def close(self):
+            pass
+
+    c = Controller(
+        recorder=Rec(),
+        groq=Groq(),
+        delivery=Delivery(),
+        history=History(),
+        key_provider=lambda: "key",
+    )
+    verb = c.registry.get("app.quit")
+    assert verb is not None
+    assert requires_confirm(verb.risk)
+    object.__setattr__(verb, "handler", handler)
+    assert c.trigger_assistant()
+    assert c.stop()
+    if c._worker:
+        c._worker.join(2)
+    assert calls == []
+    pending = c.confirm.peek()
+    assert pending is not None
+    assert pending.verb == "app.quit"
+    assert c.approve_pending(via="pill")
+    assert calls == ["app.quit"]
+    c.shutdown()
 
 
 # --- §13.5.5 UNSUPPORTED never escalates (partial now) ----------------------------
