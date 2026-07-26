@@ -2,12 +2,22 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from typing import Any, Mapping
 
 from vaani.apps import APPS as LINUX_APPS
 from vaani.intent.schema import Context, Intent, Result, Status, Verb
 from vaani.known_folders import resolve_known_folder
 from vaani.platform.protocol import AppTarget, PlatformId
+
+
+def attach_workspace(result: Result, context: Context) -> Result:
+    """Stamp Context workspace fields onto Result (invariant 7)."""
+    return replace(
+        result,
+        workspace=context.workspace,
+        workspace_source=context.workspace_source,
+    )
 
 
 def _app_catalog(platform: PlatformId) -> tuple[tuple[tuple[str, ...], AppTarget], ...]:
@@ -231,11 +241,15 @@ def dry_run_result(
         detail=detail,
         evidence=evidence,
         rung=verb.rung,
+        workspace=context.workspace,
+        workspace_source=context.workspace_source,
     )
 
 
 def dispatch(verb: Verb, intent: Intent, context: Context) -> Result:
     """Execute a verb, short-circuiting dry-run before the handler is touched."""
     if "dry_run" in intent.modifiers:
-        return dry_run_result(verb, intent, context)
-    return verb.handler(intent, context)
+        result = dry_run_result(verb, intent, context)
+    else:
+        result = verb.handler(intent, context)
+    return attach_workspace(result, context)

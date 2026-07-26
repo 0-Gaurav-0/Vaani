@@ -617,6 +617,8 @@ def test_history_schema_has_no_secret_or_screen_columns() -> None:
 
 def test_core_verb_results_name_rung() -> None:
     """Invariant 7 (partial): every core handler Result reports a rung."""
+    from vaani.policy.dryrun import dispatch
+
     registry = _core_registry()
     context = Context(
         platform=PlatformId.LINUX,
@@ -643,7 +645,7 @@ def test_core_verb_results_name_rung() -> None:
         )
         # Handlers may fail without real I/O; only the Result shape matters.
         try:
-            result = verb.handler(intent, context)
+            result = dispatch(verb, intent, context)
         except Exception:
             continue
         assert isinstance(result, Result)
@@ -651,12 +653,42 @@ def test_core_verb_results_name_rung() -> None:
         assert result.rung == verb.rung
 
 
-@pytest.mark.skip(
-    reason=(
-        "Invariant 7 workspace naming needs Result.workspace / workspace_source "
-        "(plan T3.x context.workspace). Result today only carries rung; Context "
-        "has workspace_source but handlers do not echo it onto Result yet."
-    )
-)
 def test_every_result_names_workspace() -> None:
-    raise AssertionError("unreachable until Result grows workspace fields")
+    """Invariant 7: every dispatched Result carries workspace_source."""
+    from pathlib import Path
+
+    from vaani.policy.dryrun import dispatch
+
+    registry = _core_registry()
+    context = Context(
+        platform=PlatformId.LINUX,
+        workspace=Path("/tmp/ws"),
+        workspace_source="config",
+        repo=None,
+        project=None,
+        focus=None,
+        screen=None,
+        session=None,
+    )
+    named = 0
+    for verb in registry.enabled(PlatformId.LINUX):
+        intent = Intent(
+            verb=verb.name,
+            slots={"prompt": "x", "name": "Terminal", "url": "https://example.com"},
+            rung=verb.rung,
+            confidence=1.0,
+            source="test",
+            mode="act",
+            utterance="test",
+            raw_utterance="test",
+            modifiers=frozenset(),
+            brain=None,
+        )
+        try:
+            result = dispatch(verb, intent, context)
+        except Exception:
+            continue
+        assert result.workspace_source == "config"
+        assert result.workspace == Path("/tmp/ws")
+        named += 1
+    assert named > 0

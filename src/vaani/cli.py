@@ -10,6 +10,8 @@ from typing import Any, Mapping, Sequence
 from vaani.apps import launch_app as linux_launch_app
 from vaani.apps import resolve_app as linux_resolve_app
 from vaani.config import Settings
+from vaani.context import NullFocusProbe, build_context
+from vaani.exec.runner import run as exec_run
 from vaani.intent.schema import Context, Intent, Result, Status, Support
 from vaani.platform import UnsupportedPlatform, build_platform, detect_os
 from vaani.platform.protocol import PlatformId
@@ -216,15 +218,20 @@ def build_registry(platform: PlatformId | None = None) -> Registry:
 
 
 def _make_context(platform: PlatformId) -> Context:
-    return Context(
-        platform=platform,
-        workspace=None,
-        workspace_source="cli",
-        repo=None,
-        project=None,
-        focus=None,
-        screen=None,
-        session=None,
+    """Resolve workspace/repo/focus for ``vaani do`` (best-effort).
+
+    Headless CLI skips live OS focus probes by default so CI stays deterministic;
+    ``VAANI_ASSISTANT_CWD`` / last-used / home still apply. Set
+    ``VAANI_CLI_FOCUS=1`` to enable the platform focus probe.
+    """
+    use_focus = os.environ.get("VAANI_CLI_FOCUS", "").strip() in {"1", "true", "yes"}
+    if use_focus:
+        return build_context(platform, runner=exec_run)
+    return build_context(
+        platform,
+        focus_probe=NullFocusProbe(),
+        include_focus=True,
+        runner=exec_run,
     )
 
 
@@ -243,6 +250,8 @@ def _result_payload(
         "detail": result.detail,
         "evidence": list(result.evidence),
         "rung": result.rung,
+        "workspace": str(result.workspace) if result.workspace is not None else None,
+        "workspace_source": result.workspace_source,
     }
     if argv is not None:
         payload["argv"] = list(argv)
