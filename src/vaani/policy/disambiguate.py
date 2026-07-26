@@ -30,10 +30,13 @@ MAX_OPTIONS = 3
 DEFAULT_TTL_SECONDS = 20.0
 
 # Packs whose R2 handlers self-gate (safe to probe without ``confirmed``).
-PROBE_PACKS: frozenset[str] = frozenset({"procs", "project"})
+PROBE_PACKS: frozenset[str] = frozenset({"procs", "project", "core"})
 
-# Verbs probed before ConfirmEngine staging so disambiguation can win first.
-DISAMBIGUATE_PROBE_VERBS: frozenset[str] = frozenset({"system.proc.kill"})
+# Verbs probed before ConfirmEngine staging so disambiguation / seeded
+# materialize can win first (agent.task seeds failing-job context in-handler).
+DISAMBIGUATE_PROBE_VERBS: frozenset[str] = frozenset(
+    {"system.proc.kill", "agent.task"}
+)
 
 _ORDINAL_WORDS = {
     "first": 0,

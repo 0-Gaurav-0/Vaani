@@ -23,8 +23,15 @@ from vaani.intent.schema import (
 from vaani.known_folders import canonical_folder, resolve_known_folder
 from vaani.platform.protocol import PlatformId
 from vaani.sites import PUBLIC_SITES
+from vaani.verbs.agent_context import (
+    agent_pending,
+    extract_unified_diff,
+    last_failing_run,
+    materialize_agent_argv,
+    seed_agent_prompt,
+)
 from vaani.verbs.packs.procs import register_procs_pack
-from vaani.verbs.packs.project import register_project_pack
+from vaani.verbs.packs.project import LastRun, register_project_pack
 from vaani.verbs.packs.window import register_window_pack
 from vaani.verbs.registry import Registry
 
@@ -374,6 +381,7 @@ def build_core_verbs(
     get_system: Callable[[], Any | None] | None = None,
     get_delivery: Callable[[], Any | None] | None = None,
     get_platform: Callable[[], PlatformId] | None = None,
+    get_supervisor: Callable[[], Any | None] | None = None,
     quit_app_fn: Callable[[str, PlatformId], Result] | None = None,
     open_private_fn: Callable[..., str] | None = None,
     reveal_fn: Callable[[Path, PlatformId], Result] | None = None,
@@ -381,6 +389,7 @@ def build_core_verbs(
     resolve_folder_fn: Callable[..., Path | None] | None = None,
     runner: Runner | None = None,
     popen: Popen | None = None,
+    last_runs: list[LastRun] | None = None,
 ) -> tuple[Verb, ...]:
     """Build core verbs with injected I/O seams."""
 
@@ -388,6 +397,7 @@ def build_core_verbs(
     spawn = popen or subprocess.Popen
     platform_of = get_platform or (lambda: PlatformId.LINUX)
     folder_resolve = resolve_folder_fn or resolve_known_folder
+    memory: list[LastRun] = last_runs if last_runs is not None else []
 
     def _show_text(message: str) -> None:
         window = get_result_window() if get_result_window is not None else None
@@ -633,7 +643,76 @@ def build_core_verbs(
             return open_dir_fn(path, platform)
         return _open_dir(path, platform, runner=run, popen=spawn)
 
-    def handle_agent_task(intent: Intent, _context: Context) -> Result:
+    def handle_agent_task(intent: Intent, context: Context) -> Result:
+        # TODO(T7.1): prefer BrainProtocol.run_task(...) when brains modules land.
+        confirmed = "confirmed" in intent.modifiers or "yes" in intent.modifiers
+        proposed = str(intent.slots.get("proposed_diff") or "").strip()
+        base_prompt = str(intent.slots.get("prompt") or intent.raw_utterance or "")
+        failing = last_failing_run(memory, get_supervisor=get_supervisor)
+        seed = seed_agent_prompt(
+            base_prompt,
+            failing=failing,
+            focus=context.focus,
+            propose_diff=True,
+        )
+        seeded_prompt = str(intent.slots.get("seeded_prompt") or seed.prompt)
+        materialized = materialize_agent_argv(
+            {
+                **dict(intent.slots),
+                "prompt": base_prompt,
+                "seeded_prompt": seeded_prompt,
+                "proposed_diff": proposed,
+            }
+        )
+
+        if "dry_run" in intent.modifiers:
+            return Result(
+                status=Status.DRY_RUN,
+                summary=(seeded_prompt or base_prompt)[:80],
+                detail=seeded_prompt or base_prompt,
+                evidence=materialized,
+                rung=6,
+            )
+
+        # Phase 1 — materialize seeded prompt / show confirm before agent runs.
+        if not confirmed:
+            detail_parts = [seeded_prompt or base_prompt]
+            if seed.failing_key:
+                detail_parts.insert(0, f"Seeded from failing job: {seed.failing_key}")
+            detail = "\n\n".join(detail_parts)
+            return Result(
+                status=Status.NEEDS_CONFIRM,
+                summary="Run agent task?"[:80],
+                detail=detail,
+                evidence=materialized,
+                rung=6,
+                pending=agent_pending(
+                    slots={
+                        "prompt": base_prompt,
+                        "seeded_prompt": seeded_prompt,
+                        **(
+                            {"failing_job": seed.failing_key}
+                            if seed.failing_key
+                            else {}
+                        ),
+                    },
+                    materialized=materialized,
+                ),
+            )
+
+        # Phase 3 — user confirmed the proposed diff; accept/apply.
+        if proposed:
+            window = get_result_window() if get_result_window is not None else None
+            if window is not None and hasattr(window, "show_text"):
+                window.show_text(proposed)
+            return Result(
+                status=Status.OK,
+                summary="Applied agent diff"[:80],
+                detail=proposed,
+                evidence=("agent.task", "apply-diff"),
+                rung=6,
+            )
+
         codex = get_codex() if get_codex is not None else None
         if codex is None:
             return Result(
@@ -642,8 +721,9 @@ def build_core_verbs(
                 detail="assistant runner unavailable",
                 rung=6,
             )
-        prompt = str(intent.slots.get("prompt") or intent.raw_utterance)
-        answer = codex.run(prompt)
+
+        # Phase 2 — run backend; stage diff apply confirm when a patch is returned.
+        answer = codex.run(seeded_prompt)
         window = get_result_window() if get_result_window is not None else None
         if window is not None and hasattr(window, "show"):
             window.show(answer)
@@ -655,6 +735,26 @@ def build_core_verbs(
                 rung=6,
             )
         final = getattr(answer, "stdout", "") or ""
+        diff = extract_unified_diff(final)
+        if diff:
+            apply_argv = ("agent.task", "apply-diff", diff[:200])
+            if window is not None and hasattr(window, "show_text"):
+                window.show_text(f"Proposed diff:\n{diff}")
+            return Result(
+                status=Status.NEEDS_CONFIRM,
+                summary="Apply agent diff?"[:80],
+                detail=diff,
+                evidence=apply_argv,
+                rung=6,
+                pending=agent_pending(
+                    slots={
+                        "prompt": base_prompt,
+                        "seeded_prompt": seeded_prompt,
+                        "proposed_diff": diff,
+                    },
+                    materialized=apply_argv,
+                ),
+            )
         return Result(status=Status.OK, summary=final, detail=final, rung=6)
 
     return (
@@ -1079,13 +1179,18 @@ def build_core_registry(
     runner: Runner | None = None,
     popen: Popen | None = None,
     patterns: Sequence[Pattern] | None = None,
+    last_runs: list[LastRun] | None = None,
 ) -> tuple[Registry, tuple[Pattern, ...]]:
     """Register core + procs + project + window verbs and return ``(registry, patterns)``.
 
     ``session.undo`` is registered by the assembly layer (controller/CLI) via
     ``policy.undo.register_undo`` so L3 never imports L4.
+
+    ``last_runs`` is shared between project verbs (writers) and ``agent.task``
+    (reader) so UI-EDIT-06 can seed from the last failing test job.
     """
     _ = resolve_site_fn  # reserved for future site-slot resolvers
+    shared_runs: list[LastRun] = last_runs if last_runs is not None else []
     registry = Registry()
     for verb in build_core_verbs(
         resolve_app_fn=resolve_app_fn,
@@ -1099,6 +1204,7 @@ def build_core_registry(
         get_system=get_system,
         get_delivery=get_delivery,
         get_platform=get_platform,
+        get_supervisor=get_supervisor,
         quit_app_fn=quit_app_fn,
         open_private_fn=open_private_fn,
         reveal_fn=reveal_fn,
@@ -1106,6 +1212,7 @@ def build_core_registry(
         resolve_folder_fn=resolve_folder_fn,
         runner=runner,
         popen=popen,
+        last_runs=shared_runs,
     ):
         registry.register(verb)
     procs = register_procs_pack(
@@ -1122,6 +1229,7 @@ def build_core_registry(
         get_cancel=get_cancel,
         run_fn=run_command,
         popen=popen,
+        last_runs=shared_runs,
     )
     window = register_window_pack(registry, get_window=get_window)
     base = tuple(patterns) if patterns is not None else core_patterns()
