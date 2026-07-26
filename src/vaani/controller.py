@@ -150,7 +150,9 @@ class Controller:
             run_command=exec_run,
         )
         patterns = patterns + register_undo(self.registry, self.undo)
-        register_stub_packs(self.registry)
+        patterns = patterns + tuple(
+            register_stub_packs(self.registry, run_fn=exec_run) or ()
+        )
         packs_settings = settings
         if packs_settings is None:
             try:
@@ -462,7 +464,7 @@ class Controller:
             return
 
         if requires_confirm(verb.risk):
-            materialized = self._materialize(intent, platform)
+            materialized = self._materialize(intent, platform, context)
             pending = self.confirm.stage(
                 intent, verb, materialized, context=context
             )
@@ -493,6 +495,51 @@ class Controller:
             return
 
         result = dispatch(verb, intent, context)
+        # R0/R1 handlers may still stage confirm (slugify, dirty checkout, …).
+        if result.status is Status.NEEDS_CONFIRM and result.pending is not None:
+            staged_intent = Intent(
+                verb=intent.verb,
+                slots=dict(result.pending.slots),
+                rung=intent.rung,
+                confidence=intent.confidence,
+                source=intent.source,
+                mode=intent.mode,
+                utterance=intent.utterance,
+                raw_utterance=intent.raw_utterance,
+                modifiers=intent.modifiers,
+                brain=intent.brain,
+            )
+            pending = self.confirm.stage(
+                staged_intent,
+                verb,
+                result.pending.materialized,
+                context=context,
+            )
+            result = attach_workspace(
+                Result(
+                    status=Status.NEEDS_CONFIRM,
+                    summary=result.summary,
+                    detail=result.detail,
+                    evidence=pending.materialized,
+                    rung=verb.rung,
+                    pending=pending,
+                ),
+                context,
+            )
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    self.confirm.invalidate()
+                    return
+                self.state = AppState.IDLE
+                self._emit("needs_confirm")
+            self._enter_confirming(pending, result)
+            self.logger.info(
+                "event=confirm_staged id=%s verb=%s risk=%s via=handler",
+                pending.id,
+                verb.name,
+                pending.risk.value,
+            )
+            return
         if result.status is Status.OK:
             self.undo.record_success(verb, intent, result)
         self._finish_assistant_result(
@@ -599,10 +646,15 @@ class Controller:
             self._emit("assistant_complete")
             self._feedback("success")
 
-    def _materialize(self, intent: Any, platform: Any) -> tuple[str, ...]:
+    def _materialize(
+        self, intent: Any, platform: Any, context: Any = None
+    ) -> tuple[str, ...]:
         try:
             argv = materialize_argv(
-                intent.verb, dict(intent.slots), platform=platform
+                intent.verb,
+                dict(intent.slots),
+                platform=platform,
+                context=context,
             )
         except Exception:
             argv = None
