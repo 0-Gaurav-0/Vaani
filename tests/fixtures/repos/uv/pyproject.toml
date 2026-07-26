@@ -1,0 +1,9 @@
+[project]
+name = "uv-app"
+version = "0.1.0"
+
+[tool.uv]
+dev-dependencies = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

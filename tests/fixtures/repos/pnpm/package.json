@@ -1,0 +1,9 @@
+{
+  "name": "pnpm-app",
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsup",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit"
+  }
+}

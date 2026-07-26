@@ -1,0 +1,8 @@
+{
+  "name": "yarn-app",
+  "scripts": {
+    "test": "jest",
+    "build": "webpack",
+    "start": "node server.js"
+  }
+}

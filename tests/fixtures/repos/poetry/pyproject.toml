@@ -1,0 +1,11 @@
+[tool.poetry]
+name = "poetry-app"
+version = "0.1.0"
+description = ""
+authors = ["Test <t@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+[tool.pytest.ini_options]
+addopts = "-q"

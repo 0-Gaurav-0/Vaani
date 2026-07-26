@@ -1,0 +1,9 @@
+[project]
+manager = "uv"
+test = ["uv", "run", "pytest", "-k", "unit"]
+build = ["make", "dist"]
+dev = ["uvicorn", "app:main", "--reload"]
+typecheck = ["ty", "check"]
+lint = ["ruff", "check", "src"]
+compose_file = "compose.yml"
+env_files = [".env", ".env.local"]

@@ -1,0 +1,9 @@
+[project]
+name = "mixed-api"
+version = "0.1.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+dev-dependencies = ["pytest"]

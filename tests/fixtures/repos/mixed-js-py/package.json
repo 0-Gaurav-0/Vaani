@@ -1,0 +1,8 @@
+{
+  "name": "mixed-web",
+  "scripts": {
+    "test": "vitest run",
+    "dev": "vite",
+    "build": "vite build"
+  }
+}
