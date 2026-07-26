@@ -30,12 +30,14 @@ from .indicator_protocol import (
     write_phase,
 )
 from .session_loop import SessionLoop
+from .context import build_context
+from .exec.runner import run as exec_run
 from .intent.interrogative import refuse_interrogative, should_refuse_interrogative
 from .intent.router import Router
 from .intent.schema import Context, Intent, Result, Status
 from .platform import detect_os
 from .policy.confirm import ConfirmEngine, requires_confirm
-from .policy.dryrun import dispatch, materialize_argv
+from .policy.dryrun import attach_workspace, dispatch, materialize_argv
 from .policy.undo import UndoStack, register_undo
 from .surface.result import format_result_message, show_result
 from .verbs.packs.core import browser_intent, build_core_registry
@@ -399,20 +401,11 @@ class Controller:
         verb = self.registry.get(intent.verb)
         if verb is None:
             raise RuntimeError("assistant runner unavailable")
-        context = Context(
-            platform=platform,
-            workspace=None,
-            workspace_source="home",
-            repo=None,
-            project=None,
-            focus=None,
-            screen=None,
-            session=None,
-        )
+        context = build_context(platform, runner=exec_run)
         # Interrogatives targeting mutating verbs: refuse before confirm/handler.
         # Guide/screen-offer is deferred (parallel-agents §0 / T2.5 override).
         if should_refuse_interrogative(verb, intent):
-            result = refuse_interrogative(verb, intent)
+            result = attach_workspace(refuse_interrogative(verb, intent), context)
             self._surface_result(result)
             self._finish_assistant_result(
                 result, raw=raw, audio=audio, verb_name=verb.name, token=token
@@ -432,13 +425,16 @@ class Controller:
             pending = self.confirm.stage(
                 intent, verb, materialized, context=context
             )
-            result = Result(
-                status=Status.NEEDS_CONFIRM,
-                summary=f"Confirm {verb.title}?",
-                detail=" ".join(pending.materialized),
-                evidence=pending.materialized,
-                rung=verb.rung,
-                pending=pending,
+            result = attach_workspace(
+                Result(
+                    status=Status.NEEDS_CONFIRM,
+                    summary=f"Confirm {verb.title}?",
+                    detail=" ".join(pending.materialized),
+                    evidence=pending.materialized,
+                    rung=verb.rung,
+                    pending=pending,
+                ),
+                context,
             )
             with self._lock:
                 if self._cancel.is_set() or token != self._token:

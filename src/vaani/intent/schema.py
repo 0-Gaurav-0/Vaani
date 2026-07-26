@@ -166,6 +166,9 @@ class Result:
     undo: UndoToken | None = None
     pending: PendingAction | None = None
     overlay: tuple[OverlayOp, ...] = ()
+    # Invariant 7: every result names its workspace source (§5.2 / §13.5.7).
+    workspace: Path | None = None
+    workspace_source: str = ""
 
     def __post_init__(self) -> None:
         if len(self.summary) > _SUMMARY_MAX:
