@@ -21,11 +21,15 @@ from .apps import launch_app, resolve_app
 from .sites import resolve_site
 from .indicator_protocol import (
     clear_command,
+    clear_options,
     clear_pending_id,
     parse_confirm_command,
+    parse_select_command,
     read_command,
+    resolve_options_path,
     resolve_pending_path,
     resolve_phase_path,
+    write_options,
     write_pending_id,
     write_phase,
 )
@@ -39,6 +43,12 @@ from .intent.router import Router
 from .intent.schema import Context, Intent, Result, Status
 from .platform import detect_os
 from .policy.confirm import ConfirmEngine, requires_confirm
+from .policy.disambiguate import (
+    DISAMBIGUATE_PROBE_VERBS,
+    PROBE_PACKS,
+    DisambiguationEngine,
+    merge_option_slots,
+)
 from .policy.dryrun import attach_workspace, dispatch, materialize_argv
 from .policy.undo import UndoStack, register_undo
 from .surface.result import format_result_message, show_result
@@ -125,12 +135,15 @@ class Controller:
         cache_dir = Path(self.amplitude_path).parent
         self.indicator_phase_path = str(resolve_phase_path(cache_dir=cache_dir))
         self.indicator_pending_path = str(resolve_pending_path(cache_dir=cache_dir))
+        self.indicator_options_path = str(resolve_options_path(cache_dir=cache_dir))
         self.confirm = ConfirmEngine()
+        self.disambiguate = DisambiguationEngine()
         self.undo = UndoStack()
         self._session = SessionLoop(logger=self.logger)
         self._session.add("indicator_control", self._poll_indicator_control)
         self._session.add("amplitude", self._write_amplitude)
         self._session.add("confirm_expire", self._expire_confirm, every=0.25)
+        self._session.add("disambiguate_expire", self._expire_disambiguate, every=0.25)
         self._session.start()
         self.registry, patterns = build_core_registry(
             resolve_app_fn=lambda text: resolve_app(text),
@@ -198,6 +211,7 @@ class Controller:
                 self._feedback("busy")
                 return False
             # New utterance cancels a pending confirm (never approves).
+            # Disambiguation waits for the transcript: ordinals select, else cancel.
             if self.confirm.peek() is not None:
                 self._invalidate_pending(reason="utterance")
             self.mode = mode.value if isinstance(mode, DictationMode) else str(mode)
@@ -252,7 +266,10 @@ class Controller:
         self._worker = worker; worker.start(); return True
 
     def cancel(self) -> bool:
-        """Cancel capture/processing, or reject a pending confirm (Esc family)."""
+        """Cancel capture/processing, or reject pending confirm/disambiguate (Esc)."""
+        prompt = self.disambiguate.peek()
+        if prompt is not None and self.state is AppState.IDLE:
+            return self.reject_pending(prompt.id, via="hotkey")
         pending = self.confirm.peek()
         if pending is not None and self.state is AppState.IDLE:
             return self.reject_pending(pending.id, via="hotkey")
@@ -275,14 +292,41 @@ class Controller:
 
     def approve_pending(self, action_id: str | None = None, *, via: str = "hotkey") -> bool:
         """Approve the staged PendingAction (Enter / pill Approve)."""
+        # Disambiguation never auto-approves — Enter is not a default pick.
+        if self.disambiguate.peek() is not None:
+            return False
         pending = self.confirm.peek()
         if pending is None:
             return False
         target = action_id or pending.id
         return self._handle_approve(target, via=via)
 
+    def select_pending(self, index: int, action_id: str | None = None, *, via: str = "hotkey") -> bool:
+        """Select a disambiguation option by 0-based index (voice / hotkey / pill)."""
+        prompt = self.disambiguate.peek()
+        if prompt is None:
+            return False
+        target = action_id or prompt.id
+        chosen = self.disambiguate.select(target, index, via=via)
+        if chosen is None:
+            return False
+        return self._handle_disambiguation_choice(via=via)
+
     def reject_pending(self, action_id: str | None = None, *, via: str = "hotkey") -> bool:
-        """Reject the staged PendingAction (Esc / pill Reject)."""
+        """Reject staged confirm or disambiguation (Esc / pill Reject)."""
+        prompt = self.disambiguate.peek()
+        if prompt is not None:
+            target = action_id or prompt.id
+            rejected = self.disambiguate.reject(target)
+            if rejected is None:
+                return False
+            self.logger.info(
+                "event=disambiguate_rejected id=%s via=%s", rejected.id, via
+            )
+            self._emit("disambiguate_rejected")
+            self._clear_confirm_ui()
+            self._feedback("busy")
+            return True
         pending = self.confirm.peek()
         if pending is None:
             return False
@@ -297,7 +341,7 @@ class Controller:
         return True
 
     def _poll_indicator_control(self) -> None:
-        """Honor stop/cancel/approve/reject requests from the floating pill."""
+        """Honor stop/cancel/approve/reject/select requests from the floating pill."""
         try:
             command = read_command(self.indicator_control_path)
         except Exception:
@@ -308,6 +352,11 @@ class Controller:
             clear_command(self.indicator_control_path)
         except Exception:
             pass
+        select = parse_select_command(command)
+        if select is not None:
+            action_id, index = select
+            self.select_pending(index, action_id, via="pill")
+            return
         confirm = parse_confirm_command(command)
         if confirm is not None:
             kind, action_id = confirm
@@ -432,6 +481,17 @@ class Controller:
 
     def _dispatch(self, raw: str, audio: Any, token: int) -> None:
         """Route assistant speech through the verb registry and execute the hit."""
+        # Pending disambiguation: ordinals select; anything else cancels then routes.
+        if self.disambiguate.peek() is not None:
+            if self.disambiguate.select_utterance(raw, via="voice") is not None:
+                with self._lock:
+                    if self._cancel.is_set() or token != self._token:
+                        self.disambiguate.invalidate()
+                        return
+                    self.state = AppState.IDLE
+                self._handle_disambiguation_choice(via="voice")
+                return
+            self._invalidate_disambiguation(reason="utterance")
         # A new transcript always invalidates any leftover pending confirm.
         if self.confirm.peek() is not None:
             self._invalidate_pending(reason="utterance")
@@ -462,6 +522,23 @@ class Controller:
             return
 
         if requires_confirm(verb.risk):
+            # Probe selected verbs so multi-match disambiguation wins before confirm.
+            if verb.name in DISAMBIGUATE_PROBE_VERBS:
+                probe = dispatch(verb, intent, context)
+                if not self._absorb_policy_gate(
+                    probe, intent=intent, verb=verb, context=context, token=token
+                ):
+                    if probe.status is Status.OK:
+                        self.undo.record_success(verb, intent, probe)
+                    self._finish_assistant_result(
+                        probe,
+                        raw=raw,
+                        audio=audio,
+                        verb_name=verb.name,
+                        token=token,
+                    )
+                return
+
             materialized = self._materialize(intent, platform)
             pending = self.confirm.stage(
                 intent, verb, materialized, context=context
@@ -493,6 +570,14 @@ class Controller:
             return
 
         result = dispatch(verb, intent, context)
+        if result.status is Status.NEEDS_DISAMBIGUATE and result.disambiguation:
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return
+                self.state = AppState.IDLE
+                self._emit("needs_disambiguate")
+            self._enter_disambiguating(result.disambiguation, intent, verb, context, result)
+            return
         if result.status is Status.OK:
             self.undo.record_success(verb, intent, result)
         self._finish_assistant_result(
@@ -500,6 +585,9 @@ class Controller:
         )
 
     def _handle_approve(self, action_id: str, *, via: str) -> bool:
+        if self.disambiguate.peek() is not None:
+            # Pill Approve must not default-pick a disambiguation option.
+            return False
         approved = self.confirm.approve(action_id, via=via)
         if approved is None:
             self.logger.info(
@@ -539,6 +627,14 @@ class Controller:
             token = self._token
         try:
             result = dispatch(verb, intent, context)
+            if result.status is Status.NEEDS_DISAMBIGUATE and result.disambiguation:
+                with self._lock:
+                    self.state = AppState.IDLE
+                    self._emit("needs_disambiguate")
+                self._enter_disambiguating(
+                    result.disambiguation, intent, verb, context, result
+                )
+                return True
             if result.status is Status.FAILED:
                 raise RuntimeError(
                     result.detail or result.summary or "assistant failed"
@@ -555,6 +651,168 @@ class Controller:
         except Exception as exc:
             self._fail(exc, getattr(exc, "category", None))
         return True
+
+    def _handle_disambiguation_choice(self, *, via: str) -> bool:
+        bundle = self.disambiguate.claim_selection()
+        if bundle is None:
+            return False
+        intent, verb, context, prompt, option = bundle
+        slots = merge_option_slots(intent.slots, option)
+        intent = Intent(
+            verb=intent.verb,
+            slots=slots,
+            rung=intent.rung,
+            confidence=intent.confidence,
+            source=intent.source,
+            mode=intent.mode,
+            utterance=intent.utterance,
+            raw_utterance=intent.raw_utterance,
+            modifiers=intent.modifiers,
+            brain=intent.brain,
+        )
+        self.logger.info(
+            "event=disambiguate_selected id=%s via=%s verb=%s option=%s",
+            prompt.id,
+            via,
+            verb.name,
+            option.key,
+        )
+        self._emit("disambiguate_selected")
+        self._clear_confirm_ui()
+        with self._lock:
+            if self.state is not AppState.IDLE:
+                return False
+            self.state = AppState.PROCESSING
+            self._token += 1
+            token = self._token
+        try:
+            if requires_confirm(verb.risk) and verb.pack in PROBE_PACKS:
+                probe = dispatch(verb, intent, context)
+                if self._absorb_policy_gate(
+                    probe, intent=intent, verb=verb, context=context, token=token
+                ):
+                    return True
+                if probe.status is Status.OK:
+                    self.undo.record_success(verb, intent, probe)
+                self._finish_assistant_result(
+                    probe,
+                    raw=intent.raw_utterance,
+                    verb_name=verb.name,
+                    duration_ms=0,
+                    token=token,
+                )
+                return True
+            if requires_confirm(verb.risk):
+                materialized = self._materialize(intent, context.platform)
+                pending = self.confirm.stage(
+                    intent, verb, materialized, context=context
+                )
+                result = attach_workspace(
+                    Result(
+                        status=Status.NEEDS_CONFIRM,
+                        summary=f"Confirm {verb.title}?",
+                        detail=" ".join(pending.materialized),
+                        evidence=pending.materialized,
+                        rung=verb.rung,
+                        pending=pending,
+                    ),
+                    context,
+                )
+                with self._lock:
+                    self.state = AppState.IDLE
+                    self._emit("needs_confirm")
+                self._enter_confirming(pending, result)
+                return True
+            result = dispatch(verb, intent, context)
+            if result.status is Status.OK:
+                self.undo.record_success(verb, intent, result)
+            self._finish_assistant_result(
+                result,
+                raw=intent.raw_utterance,
+                verb_name=verb.name,
+                duration_ms=0,
+                token=token,
+            )
+        except Exception as exc:
+            self._fail(exc, getattr(exc, "category", None))
+        return True
+
+    def _absorb_policy_gate(
+        self,
+        result: Result,
+        *,
+        intent: Intent,
+        verb: Any,
+        context: Context,
+        token: int,
+    ) -> bool:
+        """Stage confirm/disambiguate UI when a probe Result requests it.
+
+        Returns True when the result was absorbed (caller should stop).
+        """
+        if result.status is Status.NEEDS_DISAMBIGUATE and result.disambiguation:
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return True
+                self.state = AppState.IDLE
+                self._emit("needs_disambiguate")
+            self._enter_disambiguating(
+                result.disambiguation, intent, verb, context, result
+            )
+            return True
+        if result.status is Status.NEEDS_CONFIRM:
+            materialized = (
+                result.pending.materialized
+                if result.pending is not None
+                else self._materialize(intent, context.platform)
+            )
+            pending = self.confirm.stage(
+                intent, verb, materialized, context=context
+            )
+            gated = attach_workspace(
+                Result(
+                    status=Status.NEEDS_CONFIRM,
+                    summary=result.summary or f"Confirm {verb.title}?",
+                    detail=result.detail or " ".join(pending.materialized),
+                    evidence=pending.materialized,
+                    rung=verb.rung,
+                    pending=pending,
+                ),
+                context,
+            )
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    self.confirm.invalidate()
+                    return True
+                self.state = AppState.IDLE
+                self._emit("needs_confirm")
+            self._enter_confirming(pending, gated)
+            self.logger.info(
+                "event=confirm_staged id=%s verb=%s risk=%s",
+                pending.id,
+                verb.name,
+                verb.risk.value,
+            )
+            return True
+        if result.status in {
+            Status.REFUSED,
+            Status.FAILED,
+            Status.UNSUPPORTED,
+            Status.PARTIAL,
+            Status.DRY_RUN,
+        }:
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return True
+            self._finish_assistant_result(
+                result,
+                raw=intent.raw_utterance,
+                verb_name=verb.name,
+                duration_ms=0,
+                token=token,
+            )
+            return True
+        return False
 
     def _finish_assistant_result(
         self,
@@ -632,6 +890,10 @@ class Controller:
             write_pending_id(self.indicator_pending_path, pending.id)
         except Exception:
             pass
+        try:
+            clear_options(self.indicator_options_path)
+        except Exception:
+            pass
         setter = getattr(self.feedback, "set_pending_id", None)
         if callable(setter):
             try:
@@ -645,9 +907,66 @@ class Controller:
             pass
         self._surface_result(result)
 
+    def _enter_disambiguating(
+        self,
+        prompt: Any,
+        intent: Intent,
+        verb: Any,
+        context: Context,
+        result: Result,
+    ) -> None:
+        staged = self.disambiguate.stage(
+            intent, verb, prompt, context=context
+        )
+        try:
+            write_pending_id(self.indicator_pending_path, staged.id)
+        except Exception:
+            pass
+        try:
+            write_options(
+                self.indicator_options_path,
+                [opt.label for opt in staged.options],
+            )
+        except Exception:
+            pass
+        setter = getattr(self.feedback, "set_pending_id", None)
+        if callable(setter):
+            try:
+                setter(staged.id)
+            except Exception:
+                pass
+        self._feedback("confirming")
+        try:
+            write_phase(self.indicator_phase_path, "confirming")
+        except Exception:
+            pass
+        # Prefer the engine-staged prompt on the surfaced Result.
+        surfaced = attach_workspace(
+            Result(
+                status=Status.NEEDS_DISAMBIGUATE,
+                summary=result.summary,
+                detail=result.detail,
+                evidence=result.evidence,
+                rung=result.rung,
+                disambiguation=staged,
+            ),
+            context,
+        )
+        self._surface_result(surfaced)
+        self.logger.info(
+            "event=disambiguate_staged id=%s verb=%s options=%s",
+            staged.id,
+            verb.name,
+            len(staged.options),
+        )
+
     def _clear_confirm_ui(self) -> None:
         try:
             clear_pending_id(self.indicator_pending_path)
+        except Exception:
+            pass
+        try:
+            clear_options(self.indicator_options_path)
         except Exception:
             pass
         setter = getattr(self.feedback, "set_pending_id", None)
@@ -667,12 +986,32 @@ class Controller:
         self._emit("confirm_invalidated")
         self._clear_confirm_ui()
 
+    def _invalidate_disambiguation(self, *, reason: str) -> None:
+        rejected = self.disambiguate.invalidate()
+        if rejected is None:
+            return
+        self.logger.info(
+            "event=disambiguate_invalidated id=%s reason=%s", rejected.id, reason
+        )
+        self._emit("disambiguate_invalidated")
+        self._clear_confirm_ui()
+
     def _expire_confirm(self) -> None:
         expired = self.confirm.expire_tick()
         if expired is None:
             return
         self.logger.info("event=confirm_expired id=%s", expired.id)
         self._emit("confirm_expired")
+        self._clear_confirm_ui()
+        self._feedback("busy")
+
+    def _expire_disambiguate(self) -> None:
+        """TTL cancel — never selects a default option."""
+        expired = self.disambiguate.expire_tick()
+        if expired is None:
+            return
+        self.logger.info("event=disambiguate_expired id=%s", expired.id)
+        self._emit("disambiguate_expired")
         self._clear_confirm_ui()
         self._feedback("busy")
 

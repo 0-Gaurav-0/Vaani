@@ -10,6 +10,8 @@ from typing import Any
 from vaani.intent.grammar import Pattern, SlotRule
 from vaani.intent.schema import (
     Context,
+    DisambiguationOption,
+    DisambiguationPrompt,
     Intent,
     PendingAction,
     Result,
@@ -22,6 +24,8 @@ from vaani.intent.schema import (
 )
 from vaani.platform.protocol import PlatformId, ProcInfo
 from vaani.verbs.registry import Registry
+
+_DISAMBIGUATE_MAX = 3
 
 PROCS_VERB_NAMES: frozenset[str] = frozenset(
     {
@@ -335,6 +339,27 @@ def build_procs_verbs(
             )
 
         matches = tuple(system.list_named(name))
+        pid_slot = intent.slots.get("pid")
+        if pid_slot is not None and str(pid_slot).strip() != "":
+            try:
+                chosen_pid = int(pid_slot)
+            except (TypeError, ValueError):
+                return Result(
+                    status=Status.FAILED,
+                    summary="Invalid process id",
+                    detail=f"pid slot must be an integer, got {pid_slot!r}",
+                    rung=2,
+                )
+            matches = tuple(m for m in matches if m.pid == chosen_pid)
+            if not matches:
+                return Result(
+                    status=Status.FAILED,
+                    summary=f"No process PID {chosen_pid}",
+                    detail=f"list_named({name!r}) had no PID {chosen_pid}",
+                    evidence=(name, str(chosen_pid)),
+                    rung=2,
+                )
+
         if "dry_run" in intent.modifiers:
             materialized = ("pkill", "-f", name)
             return Result(
@@ -369,6 +394,38 @@ def build_procs_verbs(
                 rung=2,
             )
 
+        # Several matches → disambiguate (spec §12.3); never guess which PID.
+        # ``force`` opts into bulk kill-all (SYS-PROC-01 >5 path) after confirm.
+        if len(matches) > 1 and pid_slot is None and not _forced(intent):
+            options = tuple(
+                DisambiguationOption(
+                    key=str(proc.pid),
+                    label=f"{proc.name} (PID {proc.pid})",
+                    payload={"pid": proc.pid, "name": proc.name},
+                )
+                for proc in matches[:_DISAMBIGUATE_MAX]
+            )
+            question = f"Which {name} process?"
+            labels = "; ".join(
+                f"{i + 1}. {opt.label}" for i, opt in enumerate(options)
+            )
+            prompt = DisambiguationPrompt(
+                id=uuid.uuid4().hex[:12],
+                question=question,
+                options=options,
+                verb="system.proc.kill",
+                slots={"name": name, "force": _forced(intent)},
+                expires_at=time.time() + _PENDING_TTL_S,
+            )
+            return Result(
+                status=Status.NEEDS_DISAMBIGUATE,
+                summary=question[:80],
+                detail=f"{question} {labels}".strip(),
+                evidence=tuple(opt.key for opt in options),
+                rung=2,
+                disambiguation=prompt,
+            )
+
         listed = _format_holders(matches)
         summary = f"Kill {len(matches)} process(es): {listed}?"
         materialized = ("kill", "-TERM", *[str(m.pid) for m in matches])
@@ -381,7 +438,15 @@ def build_procs_verbs(
                 rung=2,
                 pending=_pending(
                     verb="system.proc.kill",
-                    slots={"name": name, "force": _forced(intent)},
+                    slots={
+                        "name": name,
+                        "force": _forced(intent),
+                        **(
+                            {"pid": matches[0].pid}
+                            if len(matches) == 1
+                            else {}
+                        ),
+                    },
                     materialized=materialized,
                     risk=RiskClass.R2,
                 ),
