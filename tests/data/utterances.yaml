@@ -134,21 +134,15 @@
   risk: R0
 
 - utterance: "fix the failing test"
-  verb: agent.task
-  rung: 6
-  risk: R2
+  verb: null
 
-# Negatives — must not match the named verb
+# Negatives — must not match the named verb; no blind agent.task without LLM
 - utterance: "open chrome and run ls"
-  verb: agent.task
-  rung: 6
-  risk: R2
+  verb: null
   not_verb: browser.open
 
 - utterance: "I use Claude"
-  verb: agent.task
-  rung: 6
-  risk: R2
+  verb: null
   not_verb: app.open
 
 # T7.1 agent wake / brain select (spec §12.5)

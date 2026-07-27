@@ -47,10 +47,14 @@ _LAYER_PREFIXES: tuple[tuple[str, int], ...] = (
     ("vaani.intent", 1),
 )
 
-# S0 exception: Router holds a Registry to filter enabled verbs (L1 → L3).
+# S0 exception: intent modules hold/filter a Registry for enabled verbs (L1 → L3).
 _ALLOWED_IMPORTS: frozenset[tuple[str, str]] = frozenset(
     {
         ("vaani.intent.router", "vaani.verbs.registry"),
+        ("vaani.intent.catalog_card", "vaani.verbs.registry"),
+        ("vaani.intent.llm", "vaani.verbs.registry"),
+        ("vaani.intent.plan_exec", "vaani.verbs.registry"),
+        ("vaani.intent.plan_exec", "vaani.policy.confirm"),
     }
 )
 

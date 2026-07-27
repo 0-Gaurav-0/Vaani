@@ -40,7 +40,7 @@ from .exec.runner import run as exec_run
 from .exec.supervisor import Supervisor
 from .intent.interrogative import refuse_interrogative, should_refuse_interrogative
 from .intent.router import Router, prefer_verifiable_format
-from .intent.schema import Context, Intent, Result, Status
+from .intent.schema import Context, Intent, IntentPlan, Result, Status
 from .platform import detect_os
 from .policy.confirm import ConfirmEngine, requires_confirm
 from .policy.disambiguate import (
@@ -536,7 +536,28 @@ class Controller:
         if self.confirm.peek() is not None:
             self._invalidate_pending(reason="utterance")
         platform = detect_os()
-        intent = self.router.route(raw, platform=platform)
+        routed = self.router.route(raw, platform=platform)
+        if isinstance(routed, IntentPlan):
+            # Multi-step: stash for plan executor (Task 7/8). Single-step plans
+            # already return Intent from the router.
+            plan_executor = getattr(self, "plan_executor", None)
+            if plan_executor is not None:
+                plan_executor.execute(routed, raw=raw, audio=audio, token=token)
+                return
+            result = Result(
+                status=Status.FAILED,
+                summary="multi-step plan unsupported",
+                detail="plan execution not wired",
+            )
+            self._surface_result(result)
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return
+                self.state = AppState.IDLE
+                self._emit("assistant_complete")
+            self._sync_policy_hotkeys()
+            return
+        intent = routed
         if intent is None:
             raise RuntimeError("assistant runner unavailable")
         context = build_context(platform, runner=exec_run)
@@ -971,7 +992,7 @@ class Controller:
         if not name:
             try:
                 routed = self.router.route(raw, platform=detect_os())
-                if routed is not None:
+                if isinstance(routed, Intent):
                     name = routed.verb
             except Exception:
                 name = ""

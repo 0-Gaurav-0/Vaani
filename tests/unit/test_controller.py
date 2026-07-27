@@ -117,8 +117,14 @@ def test_assistant_uses_runner_displays_and_persists():
         def __init__(self): self.results=[]
         def show(self, result): self.results.append(result.stdout)
         def show_text(self, text): self.results.append(text)
+    class AgentGroq:
+        def transcribe(self, *a, **k):
+            return SimpleNamespace(text='Vaani, agent: hello', language='en')
+        def cleanup(self, text, *a, **k):
+            return SimpleNamespace(text=text, used_fallback=False)
+        def close(self): pass
     h=History(); w=Window()
-    c=Controller(recorder=Rec(), groq=Groq(), delivery=Delivery(), history=h,
+    c=Controller(recorder=Rec(), groq=AgentGroq(), delivery=Delivery(), history=h,
                  codex=Runner(), result_window=w, key_provider=lambda:'key')
     assert c.trigger_assistant(); assert c.stop(); c._worker.join(1)
     pending = c.confirm.peek()
