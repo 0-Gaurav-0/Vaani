@@ -92,6 +92,12 @@ class ScreenFrame:
     height: int
     data: bytes | None = None
     display_index: int = 0
+    mime: str = "image/jpeg"
+    display_width: int = 0
+    display_height: int = 0
+    origin_x: float = 0.0
+    origin_y: float = 0.0
+    flip_y: bool = False
 
 
 @dataclass(frozen=True)
