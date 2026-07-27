@@ -179,7 +179,7 @@ def test_no_skill_match_falls_back_to_codex(monkeypatch):
     w = Window()
     c = Controller(
         recorder=Rec(),
-        groq=Groq("what is the capital of France"),
+        groq=Groq("refactor the flaky login test"),
         delivery=Delivery(),
         history=h,
         codex=runner,
@@ -189,5 +189,54 @@ def test_no_skill_match_falls_back_to_codex(monkeypatch):
     assert c.trigger_assistant()
     assert c.stop()
     c._worker.join(1)
-    assert runner.calls == [("run", "what is the capital of France")]
+    assert runner.calls == [("run", "refactor the flaky login test")]
     assert h.rows[0]["cleanup_status"] == "skipped"
+
+
+def test_ai_route_play_when_fast_path_misses(monkeypatch):
+    from vaani.assistant_route import RouteDecision
+
+    class RoutingGroq(Groq):
+        def route(self, utterance, key, *, cancel=None):
+            return RouteDecision(
+                intent="play",
+                query="spiderman brand new day trailer",
+                target="youtube",
+                confidence=0.92,
+            )
+
+    class Browser:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, url, *, prefer=None):
+            self.urls.append(url)
+            return "Opened browser."
+
+    monkeypatch.setattr("vaani.controller.resolve_app", lambda text: None)
+    monkeypatch.setattr("vaani.controller.resolve_youtube", lambda text: None)
+    monkeypatch.setattr("vaani.controller.resolve_site", lambda text: None)
+    monkeypatch.setattr(
+        "vaani.controller.resolve_play_target",
+        lambda query, target="youtube": SimpleNamespace(
+            name=f"YouTube: {query}",
+            url="https://www.youtube.com/watch?v=abcdefghijk",
+            browser=None,
+        ),
+    )
+
+    browser = Browser()
+    h = History()
+    c = Controller(
+        recorder=Rec(),
+        groq=RoutingGroq("kya tum brand new day ka trailer chala sakte ho"),
+        delivery=Delivery(),
+        history=h,
+        key_provider=lambda: "key",
+        browser_launcher=browser,
+    )
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(1)
+    assert browser.urls == ["https://www.youtube.com/watch?v=abcdefghijk"]
+    assert h.rows[0]["cleanup_status"] == "browser_action"

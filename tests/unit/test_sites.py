@@ -131,3 +131,49 @@ def test_codex_fast_command_is_ephemeral_and_isolated():
     assert "--ephemeral" in command
     assert "--ignore-user-config" in command
     assert 'model_reasoning_effort="low"' in command
+
+
+def test_bare_play_defaults_to_youtube(monkeypatch):
+    from vaani.sites import resolve_youtube
+
+    monkeypatch.setattr(
+        "vaani.sites._first_youtube_watch_url",
+        lambda query, timeout=2.5: "https://www.youtube.com/watch?v=abcdefghijk",
+    )
+    target = resolve_youtube("play Kesariya")
+    assert target is not None
+    assert target.url.endswith("watch?v=abcdefghijk")
+    assert "YouTube" in target.name
+
+
+def test_can_you_play_defaults_to_youtube(monkeypatch):
+    from vaani.sites import resolve_youtube
+
+    monkeypatch.setattr(
+        "vaani.sites._first_youtube_watch_url",
+        lambda query, timeout=2.5: "https://www.youtube.com/watch?v=abcdefghijk",
+    )
+    for phrase in (
+        "Can you play the trailer of Spider-Man brand new day?",
+        "could you please play the trailer for Spiderman brand new day",
+        "will you play brand new day trailer",
+    ):
+        target = resolve_youtube(phrase)
+        assert target is not None, phrase
+        assert target.url.endswith("watch?v=abcdefghijk"), phrase
+        assert "YouTube" in target.name
+
+
+def test_play_on_prime_uses_ott_search():
+    from vaani.sites import resolve_youtube
+
+    target = resolve_youtube("play Hellmary on amazon prime")
+    assert target is not None
+    assert "primevideo.com" in target.url
+    assert "Prime Video" in target.name
+
+
+def test_play_it_alone_is_ignored():
+    from vaani.sites import resolve_youtube
+
+    assert resolve_youtube("play it") is None

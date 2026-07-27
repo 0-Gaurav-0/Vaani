@@ -129,12 +129,148 @@ def _youtube_query_clean(query: str) -> str:
     return " ".join(query.split()).strip(" .,!?\"'")
 
 
-def resolve_youtube(command: str) -> SiteTarget | None:
-    """Map play/watch YouTube voice commands to a browser URL (skip Codex).
+_OTT_PLATFORMS: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("amazon prime", "prime video", "primevideo", "amazon prime video"),
+        "Prime Video",
+        "https://www.primevideo.com/search/ref=atv_sr_sug?phrase={query}",
+    ),
+    (
+        ("netflix",),
+        "Netflix",
+        "https://www.netflix.com/search?q={query}",
+    ),
+    (
+        ("hotstar", "disney hotstar", "disney+ hotstar", "disney plus hotstar"),
+        "Hotstar",
+        "https://www.hotstar.com/in/search?q={query}",
+    ),
+    (
+        ("sony liv", "sonyliv"),
+        "SonyLIV",
+        "https://www.sonyliv.com/search?q={query}",
+    ),
+)
 
-    Codex runs ephemeral/read-only and cannot open the user's browser, so media
-    play requests must be handled here. ``play``/``watch``/Hinglish play verbs
-    open a watch URL (known aliases or first search hit); ``search`` opens results.
+
+def _detect_ott(normalized: str) -> tuple[str, str, str] | None:
+    """Return (name, url_template, matched_alias) if an OTT service is named."""
+    for aliases, name, template in _OTT_PLATFORMS:
+        for alias in aliases:
+            if _contains_phrase(normalized, alias):
+                return name, template, alias
+    return None
+
+
+def _extract_play_query(normalized: str) -> tuple[str, str] | None:
+    """Return (action, query) for play/watch/search media commands."""
+    action = "play"
+    query = ""
+
+    match = re.search(
+        r"(?:(play|watch|search(?:\s+for)?))\s+(.+?)\s+on\s+(.+)$",
+        normalized,
+    )
+    if match is not None:
+        return match.group(1), match.group(2)
+
+    match = re.search(
+        r"(?:you\s*tube|youtube)\s+(?:(play|watch|search(?:\s+for)?))\s+(.+)$",
+        normalized,
+    )
+    if match is not None:
+        return match.group(1), match.group(2)
+
+    match = re.search(
+        r"(?:you\s*tube|youtube)\s+pe\s+(.+?)\s+"
+        r"(?:chalao|chala\s*do|play\s*karo|suno|search\s*karo|dhoondo|dhundo)\b",
+        normalized,
+    )
+    if match is not None:
+        query = match.group(1)
+        if re.search(r"\b(search|dhoondo|dhundo)\b", normalized):
+            action = "search"
+        return action, query
+
+    match = re.search(
+        r"(.+?)\s+(?:on\s+)?(?:you\s*tube|youtube)\s+pe\s+"
+        r"(?:chalao|chala\s*do|play\s*karo|suno|search\s*karo|dhoondo|dhundo)\b",
+        normalized,
+    )
+    if match is not None:
+        query = match.group(1)
+        query = re.sub(r"^(play|watch|chalao|suno)\s+", "", query).strip()
+        if re.search(r"\b(search|dhoondo|dhundo)\b", normalized):
+            action = "search"
+        return action, query
+
+    match = re.search(
+        r"(?:play|watch|chalao|suno)\s+(.+?)\s+(?:on\s+)?(?:you\s*tube|youtube)(?:\s+pe)?\b",
+        normalized,
+    )
+    if match is not None:
+        return "play", match.group(1)
+
+    # Bare play/watch/chalao — YouTube by default unless an OTT was named.
+    # Allow polite wrappers: "can you play…", "could you please play…".
+    match = re.search(
+        r"^(?:(?:please|can you|could you|would you|will you)(?:\s+please)?\s+)*"
+        r"(play|watch|chalao|suno)\s+(.+)$",
+        normalized,
+    )
+    if match is not None:
+        action, query = match.group(1), match.group(2)
+        query = query.rstrip(" .,!?\"'")
+        query = re.sub(r"\s+on\s+.+$", "", query).strip()
+        query = re.sub(
+            r"\s+(?:amazon\s+prime(?:\s+video)?|prime\s+video|primevideo|netflix|"
+            r"hotstar|disney(?:\+|\s+plus)?\s+hotstar|sony\s*liv)\s*$",
+            "",
+            query,
+        ).strip()
+        return action, query
+
+    return None
+
+
+def resolve_play_target(query: str, target: str = "youtube") -> SiteTarget | None:
+    """Build a media URL from an already-extracted query + platform target."""
+    from urllib.parse import quote_plus
+
+    cleaned = _youtube_query_clean(query)
+    if not cleaned or cleaned in {"it", "this", "that", "yeh", "woh"}:
+        return None
+    if _looks_like_rickroll(cleaned):
+        return SiteTarget("Rickroll on YouTube", RICKROLL_URL, None)
+
+    platform = (target or "youtube").casefold().strip()
+    ott_key = {
+        "prime": "Prime Video",
+        "primevideo": "Prime Video",
+        "amazon prime": "Prime Video",
+        "netflix": "Netflix",
+        "hotstar": "Hotstar",
+        "sonyliv": "SonyLIV",
+        "sony liv": "SonyLIV",
+    }.get(platform)
+    if ott_key:
+        ott = next(row for row in _OTT_PLATFORMS if row[1] == ott_key)
+        return SiteTarget(
+            f"{ott[1]}: {cleaned}", ott[2].format(query=quote_plus(cleaned)), None
+        )
+
+    watch = _first_youtube_watch_url(cleaned)
+    if watch:
+        return SiteTarget(f"YouTube: {cleaned}", watch, None)
+    url = f"https://www.youtube.com/results?search_query={quote_plus(cleaned)}"
+    return SiteTarget(f"YouTube: {cleaned}", url, None)
+
+
+def resolve_youtube(command: str) -> SiteTarget | None:
+    """Map play/watch media voice commands to a browser URL (skip Codex).
+
+    - Named OTT (Prime / Netflix / Hotstar / SonyLIV) → that service's search.
+    - Explicit YouTube, or bare ``play <title>`` / Hinglish play verbs → YouTube.
     """
     from urllib.parse import quote_plus
 
@@ -142,61 +278,22 @@ def resolve_youtube(command: str) -> SiteTarget | None:
     if _looks_like_rickroll(normalized):
         return SiteTarget("Rickroll on YouTube", RICKROLL_URL, None)
 
-    if not re.search(r"\byou\s*tube\b|\byoutube\b", normalized):
+    extracted = _extract_play_query(normalized)
+    if extracted is None:
         return None
 
-    action = "play"
-    query = ""
-
-    match = re.search(
-        r"(?:(play|watch|search(?:\s+for)?))\s+(.+?)\s+on\s+(?:you\s*tube|youtube)\b",
-        normalized,
-    )
-    if match is None:
-        match = re.search(
-            r"(?:you\s*tube|youtube)\s+(?:(play|watch|search(?:\s+for)?))\s+(.+)$",
-            normalized,
-        )
-    if match is not None:
-        action, query = match.group(1), match.group(2)
-    else:
-        # Hinglish: "youtube pe kesariya chalao", "kesariya youtube pe play karo"
-        match = re.search(
-            r"(?:you\s*tube|youtube)\s+pe\s+(.+?)\s+"
-            r"(?:chalao|chala\s*do|play\s*karo|suno|search\s*karo|dhoondo|dhundo)\b",
-            normalized,
-        )
-        if match is not None:
-            query = match.group(1)
-            if re.search(r"\b(search|dhoondo|dhundo)\b", normalized):
-                action = "search"
-        else:
-            match = re.search(
-                r"(.+?)\s+(?:on\s+)?(?:you\s*tube|youtube)\s+pe\s+"
-                r"(?:chalao|chala\s*do|play\s*karo|suno|search\s*karo|dhoondo|dhundo)\b",
-                normalized,
-            )
-            if match is not None:
-                query = match.group(1)
-                query = re.sub(r"^(play|watch|chalao|suno)\s+", "", query).strip()
-                if re.search(r"\b(search|dhoondo|dhundo)\b", normalized):
-                    action = "search"
-            else:
-                match = re.search(
-                    r"(?:play|watch|chalao|suno)\s+(.+?)\s+(?:on\s+)?(?:you\s*tube|youtube)(?:\s+pe)?\b",
-                    normalized,
-                )
-                if match is not None:
-                    query = match.group(1)
-
-    if not query:
-        return None
-
+    action, query = extracted
     query = _youtube_query_clean(query)
-    if not query:
+    if not query or query in {"it", "this", "that", "yeh", "woh"}:
         return None
     if _looks_like_rickroll(query):
         return SiteTarget("Rickroll on YouTube", RICKROLL_URL, None)
+
+    ott = _detect_ott(normalized)
+    if ott is not None:
+        name, template, _alias = ott
+        url = template.format(query=quote_plus(query))
+        return SiteTarget(f"{name}: {query}", url, None)
 
     search_only = str(action).startswith("search")
     if not search_only:
