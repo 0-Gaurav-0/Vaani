@@ -258,3 +258,133 @@ def test_amplitude_written_during_recording(tmp_path):
     assert 0.0 < level <= 1.0
     c.cancel()
     c.shutdown()
+
+
+def _wire_plan_executor(controller: Controller) -> list[tuple[str, frozenset[str]]]:
+    """Attach PlanExecutor with a fake dispatch that records verb + modifiers."""
+    from vaani.intent.plan_exec import PlanExecutor
+    from vaani.intent.schema import Result, Status
+
+    calls: list[tuple[str, frozenset[str]]] = []
+
+    def fake_dispatch(verb, intent, context):
+        calls.append((intent.verb, frozenset(intent.modifiers)))
+        return Result(
+            status=Status.OK,
+            summary=f"ran {intent.verb}",
+            detail=f"ran {intent.verb}",
+            rung=verb.rung,
+        )
+
+    controller.plan_executor = PlanExecutor(
+        registry=controller.registry,
+        dispatch=fake_dispatch,
+    )
+    return calls
+
+
+def test_plan_two_r0_steps_run_both(monkeypatch):
+    """R0+R0 IntentPlan dispatches both steps without confirm."""
+    from vaani.intent.schema import IntentPlan, PlanStep
+
+    c, h = make()
+    calls = _wire_plan_executor(c)
+    plan = IntentPlan(
+        steps=(
+            PlanStep(verb="app.open", slots={"name": "Terminal"}),
+            PlanStep(verb="site.search", slots={"query": "Zepter"}),
+        ),
+        utterance="open Terminal and search Zepter",
+        raw_utterance="open Terminal and search Zepter",
+        source="llm",
+        confidence=0.9,
+    )
+    monkeypatch.setattr(c.router, "route", lambda text, platform=None: plan)
+
+    audio = SimpleNamespace(duration_seconds=1, path="/tmp/a.wav")
+    c._token = 1
+    c.state = AppState.PROCESSING
+    c._dispatch(plan.raw_utterance, audio, 1)
+
+    assert [name for name, _ in calls] == ["app.open", "site.search"]
+    assert c.confirm.peek() is None
+    assert not c._plan_awaiting_confirm
+    assert h.rows
+    assert h.rows[0]["mode"] == "assistant"
+    assert c.state is AppState.IDLE
+
+
+def test_plan_r0_then_r2_stages_confirm_and_approve_continues(monkeypatch):
+    """R0+R2 pauses on R2; approve runs confirmed step then remaining."""
+    from vaani.intent.schema import IntentPlan, PlanStep
+
+    c, h = make()
+    calls = _wire_plan_executor(c)
+    plan = IntentPlan(
+        steps=(
+            PlanStep(verb="app.open", slots={"name": "Terminal"}),
+            PlanStep(verb="app.quit", slots={"name": "Slack"}),
+            PlanStep(verb="site.search", slots={"query": "docs"}),
+        ),
+        utterance="open Terminal, quit Slack, search docs",
+        raw_utterance="open Terminal, quit Slack, search docs",
+        source="llm",
+        confidence=0.9,
+    )
+    monkeypatch.setattr(c.router, "route", lambda text, platform=None: plan)
+
+    audio = SimpleNamespace(duration_seconds=1, path="/tmp/a.wav")
+    c._token = 1
+    c.state = AppState.PROCESSING
+    c._dispatch(plan.raw_utterance, audio, 1)
+
+    assert [name for name, _ in calls] == ["app.open"]
+    pending = c.confirm.peek()
+    assert pending is not None
+    assert pending.verb == "app.quit"
+    assert c._plan_awaiting_confirm
+    assert c.plan_executor is not None
+    assert len(c.plan_executor.state.remaining) == 1
+    assert not h.rows  # paused before history finish
+
+    assert c.approve_pending(via="pill")
+    assert [name for name, _ in calls] == ["app.open", "app.quit", "site.search"]
+    assert calls[1][1] == frozenset({"confirmed"})
+    assert c.confirm.peek() is None
+    assert not c._plan_awaiting_confirm
+    assert h.rows
+    assert c.state is AppState.IDLE
+
+
+def test_plan_reject_clears_remaining(monkeypatch):
+    from vaani.intent.schema import IntentPlan, PlanStep
+
+    c, h = make()
+    calls = _wire_plan_executor(c)
+    plan = IntentPlan(
+        steps=(
+            PlanStep(verb="app.open", slots={"name": "Terminal"}),
+            PlanStep(verb="app.quit", slots={"name": "Slack"}),
+            PlanStep(verb="site.search", slots={"query": "docs"}),
+        ),
+        utterance="open then quit",
+        raw_utterance="open then quit",
+        source="llm",
+        confidence=0.9,
+    )
+    monkeypatch.setattr(c.router, "route", lambda text, platform=None: plan)
+
+    audio = SimpleNamespace(duration_seconds=1, path="/tmp/a.wav")
+    c._token = 1
+    c.state = AppState.PROCESSING
+    c._dispatch(plan.raw_utterance, audio, 1)
+
+    assert c.confirm.peek() is not None
+    assert c._plan_awaiting_confirm
+    assert c.reject_pending(via="hotkey")
+    assert c.confirm.peek() is None
+    assert not c._plan_awaiting_confirm
+    assert c.plan_executor is not None
+    assert c.plan_executor.state.remaining == ()
+    assert [name for name, _ in calls] == ["app.open"]
+    assert not h.rows

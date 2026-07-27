@@ -39,6 +39,7 @@ from .context import build_context
 from .exec.runner import run as exec_run
 from .exec.supervisor import Supervisor
 from .intent.interrogative import refuse_interrogative, should_refuse_interrogative
+from .intent.plan_exec import PlanExecutor
 from .intent.router import Router, prefer_verifiable_format
 from .intent.schema import Context, Intent, IntentPlan, Result, Status
 from .platform import detect_os
@@ -195,6 +196,9 @@ class Controller:
             resolve_site=lambda text: resolve_site(text),
             vocab_path=Path(vocab_path) if vocab_path is not None else None,
         )
+        # Wired by assemble (PlanExecutor + llm_parse); None until then.
+        self.plan_executor: PlanExecutor | None = None
+        self._plan_awaiting_confirm = False
 
     @property
     def codex(self) -> Any:
@@ -375,6 +379,7 @@ class Controller:
             return False
         self.logger.info("event=confirm_rejected id=%s via=%s", rejected.id, via)
         self._emit("confirm_rejected")
+        self._clear_plan_confirm_state()
         self._clear_confirm_ui()
         self._feedback("busy")
         return True
@@ -538,24 +543,38 @@ class Controller:
         platform = detect_os()
         routed = self.router.route(raw, platform=platform)
         if isinstance(routed, IntentPlan):
-            # Multi-step: stash for plan executor (Task 7/8). Single-step plans
-            # already return Intent from the router.
-            plan_executor = getattr(self, "plan_executor", None)
-            if plan_executor is not None:
-                plan_executor.execute(routed, raw=raw, audio=audio, token=token)
+            # Multi-step IntentPlan (single-step plans already return Intent).
+            plan_executor = self.plan_executor
+            if plan_executor is None:
+                result = Result(
+                    status=Status.FAILED,
+                    summary="multi-step plan unsupported",
+                    detail="plan execution not wired",
+                )
+                self._surface_result(result)
+                with self._lock:
+                    if self._cancel.is_set() or token != self._token:
+                        return
+                    self.state = AppState.IDLE
+                    self._emit("assistant_complete")
+                self._sync_policy_hotkeys()
                 return
-            result = Result(
-                status=Status.FAILED,
-                summary="multi-step plan unsupported",
-                detail="plan execution not wired",
+            context = build_context(platform, runner=exec_run)
+            self._plan_awaiting_confirm = False
+            self.logger.info(
+                "event=plan_exec action=start steps=%s source=%s",
+                len(routed.steps),
+                routed.source,
             )
-            self._surface_result(result)
-            with self._lock:
-                if self._cancel.is_set() or token != self._token:
-                    return
-                self.state = AppState.IDLE
-                self._emit("assistant_complete")
-            self._sync_policy_hotkeys()
+            result = plan_executor.start(routed, context)
+            self._finish_plan_result(
+                result,
+                plan=routed,
+                context=context,
+                raw=raw,
+                audio=audio,
+                token=token,
+            )
             return
         intent = routed
         if intent is None:
@@ -756,6 +775,57 @@ class Controller:
             token = self._token
         self._sync_policy_hotkeys()
         try:
+            if self._plan_awaiting_confirm and self.plan_executor is not None:
+                self._plan_awaiting_confirm = False
+                result = self.plan_executor.continue_after_confirm(intent, context)
+                self.logger.info(
+                    "event=plan_exec action=continue status=%s remaining=%s",
+                    result.status.value,
+                    len(self.plan_executor.state.remaining),
+                )
+                if result.status is Status.NEEDS_CONFIRM and result.pending is not None:
+                    step_intent, step_verb = self._intent_for_pending(
+                        result.pending,
+                        utterance=intent.utterance,
+                        raw_utterance=intent.raw_utterance,
+                        confidence=intent.confidence,
+                        source=intent.source,
+                    )
+                    if step_verb is None:
+                        self._clear_plan_confirm_state()
+                        raise RuntimeError(
+                            result.detail or result.summary or "unknown plan verb"
+                        )
+                    self._plan_awaiting_confirm = True
+                    if self._absorb_policy_gate(
+                        result,
+                        intent=step_intent,
+                        verb=step_verb,
+                        context=context,
+                        token=token,
+                    ):
+                        return True
+                if result.status is Status.FAILED:
+                    self._clear_plan_confirm_state()
+                    raise RuntimeError(
+                        result.detail or result.summary or "assistant failed"
+                    )
+                if result.status is Status.OK:
+                    self.undo.record_success(verb, intent, result)
+                self._surface_result(result)
+                self.plan_executor.clear()
+                self._finish_assistant_result(
+                    result,
+                    raw=intent.raw_utterance,
+                    verb_name=verb.name,
+                    duration_ms=0,
+                    token=token,
+                    intent=intent,
+                    risk=verb.risk,
+                    confirmed_by=via,
+                )
+                return True
+
             result = dispatch(verb, intent, context)
             # Diff-before-apply / second-stage confirms (e.g. agent.task patch).
             if result.status in {
@@ -874,6 +944,137 @@ class Controller:
         except Exception as exc:
             self._fail(exc, getattr(exc, "category", None))
         return True
+
+    def _clear_plan_confirm_state(self) -> None:
+        """Drop plan rest + confirm flag (reject / expire / invalidate / complete)."""
+        self._plan_awaiting_confirm = False
+        if self.plan_executor is not None:
+            self.plan_executor.clear()
+
+    def _intent_for_pending(
+        self,
+        pending: Any,
+        *,
+        utterance: str,
+        raw_utterance: str,
+        confidence: float,
+        source: str,
+    ) -> tuple[Intent, Any]:
+        """Build Intent + Verb for a PendingAction staged by PlanExecutor."""
+        verb = self.registry.get(pending.verb)
+        intent = Intent(
+            verb=pending.verb,
+            slots=dict(pending.slots),
+            rung=verb.rung if verb is not None else 0,
+            confidence=confidence,
+            source=source,
+            mode="act",
+            utterance=utterance,
+            raw_utterance=raw_utterance,
+            modifiers=frozenset(),
+            brain=None,
+        )
+        return intent, verb
+
+    def _finish_plan_result(
+        self,
+        result: Result,
+        *,
+        plan: IntentPlan,
+        context: Context,
+        raw: str,
+        audio: Any,
+        token: int,
+    ) -> None:
+        """Handle PlanExecutor.start/continue outcomes (confirm staging or finish)."""
+        if result.status is Status.NEEDS_CONFIRM and result.pending is not None:
+            step_intent, step_verb = self._intent_for_pending(
+                result.pending,
+                utterance=plan.utterance,
+                raw_utterance=plan.raw_utterance or raw,
+                confidence=plan.confidence,
+                source=plan.source,
+            )
+            if step_verb is None:
+                self._clear_plan_confirm_state()
+                failed = Result(
+                    status=Status.FAILED,
+                    summary=f"Unknown verb: {result.pending.verb}",
+                    detail=result.pending.verb,
+                )
+                self._surface_result(failed)
+                self._finish_assistant_result(
+                    failed,
+                    raw=plan.raw_utterance or raw,
+                    audio=audio,
+                    verb_name=result.pending.verb,
+                    token=token,
+                    intent=step_intent,
+                )
+                return
+            self._plan_awaiting_confirm = True
+            self.logger.info(
+                "event=plan_exec action=pause verb=%s remaining=%s",
+                step_verb.name,
+                len(self.plan_executor.state.remaining)
+                if self.plan_executor is not None
+                else 0,
+            )
+            if self._absorb_policy_gate(
+                result,
+                intent=step_intent,
+                verb=step_verb,
+                context=context,
+                token=token,
+            ):
+                return
+            # absorb should always handle NEEDS_CONFIRM; fall through defensively.
+
+        remaining = (
+            len(self.plan_executor.state.remaining)
+            if self.plan_executor is not None
+            else 0
+        )
+        self.logger.info(
+            "event=plan_exec status=%s remaining=%s",
+            result.status.value,
+            remaining,
+        )
+        self._plan_awaiting_confirm = False
+        if self.plan_executor is not None:
+            self.plan_executor.clear()
+
+        verb_name = plan.steps[-1].verb if plan.steps else ""
+        history_intent = Intent(
+            verb=verb_name,
+            slots=dict(plan.steps[-1].slots) if plan.steps else {},
+            rung=result.rung,
+            confidence=plan.confidence,
+            source=plan.source,
+            mode="act",
+            utterance=plan.utterance,
+            raw_utterance=plan.raw_utterance or raw,
+            modifiers=frozenset(),
+            brain=None,
+        )
+        risk = None
+        last_verb = self.registry.get(verb_name) if verb_name else None
+        if last_verb is not None:
+            risk = last_verb.risk
+            if result.status is Status.OK:
+                self.undo.record_success(last_verb, history_intent, result)
+
+        if result.status is not Status.FAILED:
+            self._surface_result(result)
+        self._finish_assistant_result(
+            result,
+            raw=plan.raw_utterance or raw,
+            audio=audio,
+            verb_name=verb_name,
+            token=token,
+            intent=history_intent,
+            risk=risk,
+        )
 
     def _absorb_policy_gate(
         self,
@@ -1173,6 +1374,7 @@ class Controller:
             "event=confirm_invalidated id=%s reason=%s", rejected.id, reason
         )
         self._emit("confirm_invalidated")
+        self._clear_plan_confirm_state()
         self._clear_confirm_ui()
 
     def _invalidate_disambiguation(self, *, reason: str) -> None:
@@ -1191,6 +1393,7 @@ class Controller:
             return
         self.logger.info("event=confirm_expired id=%s", expired.id)
         self._emit("confirm_expired")
+        self._clear_plan_confirm_state()
         self._clear_confirm_ui()
         self._feedback("busy")
 

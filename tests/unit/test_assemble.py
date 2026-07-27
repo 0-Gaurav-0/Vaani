@@ -123,6 +123,9 @@ def test_assemble_wires_controller_from_fake_bundle(tmp_path):
     assert isinstance(controller.result_window, ResultWindow)
     assert controller.codex.registry is controller.registry
     assert controller.codex.confirm is controller.confirm
+    assert controller.router.llm_parse is not None
+    assert controller.plan_executor is not None
+    assert controller.plan_executor.registry is controller.registry
 
     controller.result_window.sink("hello from assistant")
     assert feedback.notifications == [("paste", "hello from assistant")]
