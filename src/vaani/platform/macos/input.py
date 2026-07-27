@@ -197,3 +197,30 @@ class MacInputSynth:
             evidence=("hotkey", *keys),
             rung=7,
         )
+
+    def click(self, x: float, y: float) -> Result:
+        """Click at global display coordinates (AppKit point space)."""
+        try:
+            if self._controller is not None and hasattr(self._controller, "click"):
+                self._controller.click(x, y)
+            else:
+                from pynput.mouse import Button, Controller
+
+                mouse = Controller()
+                mouse.position = (int(round(x)), int(round(y)))
+                mouse.click(Button.left, 1)
+            return Result(
+                status=Status.OK,
+                summary="Clicked",
+                detail="",
+                evidence=("click", f"{x},{y}"),
+                rung=7,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return Result(
+                status=Status.FAILED,
+                summary="Could not click",
+                detail=str(exc),
+                evidence=("click", f"{x},{y}"),
+                rung=7,
+            )

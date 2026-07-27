@@ -127,6 +127,9 @@ def test_offer_for_port_question_returns_sayable_hint() -> None:
 
 
 def test_last_result_without_prior_overlay_is_soft_failure() -> None:
+    from vaani.verbs.packs import guide as guide_pack
+
+    guide_pack._LAST_OVERLAY_OPS.clear()
     result = _verbs(get_overlay=lambda: FakeOverlay())["guide.last_result"].handler(
         _intent("guide.last_result"), _context()
     )

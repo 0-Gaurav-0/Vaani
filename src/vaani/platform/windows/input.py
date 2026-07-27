@@ -107,3 +107,26 @@ class WindowsInputSynth:
         finally:
             for mod in reversed(modifiers):
                 controller.release(mod)
+
+    def click(self, x: float, y: float) -> Result:
+        try:
+            from pynput.mouse import Button, Controller
+
+            mouse = Controller()
+            mouse.position = (int(round(x)), int(round(y)))
+            mouse.click(Button.left, 1)
+            return Result(
+                status=Status.OK,
+                summary="Clicked",
+                detail="",
+                evidence=("click", f"{x},{y}"),
+                rung=7,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return Result(
+                status=Status.FAILED,
+                summary="Could not click",
+                detail=str(exc),
+                evidence=("click", f"{x},{y}"),
+                rung=7,
+            )
