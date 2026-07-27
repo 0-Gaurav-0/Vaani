@@ -116,6 +116,7 @@ BUILTIN_PACKS: dict[str, PackDescriptor] = {
         "Guide / point-on-screen mode",
         binaries=(),
         permissions=frozenset({"screen"}),
+        default_enabled=False,
     ),
     "computer-use": _descriptor(
         "computer-use",
@@ -316,8 +317,11 @@ def register_stub_packs(
     run_fn: RunFn | None = None,
     get_platform: PlatformGetter | None = None,
     get_input: Callable[[], Any | None] | None = None,
+    get_screen: Callable[[], Any | None] | None = None,
+    get_overlay: Callable[[], Any | None] | None = None,
+    guide_brain: Callable[..., Any] | None = None,
 ) -> tuple[Pattern, ...]:
-    """Register installable pack verbs (git/forge/pkg/docker/computer-use).
+    """Register installable pack verbs (git/forge/pkg/docker/guide/computer-use).
 
     Returns grammar patterns for packs that provide them. Descriptors alone
     still drive ``vaani caps`` pack rows for packs without verbs yet.
@@ -327,6 +331,7 @@ def register_stub_packs(
     from vaani.verbs.packs.docker import register_docker_pack
     from vaani.verbs.packs.forge import register_forge_pack
     from vaani.verbs.packs.git import register_git_pack
+    from vaani.verbs.packs.guide import register_guide_pack
     from vaani.verbs.packs.pkg import register_pkg_pack
 
     patterns: list[Pattern] = []
@@ -340,6 +345,14 @@ def register_stub_packs(
         )
     )
     patterns.extend(register_forge_pack(registry, run_fn=run_fn))
+    patterns.extend(
+        register_guide_pack(
+            registry,
+            get_screen=get_screen,
+            get_overlay=get_overlay,
+            guide_brain=guide_brain,
+        )
+    )
     patterns.extend(
         register_computer_use_pack(
             registry,

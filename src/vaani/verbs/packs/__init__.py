@@ -3,6 +3,7 @@
 from vaani.verbs.packs.computer_use import COMPUTER_USE_VERB_NAMES
 from vaani.verbs.packs.docker import DOCKER_VERB_NAMES
 from vaani.verbs.packs.forge import FORGE_VERB_NAMES
+from vaani.verbs.packs.guide import GUIDE_VERB_NAMES
 from vaani.verbs.packs.pkg import PKG_VERB_NAMES
 from vaani.verbs.packs.procs import PROCS_VERB_NAMES
 from vaani.verbs.packs.project import PROJECT_VERB_NAMES
@@ -25,6 +26,7 @@ __all__ = [
     "COMPUTER_USE_VERB_NAMES",
     "DOCKER_VERB_NAMES",
     "FORGE_VERB_NAMES",
+    "GUIDE_VERB_NAMES",
     "INSTALLABLE_PACKS",
     "PKG_VERB_NAMES",
     "PROCS_VERB_NAMES",

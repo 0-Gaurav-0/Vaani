@@ -69,8 +69,10 @@ def _router(*, llm_parse=None) -> Router:
     )
     patterns = patterns + register_undo(registry, UndoStack())
     # Installable packs — leave enabled (no PackRegistry.apply) so corpus
-    # rows for those packs can resolve in unit tests.
+    # rows for those packs can resolve in unit tests. Guide remains off by
+    # default until its pack is explicitly enabled.
     patterns = patterns + register_stub_packs(registry)
+    registry.set_pack_state({"guide"})
     return Router(
         registry,
         patterns,
