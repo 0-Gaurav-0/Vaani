@@ -29,6 +29,8 @@ _FILLER_PHRASES: tuple[str, ...] = (
     "could you",
     "would you",
     "please",
+    "for me",
+    "for us",
     "umm",
     "uhh",
     "ahh",
@@ -129,6 +131,8 @@ def normalize(text: str, *, lexicon: Lexicon | None = None) -> str:
 
     lex = lexicon if lexicon is not None else LexiconCls.builtin()
     result = " ".join(text.casefold().strip().split())
+    # Drop trailing sentence punctuation from ASR ("Open Chrome for me.").
+    result = result.strip(".,!?…")
     result = _strip_dry_run_phrases(result)
     result = _strip_fillers(result)
     result = _replace_separators(result)

@@ -26,6 +26,11 @@ _NORMALIZE_CASES: list[tuple[str, str]] = [
     ("please set volume to 30", "set volume to 30"),
     ("hmm open brave", "open brave"),
     ("ah open the browser", "open the browser"),
+    ("Open Chrome for me.", "open chrome"),
+    ("Open Brave for me", "open brave"),
+    ("killport 3000", "kill port 3000"),
+    ("Killport 3000", "kill port 3000"),
+    ("freeport 8080", "free port 8080"),
     # number words → digits
     ("three", "3"),
     ("twelve", "12"),

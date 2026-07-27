@@ -42,6 +42,14 @@ APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
         AppTarget("Safari", ("Safari",), native_name="Safari"),
     ),
     (
+        ("chrome", "google chrome"),
+        AppTarget("Google Chrome", ("Google Chrome",), native_name="Google Chrome"),
+    ),
+    (
+        ("brave", "brave browser"),
+        AppTarget("Brave Browser", ("Brave Browser",), native_name="Brave Browser"),
+    ),
+    (
         ("notes",),
         AppTarget("Notes", ("Notes",), native_name="Notes"),
     ),
@@ -70,6 +78,21 @@ APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
 
 def _contains_phrase(text: str, phrase: str) -> bool:
     return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
+
+
+def lookup_app(name: str) -> AppTarget | None:
+    """Resolve a bare app name/alias (no open/launch verb required)."""
+    needle = " ".join(name.casefold().strip().split())
+    if not needle:
+        return None
+    for aliases, target in APPS:
+        if target.name.casefold() == needle:
+            return target
+        if target.native_name and target.native_name.casefold() == needle:
+            return target
+        if any(alias.casefold() == needle for alias in aliases):
+            return target
+    return None
 
 
 def resolve_app(command: str) -> AppTarget | None:
