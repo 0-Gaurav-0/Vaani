@@ -311,6 +311,7 @@ def build_registry(
         get_input=lambda: input_synth,
         get_screen=lambda: screen,
         get_overlay=lambda: overlay,
+        get_guide_brain=lambda: None,
     )
     pack_reg = packs if packs is not None else _packs_for_settings(settings)
     pack_reg.apply(registry)

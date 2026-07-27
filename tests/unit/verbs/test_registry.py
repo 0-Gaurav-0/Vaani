@@ -60,10 +60,15 @@ def test_core_pack_registers_t13_verbs() -> None:
         open_browser_fn=lambda **_k: "Opened",
     )
     names = set(registry.matrix())
+    from vaani.verbs.packs.browser_results import BROWSER_RESULT_VERB_NAMES
     from vaani.verbs.packs.window import WINDOW_VERB_NAMES
 
     assert names == (
-        CORE_VERB_NAMES | PROCS_VERB_NAMES | PROJECT_VERB_NAMES | WINDOW_VERB_NAMES
+        CORE_VERB_NAMES
+        | PROCS_VERB_NAMES
+        | PROJECT_VERB_NAMES
+        | WINDOW_VERB_NAMES
+        | BROWSER_RESULT_VERB_NAMES
     )
     # DEGRADED cells stay enabled; only UNSUPPORTED is filtered out.
     enabled = {verb.name for verb in registry.enabled(PlatformId.LINUX)}
