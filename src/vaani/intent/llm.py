@@ -1,12 +1,31 @@
-"""LLM plan parse helpers — payload validation first (no network)."""
+"""LLM plan parse helpers — validate payloads and wire Groq-backed llm_parse."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+import json
+import logging
+import re
+from collections.abc import Callable, Mapping
+from typing import Any
 
+from vaani.intent.catalog_card import build_catalog_card
 from vaani.intent.schema import IntentPlan, PlanStep, SlotSpec, Verb
+from vaani.platform.protocol import PlatformId
+from vaani.verbs.registry import Registry
 
 _MAX_STEPS = 6
 _REFUSE_REASON_MAX = 200
+_logger = logging.getLogger(__name__)
+
+PARSE_SYSTEM_PROMPT = """\
+You are Vaani's intent compiler, not a chat assistant.
+Emit JSON only with keys: action (plan|delegate|refuse), confidence, steps, \
+delegate_prompt, refuse_reason.
+Honor platform and platform_notes from the catalog. Use only verbs listed there.
+Prefer the smallest plan that fulfills the utterance. Compounds → ordered steps.
+Refuse polite chit-chat / thanks (noop) — never delegate those.
+Delegate only when the catalog cannot express the ask (coding / multi-file / unclear).
+Never invent shell commands or verbs not in the catalog.
+"""
 
 
 def validate_plan_payload(
@@ -70,6 +89,87 @@ def validate_plan_payload(
         confidence=confidence,
         refuse_reason=reason,
     )
+
+
+def make_llm_parse(
+    groq: Any,
+    key_provider: Callable[[], str | None],
+    registry: Registry,
+    platform_fn: Callable[[], PlatformId],
+    *,
+    get_context_blurb: Callable[[], str | None] | None = None,
+) -> Callable[[str], IntentPlan | None]:
+    """Build a Groq-backed ``llm_parse(utterance) -> IntentPlan | None`` callable."""
+
+    def llm_parse(utterance: str) -> IntentPlan | None:
+        try:
+            key = key_provider()
+            if not key:
+                return None
+            platform = platform_fn()
+            catalog = build_catalog_card(registry, platform)
+            user_payload: dict[str, Any] = {
+                "utterance": utterance,
+                "catalog": catalog,
+            }
+            if get_context_blurb is not None:
+                blurb = get_context_blurb()
+                if blurb:
+                    user_payload["context"] = blurb
+            raw_text = groq.parse_intent(
+                PARSE_SYSTEM_PROMPT,
+                json.dumps(user_payload, ensure_ascii=False),
+                key,
+            )
+            if not raw_text:
+                return None
+            payload = _loads_json(raw_text)
+            if payload is None:
+                _logger.debug("event=llm_parse status=bad_json")
+                return None
+            enabled = {verb.name: verb for verb in registry.enabled(platform)}
+            plan = validate_plan_payload(
+                payload,
+                enabled,
+                utterance=utterance,
+                raw_utterance=utterance,
+            )
+            if plan is None:
+                _logger.debug("event=llm_parse status=invalid_plan")
+                return None
+            action = (
+                "refuse"
+                if plan.refuse_reason
+                else "delegate"
+                if plan.delegate_prompt
+                else "plan"
+            )
+            _logger.info(
+                "event=llm_parse action=%s steps=%s",
+                action,
+                len(plan.steps),
+            )
+            return plan
+        except Exception:
+            _logger.debug("event=llm_parse status=error", exc_info=True)
+            return None
+
+    return llm_parse
+
+
+def _loads_json(text: str) -> object | None:
+    cleaned = text.strip()
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        if "\n" not in cleaned:
+            cleaned = cleaned[3:-3].strip()
+        else:
+            first, _, rest = cleaned.partition("\n")
+            if first == "```" or re.fullmatch(r"```[\w-]+", first):
+                cleaned = rest[:-3].strip()
+    try:
+        return json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
 
 
 def _nonempty_steps(raw: object) -> bool:
