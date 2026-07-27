@@ -13,9 +13,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-macos = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
-windows = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
+macos = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput", "pillow"]
+windows = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput", "pillow"]
 linux = ["python-xlib"]
+vision = ["pillow"]
 
 [project.scripts]
 vaani = "vaani.cli:main"
