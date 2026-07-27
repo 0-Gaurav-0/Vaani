@@ -1,6 +1,4 @@
 #!/bin/sh
-# Optional toggle via SIGUSR1 (start if idle, stop if recording).
-# Do NOT bind this to Ctrl+Space in GNOME — that steals the chord from
-# Vaani's hold-to-talk X11 grab, so release never stops recording.
-# Prefer native hold-to-talk: Hold Ctrl+Space, release to stop.
+# Stop-only via SIGUSR1 (never starts recording — avoids ghost starts from the pill).
+# Prefer native hold-to-talk: Hold ThinkPad middle button, release to stop.
 pkill -USR1 -f '^\.venv/bin/python -m vaani$' 2>/dev/null || true

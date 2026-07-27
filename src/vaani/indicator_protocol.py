@@ -11,10 +11,12 @@ import time
 from pathlib import Path
 from typing import Literal
 
-Command = Literal["stop", "cancel"]
-Phase = Literal["recording", "processing"]
-ALLOWED: frozenset[str] = frozenset({"stop", "cancel"})
-ALLOWED_PHASES: frozenset[str] = frozenset({"recording", "processing"})
+Command = Literal["stop", "cancel", "option_0", "option_1", "option_2", "option_3", "option_4"]
+Phase = Literal["recording", "processing", "answer"]
+ALLOWED: frozenset[str] = frozenset(
+    {"stop", "cancel", "option_0", "option_1", "option_2", "option_3", "option_4"}
+)
+ALLOWED_PHASES: frozenset[str] = frozenset({"recording", "processing", "answer"})
 
 
 def control_path(cache_dir: Path | str) -> Path:
@@ -23,6 +25,10 @@ def control_path(cache_dir: Path | str) -> Path:
 
 def phase_path(cache_dir: Path | str) -> Path:
     return Path(cache_dir) / "indicator_phase"
+
+
+def answer_path(cache_dir: Path | str) -> Path:
+    return Path(cache_dir) / "indicator_answer.json"
 
 
 def resolve_control_path(
@@ -137,3 +143,70 @@ def clear_phase(path: Path | str) -> None:
         return
     except OSError:
         pass
+
+
+def resolve_answer_path(
+    *,
+    explicit: str | os.PathLike[str] | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    env = os.environ.get("VAANI_INDICATOR_ANSWER")
+    if env:
+        return Path(env)
+    control = resolve_control_path(cache_dir=cache_dir)
+    return control.parent / "indicator_answer.json"
+
+
+def write_answer(
+    path: Path | str,
+    question: str,
+    answer: str,
+    *,
+    options: list[str] | tuple[str, ...] | None = None,
+) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"question": str(question), "answer": str(answer)}
+    if options:
+        payload["options"] = [str(item) for item in list(options)[:5]]
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, target)
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+
+
+def read_answer(path: Path | str) -> dict:
+    target = Path(path)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return {"question": "", "answer": "", "options": []}
+    if not isinstance(data, dict):
+        return {"question": "", "answer": "", "options": []}
+    raw_opts = data.get("options")
+    options: list[str] = []
+    if isinstance(raw_opts, list):
+        options = [str(item) for item in raw_opts[:5] if str(item).strip()]
+    return {
+        "question": str(data.get("question") or ""),
+        "answer": str(data.get("answer") or ""),
+        "options": options,
+    }
+
+
+def clear_answer(path: Path | str) -> None:
+    target = Path(path)
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        try:
+            target.write_text("{}", encoding="utf-8")
+        except OSError:
+            pass

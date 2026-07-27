@@ -69,7 +69,7 @@ def run_wayland(settings: Settings) -> int:
     assistant = CodexRunner()
 
     def show_assistant_result(text: str) -> None:
-        feedback.notify("paste", (text or "")[:160])
+        logger.info("event=assistant_result_ui skipped=notify chars=%s", len(text or ""))
 
     controller.codex = assistant
     controller.result_window = ResultWindow(show_assistant_result)
@@ -92,14 +92,16 @@ def run_wayland(settings: Settings) -> int:
         controller.stop()
 
     def on_signal_toggle(_signum=None, _frame=None):
+        # SIGUSR1 is stop-only so late pill Stop never ghost-starts when idle.
         from ....types import AppState
 
         if controller.state is AppState.RECORDING:
             controller.stop()
-        elif controller.state is AppState.IDLE:
-            controller.trigger("smart")
         else:
-            logger.info("event=input_blocked reason=processing source=signal")
+            logger.info(
+                "event=signal_usr1_ignored state=%s reason=stop_only",
+                getattr(controller.state, "name", controller.state),
+            )
 
     def assistant_trigger(_signum=None, _frame=None):
         on_hotkey_press("assistant")

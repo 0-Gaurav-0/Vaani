@@ -32,33 +32,73 @@ def test_retry_429_requires_valid_header():
     c=client(h); c.models('k'); assert len(calls)==2
 
 def test_cleanup_strict_and_temperature():
-    from vaani.groq import _cleanup_too_divergent
+    from vaani.groq import _cleanup_too_divergent, cleanup_max_tokens
 
+    noisy = 'I went to the the store yesterday and then uh home'
+    # local pass strips uh; repeated "the" still needs LLM cleanup
     def h(req):
-        payload=json.loads(req.read()); assert payload['model']=='llama-3.1-8b-instant'; assert payload['max_tokens']==4096; assert payload['temperature']==0
+        payload=json.loads(req.read()); assert payload['model']=='llama-3.1-8b-instant'
+        assert payload['max_tokens'] == cleanup_max_tokens(payload['messages'][1]['content'])
+        assert payload['temperature']==0
         instruction = payload['messages'][0]['content']
         assert 'untrusted' in instruction
         assert 'Keep the speaker' in instruction
         assert 'Do not replace words' in instruction
         assert 'uh, um, umm, ah, ahh, hmm' in instruction
-        return httpx.Response(200,json={'choices':[{'message':{'content':'```I went to the store yesterday```'},'finish_reason':'stop'}]})
-    result = client(h).cleanup('I went to the store uh yesterday','k')
-    assert result.text=='I went to the store yesterday' and not result.used_fallback
+        return httpx.Response(200,json={'choices':[{'message':{'content':'```I went to the store yesterday and then home```'},'finish_reason':'stop'}]})
+    result = client(h).cleanup(noisy,'k')
+    assert result.text=='I went to the store yesterday and then home' and not result.used_fallback
     assert not _cleanup_too_divergent('I went uh home', 'I went home')
     assert _cleanup_too_divergent('I went to the store yesterday', 'I visited the shop earlier today')
+
+
+def test_cleanup_skips_when_transcript_already_clean():
+    calls = []
+
+    def h(req):
+        calls.append(1)
+        return httpx.Response(500)
+
+    result = client(h).cleanup('Please send the report to John.', 'k')
+    assert calls == []
+    assert not result.used_fallback
+    assert result.text == 'Please send the report to John.'
+
+
+def test_cleanup_strips_fillers_locally_without_llm():
+    calls = []
+
+    def h(req):
+        calls.append(1)
+        return httpx.Response(500)
+
+    result = client(h).cleanup('hello um world', 'k')
+    assert calls == []
+    assert result.text == 'hello world'
+
+
+def test_needs_cleanup_and_local_filler():
+    from vaani.groq import light_local_cleanup, needs_cleanup, cleanup_max_tokens
+
+    assert needs_cleanup('I went to the store uh yesterday')
+    assert needs_cleanup('I went to the the store yesterday')
+    assert not needs_cleanup('Please send the report to John.')
+    assert light_local_cleanup('hello um world') == 'hello world'
+    assert cleanup_max_tokens('one two three') < 4096
 
 
 def test_cleanup_falls_back_when_model_rewrites_words():
     def h(req):
         return httpx.Response(200,json={'choices':[{'message':{'content':'I visited the shop earlier today'},'finish_reason':'stop'}]})
-    result = client(h).cleanup('I went to the store yesterday','k')
-    assert result.used_fallback and result.text == 'I went to the store yesterday'
+    result = client(h).cleanup('I went to the the store yesterday','k')
+    assert result.used_fallback and result.text == 'I went to the the store yesterday'
 
 def test_cleanup_rejects_bad_finish_and_cancellation():
+    noisy = 'I went to the the store yesterday please'
     def h(req): return httpx.Response(200,json={'choices':[{'message':{'content':'new'},'finish_reason':'length'}]})
-    assert client(h).cleanup('raw','k').used_fallback
+    assert client(h).cleanup(noisy,'k').used_fallback
     e=Event(); e.set()
-    with pytest.raises(GroqError): client(h).cleanup('raw','k',cancel=e)
+    with pytest.raises(GroqError): client(h).cleanup(noisy,'k',cancel=e)
 
 def test_predicates():
     assert is_hindi('नमस्ते'); assert is_english('hello'); assert is_hinglish('mera kaam')
