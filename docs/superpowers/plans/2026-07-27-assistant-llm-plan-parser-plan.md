@@ -53,19 +53,22 @@ git commit -m "feat(intent): add IntentPlan contracts for LLM parse"
 
 ---
 
-### Task 2: Catalog card
+### Task 2: Catalog card (OS-filtered + platform notes)
 
 **Files:**
 - Create: `src/vaani/intent/catalog_card.py`
 - Test: `tests/unit/intent/test_catalog_card.py`
 
-- [ ] **Step 1: Failing test** — given a tiny fake registry, card lists `site.search` with slots/risk/rung and **omits** `agent.task`.
+- [ ] **Step 1: Failing test** — given a tiny fake registry:
+  - card lists `site.search` with slots/risk/rung/support and **omits** `agent.task`
+  - verb marked `UNSUPPORTED` on Windows is absent from a Windows card but present on macOS
+  - payload includes `platform` + non-empty `platform_notes` for that OS
 
-- [ ] **Step 2: Implement** `build_catalog_card(registry, platform) -> list[dict]` (name, title, slots type map, risk, rung).
+- [ ] **Step 2: Implement** `build_catalog_card(registry, platform) -> dict` with keys `platform`, `platform_notes`, `verbs[]` (name, title, slots type map, risk, rung, support). Notes are a short static string per `PlatformId` (app naming hints); verbs come only from `registry.enabled(platform)`.
 
 - [ ] **Step 3: pytest** green.
 
-- [ ] **Step 4: Commit** — `feat(intent): build compact catalog card for parse LLM`
+- [ ] **Step 4: Commit** — `feat(intent): build OS-filtered catalog card for parse LLM`
 
 ---
 
@@ -117,7 +120,7 @@ git commit -m "feat(intent): add IntentPlan contracts for LLM parse"
   Or return `IntentPlan` only; router/controller adapts.
   Preferred: **`Callable[[str], IntentPlan | None]`** so router can convert single-step to Intent and multi/delegate separately.
 
-- [ ] **Step 2: System prompt** constant in `llm.py` (design §4.6); user message = utterance + catalog JSON + short context.
+- [ ] **Step 2: System prompt** constant in `llm.py` (design §4.6) including “honor `platform` / `platform_notes`; only use listed verbs”; user message = utterance + **runtime** catalog JSON (OS-filtered) + short context.
 
 - [ ] **Step 3: Unit test** with groq stub (no network).
 
