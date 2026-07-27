@@ -127,10 +127,11 @@ class WindowControl(Protocol):
 
 @runtime_checkable
 class InputSynth(Protocol):
-    """Rung-7 keystroke injection into the focused surface (T5.2)."""
+    """Rung-7 keystroke / pointer injection into the focused surface (T5.2 / V3)."""
 
     def type_text(self, text: str) -> Result: ...
     def hotkey(self, *keys: str) -> Result: ...
+    def click(self, x: float, y: float) -> Result: ...
 
 
 @runtime_checkable

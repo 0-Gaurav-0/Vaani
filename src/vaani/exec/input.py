@@ -52,6 +52,16 @@ class FakeInputSynth:
             rung=7,
         )
 
+    def click(self, x: float, y: float) -> Result:
+        self.calls.append(("click", (x, y)))
+        return Result(
+            status=Status.OK,
+            summary="Clicked",
+            detail="",
+            evidence=("click", f"{x},{y}"),
+            rung=7,
+        )
+
 
 @dataclass(frozen=True)
 class UnsupportedInputSynth:
@@ -76,5 +86,15 @@ class UnsupportedInputSynth:
             summary="Keystrokes unsupported",
             detail=self.reason,
             evidence=("input.hotkey",),
+            rung=7,
+        )
+
+    def click(self, x: float, y: float) -> Result:
+        _ = (x, y)
+        return Result(
+            status=Status.UNSUPPORTED,
+            summary="Click unsupported",
+            detail=self.reason,
+            evidence=("input.click",),
             rung=7,
         )

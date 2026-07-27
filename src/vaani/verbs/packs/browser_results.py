@@ -11,6 +11,7 @@ from vaani.intent.grammar import Pattern, SlotRule
 from vaani.intent.schema import (
     Context,
     Intent,
+    OverlayOp,
     Result,
     RiskClass,
     SlotSpec,
@@ -20,6 +21,7 @@ from vaani.intent.schema import (
 )
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
+from vaani.vision.coords import DisplayGeom, screenshot_to_global
 
 PACK_NAME = "core"
 BROWSER_RESULT_VERB_NAMES: frozenset[str] = frozenset({"browser.result.open"})
@@ -34,6 +36,10 @@ _LOG = logging.getLogger("vaani.browser_results")
 
 ResolveResultUrl = Callable[[int], str | None]
 OpenUrl = Callable[[str, Intent], str]
+InputGetter = Callable[[], Any | None]
+ScreenGetter = Callable[[], Any | None]
+GuideBrain = Callable[[str, Any], tuple[str, tuple[OverlayOp, ...]]]
+VisionClickFn = Callable[[int, Intent, Context], Result | None]
 
 
 def browser_result_patterns() -> tuple[Pattern, ...]:
@@ -84,7 +90,6 @@ def _macos_resolve_result_url(index: int) -> str | None:
 
     Fragile Google SERP heuristic — prefer injectable resolvers in tests / CDP later.
     """
-    # Prefer organic anchors; skip google internal links.
     js = f"""
     (function() {{
       var n = {int(index)};
@@ -146,33 +151,117 @@ def _default_open_url(url: str, _intent: Intent) -> str:
     return f"Opened {url}"
 
 
+def _geom_from_frame(frame: Any) -> DisplayGeom:
+    return DisplayGeom(
+        shot_w=int(frame.width),
+        shot_h=int(frame.height),
+        display_w=int(frame.display_width or frame.width),
+        display_h=int(frame.display_height or frame.height),
+        origin_x=float(getattr(frame, "origin_x", 0.0) or 0.0),
+        origin_y=float(getattr(frame, "origin_y", 0.0) or 0.0),
+        flip_y=bool(getattr(frame, "flip_y", False)),
+    )
+
+
+def _vision_click_fallback(
+    index: int,
+    intent: Intent,
+    _context: Context,
+    *,
+    get_screen: ScreenGetter | None,
+    get_input: InputGetter | None,
+    guide_brain: GuideBrain | None,
+) -> Result | None:
+    """When structured URL resolve misses, POINT the Nth result and click.
+
+    Caller must already have passed ConfirmEngine (R2) — never auto-click unapproved.
+    """
+    _ = intent
+    if get_screen is None or get_input is None or guide_brain is None:
+        return None
+    screen = get_screen()
+    synth = get_input()
+    if screen is None or synth is None or not hasattr(synth, "click"):
+        return None
+    try:
+        from vaani.vision.capture import capture_frames
+
+        frames = capture_frames(screen)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.info("event=browser_result_vision_capture_fail err=%s", exc)
+        return None
+    if not frames:
+        return None
+    question = f"point at search result number {index} organic link"
+    try:
+        _speech, ops = guide_brain(question, frames)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.info("event=browser_result_vision_brain_fail err=%s", exc)
+        return None
+    point_ops = [op for op in ops if op.kind == "point"]
+    if not point_ops:
+        return None
+    op = point_ops[0]
+    frame = frames[0]
+    global_pt = screenshot_to_global(op.x, op.y, _geom_from_frame(frame))
+    if global_pt is None:
+        return None
+    gx, gy = global_pt
+    clicked = synth.click(gx, gy)
+    if clicked.status is not Status.OK:
+        return clicked
+    return Result(
+        status=Status.OK,
+        summary=f"Clicked result {index}",
+        detail=f"vision click at ({gx:.0f},{gy:.0f})",
+        evidence=("vision_click", f"index={index}", f"{gx},{gy}", op.label),
+        rung=2,
+        overlay=(op,),
+    )
+
+
 def build_browser_result_verbs(
     *,
     resolve_result_url: ResolveResultUrl | None = None,
     open_url: OpenUrl | None = None,
+    get_screen: ScreenGetter | None = None,
+    get_input: InputGetter | None = None,
+    guide_brain: GuideBrain | None = None,
+    vision_click: VisionClickFn | None = None,
 ) -> tuple[Verb, ...]:
     resolver = resolve_result_url or _macos_resolve_result_url
     opener = open_url or _default_open_url
 
-    def handle_open(intent: Intent, _context: Context) -> Result:
+    def handle_open(intent: Intent, context: Context) -> Result:
         index = _ordinal_index(intent.slots.get("index", 1))
         url = resolver(index)
-        if not url:
+        if url:
+            answer = opener(url, intent)
             return Result(
-                status=Status.PARTIAL,
-                summary="Couldn't read results",
-                detail=(
-                    "couldn't read results; try guide or enable vision click"
-                ),
-                evidence=("browser.result.open", f"index={index}", "miss"),
+                status=Status.OK,
+                summary=answer if isinstance(answer, str) else f"Opened {url}",
+                detail=str(answer),
+                evidence=(url,),
                 rung=2,
             )
-        answer = opener(url, intent)
+        if vision_click is not None:
+            result = vision_click(index, intent, context)
+        else:
+            result = _vision_click_fallback(
+                index,
+                intent,
+                context,
+                get_screen=get_screen,
+                get_input=get_input,
+                guide_brain=guide_brain,
+            )
+        if result is not None:
+            return result
         return Result(
-            status=Status.OK,
-            summary=answer if isinstance(answer, str) else f"Opened {url}",
-            detail=str(answer),
-            evidence=(url,),
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail=("couldn't read results; try guide or enable vision click"),
+            evidence=("browser.result.open", f"index={index}", "miss"),
             rung=2,
         )
 
@@ -199,10 +288,16 @@ def register_browser_results_pack(
     *,
     resolve_result_url: ResolveResultUrl | None = None,
     open_url: OpenUrl | None = None,
+    get_screen: ScreenGetter | None = None,
+    get_input: InputGetter | None = None,
+    guide_brain: GuideBrain | None = None,
 ) -> tuple[Pattern, ...]:
     for verb in build_browser_result_verbs(
         resolve_result_url=resolve_result_url,
         open_url=open_url,
+        get_screen=get_screen,
+        get_input=get_input,
+        guide_brain=guide_brain,
     ):
         registry.register(verb)
     return browser_result_patterns()

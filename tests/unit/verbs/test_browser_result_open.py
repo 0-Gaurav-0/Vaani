@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from vaani.intent.grammar import match
-from vaani.intent.schema import Context, Intent, RiskClass, Status
+from vaani.intent.schema import Context, Intent, RiskClass, Result, Status
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.packs.browser_results import (
     BROWSER_RESULT_VERB_NAMES,
@@ -102,3 +102,35 @@ def test_open_first_result_grammar_includes_asr_side_variant() -> None:
         {"index": 1},
         60,
     )
+
+
+def test_vision_click_fallback_when_resolver_misses() -> None:
+    from vaani.exec.input import FakeInputSynth
+    from vaani.intent.schema import OverlayOp
+
+    clicks: list[tuple[float, float]] = []
+    synth = FakeInputSynth()
+
+    def vision_click(index: int, _intent: Intent, _context: Context) -> Result:
+        assert index == 1
+        synth.click(100.0, 200.0)
+        clicks.append((100.0, 200.0))
+        return Result(
+            status=Status.OK,
+            summary="Clicked result 1",
+            detail="vision click",
+            evidence=("vision_click", "index=1", "100.0,200.0", "result"),
+            rung=2,
+            overlay=(OverlayOp(kind="point", x=50, y=60, label="result"),),
+        )
+
+    verb = build_browser_result_verbs(
+        resolve_result_url=lambda _index: None,
+        open_url=lambda url, _intent: f"Opened {url}",
+        vision_click=vision_click,
+    )[0]
+
+    result = verb.handler(_intent(), _context())
+    assert result.status is Status.OK
+    assert clicks == [(100.0, 200.0)]
+    assert "vision_click" in result.evidence

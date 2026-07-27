@@ -195,3 +195,45 @@ class LinuxInputSynth:
         finally:
             for mod in reversed(modifiers):
                 controller.release(mod)
+
+    def click(self, x: float, y: float) -> Result:
+        blocked = self._wayland_block()
+        if blocked is not None:
+            return Result(
+                status=Status.UNSUPPORTED,
+                summary="Click unsupported",
+                detail=blocked.detail,
+                evidence=("click", f"{x},{y}"),
+                rung=7,
+            )
+        try:
+            if shutil.which("xdotool"):
+                completed = self._runner(
+                    ["xdotool", "mousemove", "--", str(int(round(x))), str(int(round(y))), "click", "1"],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if getattr(completed, "returncode", 1) != 0:
+                    raise RuntimeError("xdotool click failed")
+            else:
+                from pynput.mouse import Button, Controller
+
+                mouse = Controller()
+                mouse.position = (int(round(x)), int(round(y)))
+                mouse.click(Button.left, 1)
+            return Result(
+                status=Status.OK,
+                summary="Clicked",
+                detail="",
+                evidence=("click", f"{x},{y}"),
+                rung=7,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return Result(
+                status=Status.FAILED,
+                summary="Could not click",
+                detail=str(exc),
+                evidence=("click", f"{x},{y}"),
+                rung=7,
+            )
