@@ -192,16 +192,16 @@ git commit -m "feat(intent): add IntentPlan contracts for LLM parse"
 ### Task 9: Corpus + live gate
 
 **Files:**
-- Create or extend: `tests/data/parse_utterances.yaml` + loader test
+- Create or extend: `tests/data/parse_utterances.json` + loader test
 - Manual: restart daemon on `feat/assistant-use-cases`
 
-- [ ] **Step 1: Fixture rows** from design §6 (Search Zapto, Brave+Zepter, Thank you, fix failing test).
+- [x] **Step 1: Fixture rows** from design §6 (Search Zapto, Brave+Zepter, Thank you, fix failing test).
 
-- [ ] **Step 2: Offline tests** use recorded LLM payloads (not live Groq in CI).
+- [x] **Step 2: Offline tests** use recorded LLM payloads (not live Groq in CI).
 
-- [ ] **Step 3: Run full unit suite** — `pytest tests/unit -q`
+- [x] **Step 3: Run full unit suite** — `pytest tests/unit -q`
 
-- [ ] **Step 4: Manual checklist**
+- [ ] **Step 4: Manual checklist** (user live verify after restart)
   - Grammar: `open Terminal` still instant, no parse log
   - `Search Zapto.com for me` → browser search, no agent confirm
   - `open Brave and search Zepter` → both steps
@@ -209,7 +209,7 @@ git commit -m "feat(intent): add IntentPlan contracts for LLM parse"
   - `Vaani, agent: …` still confirms agent
   - Esc/Enter still pass through when idle (prior fix)
 
-- [ ] **Step 5: Commit** — `test(intent): add LLM plan utterance fixtures`
+- [x] **Step 5: Commit** — `test(intent): add LLM plan utterance fixtures`
 
 ---
 
