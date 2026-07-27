@@ -23,10 +23,13 @@ Keys: action (plan|delegate|refuse), confidence (0-1), steps (array), \
 delegate_prompt (string|null), refuse_reason (string|null).
 Each step: {"verb":"<catalog name>","slots":{...}}.
 Honor platform and platform_notes. Use only verbs listed in the catalog.
-Prefer the smallest plan. Compounds → ordered steps (e.g. app.open then site.search).
+Prefer the smallest plan. For "open Chrome/Brave and search X", prefer ONE \
+site.search step with slots.query and slots.browser (chrome|brave) — do not \
+emit a separate app.open before search.
+Other compounds → ordered steps.
 Refuse polite chit-chat / thanks. Delegate only when no catalog verb fits.
 Never invent shell commands or verbs.
-Example: {"action":"plan","confidence":0.9,"steps":[{"verb":"app.open","slots":{"name":"Google Chrome"}},{"verb":"site.search","slots":{"query":"Zapto"}}],"delegate_prompt":null,"refuse_reason":null}
+Example: {"action":"plan","confidence":0.9,"steps":[{"verb":"site.search","slots":{"query":"Zapto","browser":"chrome"}}],"delegate_prompt":null,"refuse_reason":null}
 """
 
 

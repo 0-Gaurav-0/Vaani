@@ -82,9 +82,10 @@ def test_browser_prefers_brave_then_chrome_then_default():
         return SimpleNamespace(returncode=0)
 
     launcher = MacBrowserLauncher(runner=runner)
-    assert launcher.open("https://example.com", prefer="brave") == "Opened browser."
+    assert launcher.open("https://example.com", prefer="brave") == "Opened Google Chrome."
     assert attempts[0] == ["open", "-a", "Brave Browser", "https://example.com"]
     assert attempts[1] == ["open", "-a", "Google Chrome", "https://example.com"]
+    assert any(a[:1] == ["osascript"] for a in attempts)
 
 
 def test_browser_prefer_chrome_first():
@@ -97,7 +98,7 @@ def test_browser_prefer_chrome_first():
         return SimpleNamespace(returncode=0)
 
     launcher = MacBrowserLauncher(runner=runner)
-    assert launcher.open("https://example.com", prefer="chrome") == "Opened browser."
+    assert launcher.open("https://example.com", prefer="chrome") == "Opened Google Chrome."
     assert attempts[0][2] == "Google Chrome"
 
 

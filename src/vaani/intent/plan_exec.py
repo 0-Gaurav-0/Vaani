@@ -35,6 +35,48 @@ MaterializeFn = Callable[[PlanStep, Verb, Context], tuple[str, ...]]
 
 _logger = logging.getLogger(__name__)
 
+_BROWSER_APP_KEYS: dict[str, str] = {
+    "google chrome": "chrome",
+    "chrome": "chrome",
+    "brave browser": "brave",
+    "brave": "brave",
+}
+
+
+def coalesce_browser_open_search(
+    steps: Sequence[PlanStep],
+) -> tuple[PlanStep, ...]:
+    """Fold ``app.open`` Chrome/Brave + ``site.search`` into one search in that browser.
+
+    Opening the app then immediately opening a URL races Chrome's launch and
+    often leaves the user staring at an empty window while the search tab is
+    easy to miss.
+    """
+    if len(steps) < 2:
+        return tuple(steps)
+    out: list[PlanStep] = []
+    index = 0
+    while index < len(steps):
+        current = steps[index]
+        nxt = steps[index + 1] if index + 1 < len(steps) else None
+        browser = _browser_key_from_app_open(current)
+        if browser and nxt is not None and nxt.verb == "site.search":
+            slots = dict(nxt.slots)
+            slots.setdefault("browser", browser)
+            out.append(PlanStep(verb="site.search", slots=slots, note=nxt.note))
+            index += 2
+            continue
+        out.append(current)
+        index += 1
+    return tuple(out)
+
+
+def _browser_key_from_app_open(step: PlanStep) -> str | None:
+    if step.verb != "app.open":
+        return None
+    name = str(step.slots.get("name") or "").strip().casefold()
+    return _BROWSER_APP_KEYS.get(name)
+
 
 @dataclass
 class PlanExecState:
@@ -137,17 +179,25 @@ class PlanExecutor:
                 summary="Empty plan",
                 detail=plan.refuse_reason or plan.delegate_prompt or "",
             )
+        steps = coalesce_browser_open_search(plan.steps)
+        if steps != plan.steps:
+            _logger.info(
+                "event=llm_parse_stage stage=execute status=coalesce "
+                "from=%s to=%s",
+                len(plan.steps),
+                len(steps),
+            )
         step_summary = " -> ".join(
             f"{s.verb}({','.join(f'{k}={v!r}' for k, v in s.slots.items())})"
-            for s in plan.steps
+            for s in steps
         )
         _logger.info(
             "event=llm_parse_stage stage=execute status=start steps=%s plan=%s utterance=%r",
-            len(plan.steps),
+            len(steps),
             step_summary,
             (plan.raw_utterance or plan.utterance)[:120],
         )
-        return self._run_steps(plan.steps, context, ok_count=0, summaries=[])
+        return self._run_steps(steps, context, ok_count=0, summaries=[])
 
     def continue_after_confirm(self, intent: Intent, context: Context) -> Result:
         """Dispatch an already-confirmed R2+ intent, then continue remaining steps."""

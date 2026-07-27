@@ -23,7 +23,8 @@ class MacBrowserLauncher:
         for key in order:
             for app_name in _BROWSER_APPS[key]:
                 if self._try_open_app(app_name, url):
-                    return "Opened browser."
+                    self._activate(app_name)
+                    return f"Opened {app_name}."
         if self._try_open_default(url):
             return "Opened browser."
         return "Unable to open browser."
@@ -39,6 +40,22 @@ class MacBrowserLauncher:
         except OSError:
             return False
         return getattr(result, "returncode", 1) == 0
+
+    def _activate(self, app_name: str) -> None:
+        """Bring the browser forward after open (avoids empty window races)."""
+        try:
+            self._runner(
+                [
+                    "osascript",
+                    "-e",
+                    f'tell application "{app_name}" to activate',
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
 
     def _try_open_default(self, url: str) -> bool:
         try:

@@ -1,7 +1,12 @@
 """Unit tests for PlanExecutor confirm policy B."""
 from __future__ import annotations
 
-from vaani.intent.plan_exec import PlanExecutor, format_confirm_detail, pending_from_step
+from vaani.intent.plan_exec import (
+    PlanExecutor,
+    coalesce_browser_open_search,
+    format_confirm_detail,
+    pending_from_step,
+)
 from vaani.intent.schema import (
     Context,
     Intent,
@@ -91,10 +96,11 @@ def test_two_r0_steps_both_dispatched_ok() -> None:
     calls: list[tuple[str, frozenset[str]]] = []
     executor = _executor(registry, calls=calls)
 
+    # Non-browser app.open is not coalesced with search.
     result = executor.start(
         _plan(
-            PlanStep(verb="app.open", slots={"name": "Brave"}),
-            PlanStep(verb="site.search", slots={"name": "Zepter"}),
+            PlanStep(verb="app.open", slots={"name": "Terminal"}),
+            PlanStep(verb="site.search", slots={"query": "Zepter"}),
         ),
         _context(),
     )
@@ -103,6 +109,44 @@ def test_two_r0_steps_both_dispatched_ok() -> None:
     assert [c[0] for c in calls] == ["app.open", "site.search"]
     assert executor.state.remaining == ()
     assert result.pending is None
+
+
+def test_coalesce_chrome_open_then_search() -> None:
+    steps = coalesce_browser_open_search(
+        (
+            PlanStep(verb="app.open", slots={"name": "Google Chrome"}),
+            PlanStep(verb="site.search", slots={"query": "ramayana"}),
+        )
+    )
+    assert len(steps) == 1
+    assert steps[0].verb == "site.search"
+    assert steps[0].slots == {"query": "ramayana", "browser": "chrome"}
+
+    registry = Registry()
+    registry.register(_verb("app.open", risk=RiskClass.R0))
+    registry.register(_verb("site.search", risk=RiskClass.R0))
+    calls: list[tuple[str, dict]] = []
+
+    def dispatch(verb: Verb, intent: Intent, context: Context) -> Result:
+        calls.append((intent.verb, dict(intent.slots)))
+        return Result(status=Status.OK, summary=f"ran {intent.verb}", rung=1)
+
+    executor = PlanExecutor(
+        registry,
+        dispatch=dispatch,
+        risk_requires_confirm=requires_confirm,
+        clock=lambda: 1000.0,
+        id_factory=lambda: "pending-1",
+    )
+    result = executor.start(
+        _plan(
+            PlanStep(verb="app.open", slots={"name": "Google Chrome"}),
+            PlanStep(verb="site.search", slots={"query": "ramayana"}),
+        ),
+        _context(),
+    )
+    assert result.status is Status.OK
+    assert calls == [("site.search", {"query": "ramayana", "browser": "chrome"})]
 
 
 def test_r0_then_r2_pauses_with_remaining() -> None:
