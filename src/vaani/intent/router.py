@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,17 @@ from vaani.intent.schema import Context, Intent, IntentPlan
 from vaani.intent.wake import parse_agent_wake
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
+
+# Multi-action speech — skip single-hit app/site resolvers and ask the plan LLM.
+_COMPOUND_RE = re.compile(
+    r"\b(?:and|then|after that|plus)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_compound(text: str) -> bool:
+    """True when the utterance likely packs more than one action."""
+    return bool(_COMPOUND_RE.search(text or ""))
 
 
 def prefer_verifiable_format(
@@ -140,6 +152,16 @@ class Router:
                     modifiers=mods,
                 )
 
+        # Compounds like "open Chrome and search X" must not be stolen by
+        # resolve_app (single app.open). Prefer the plan LLM while available.
+        compound = looks_compound(utterance or raw)
+        if compound:
+            mapped = self._try_llm_parse(
+                utterance, enabled=enabled, raw=raw, mods=mods
+            )
+            if mapped is not None:
+                return mapped
+
         # Rung 1 — today's resolver order (app before site) preserves §4.2.
         if "app.open" in enabled and self.resolve_app is not None:
             app = self.resolve_app(utterance or raw)
@@ -201,21 +223,13 @@ class Router:
                 )
 
         # Grammar miss → LLM plan parser (before any agent fallback).
-        # refuse / mapped outcomes return immediately (refuse → None, no agent).
-        # parse failure (None / raise) may still hit optional env fallback below.
-        if self.llm_parse is not None:
-            try:
-                plan = self.llm_parse(utterance)
-            except Exception:
-                plan = None
-            if plan is not None:
-                return self._map_llm_plan(
-                    plan,
-                    enabled=enabled,
-                    utterance=utterance,
-                    raw=raw,
-                    mods=mods,
-                )
+        # Compounds already tried above; this covers paraphrase / ASR noise.
+        if not compound:
+            mapped = self._try_llm_parse(
+                utterance, enabled=enabled, raw=raw, mods=mods
+            )
+            if mapped is not None:
+                return mapped
 
         # Blind agent.task fallback only behind explicit opt-in.
         if os.environ.get("VAANI_AGENT_FALLBACK") == "1" and "agent.task" in enabled:
@@ -230,6 +244,30 @@ class Router:
                 modifiers=mods,
             )
         return None
+
+    def _try_llm_parse(
+        self,
+        utterance: str,
+        *,
+        enabled: set[str],
+        raw: str,
+        mods: frozenset[str],
+    ) -> Intent | IntentPlan | None:
+        if self.llm_parse is None:
+            return None
+        try:
+            plan = self.llm_parse(utterance)
+        except Exception:
+            return None
+        if plan is None:
+            return None
+        return self._map_llm_plan(
+            plan,
+            enabled=enabled,
+            utterance=utterance,
+            raw=raw,
+            mods=mods,
+        )
 
     def _map_llm_plan(
         self,

@@ -223,6 +223,75 @@ def test_miss_llm_multi_step_returns_plan() -> None:
     assert plan.source == "llm"
 
 
+def test_compound_beats_resolve_app_with_llm_plan() -> None:
+    """Live bug: 'Open Chrome and search X' was stolen by app.open before LLM."""
+    from types import SimpleNamespace
+
+    from vaani.intent.schema import IntentPlan, PlanStep
+
+    calls: list[str] = []
+
+    def parse(text: str) -> IntentPlan:
+        calls.append(text)
+        return IntentPlan(
+            steps=(
+                PlanStep(verb="app.open", slots={"name": "Google Chrome"}),
+                PlanStep(verb="site.search", slots={"query": "Zapto.com"}),
+            ),
+            utterance=text,
+            raw_utterance=text,
+            source="llm",
+            confidence=0.9,
+        )
+
+    chrome = SimpleNamespace(name="Google Chrome")
+    registry, patterns = build_core_registry(
+        resolve_app_fn=lambda _t: chrome,
+        launch_app_fn=lambda *_a, **_k: "ok",
+        resolve_site_fn=lambda _t: None,
+        open_browser_fn=lambda **_k: "ok",
+    )
+    router = Router(
+        registry,
+        patterns,
+        resolve_app=lambda _t: chrome,
+        resolve_site=lambda _t: None,
+        llm_parse=parse,
+    )
+    plan = router.route(
+        "Open Chrome and search Zapto.com", platform=PlatformId.LINUX
+    )
+    assert isinstance(plan, IntentPlan)
+    assert [s.verb for s in plan.steps] == ["app.open", "site.search"]
+    assert calls, "llm_parse must run for compound open+search"
+
+
+def test_simple_open_still_skips_llm() -> None:
+    from types import SimpleNamespace
+
+    def boom(_text: str):
+        raise AssertionError("llm_parse must not run for plain app.open")
+
+    chrome = SimpleNamespace(name="Google Chrome")
+    registry, patterns = build_core_registry(
+        resolve_app_fn=lambda _t: chrome,
+        launch_app_fn=lambda *_a, **_k: "ok",
+        resolve_site_fn=lambda _t: None,
+        open_browser_fn=lambda **_k: "ok",
+    )
+    router = Router(
+        registry,
+        patterns,
+        resolve_app=lambda _t: chrome,
+        resolve_site=lambda _t: None,
+        llm_parse=boom,
+    )
+    intent = router.route("Open Chrome", platform=PlatformId.LINUX)
+    assert intent is not None
+    assert intent.verb == "app.open"
+    assert intent.source == "grammar"
+
+
 @pytest.mark.parametrize("row", _load_utterances(
     Path(__file__).resolve().parents[2] / "data" / "utterances.yaml"
 ))
