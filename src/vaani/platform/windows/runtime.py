@@ -21,6 +21,7 @@ from .delivery import WindowsDelivery
 from .feedback import WindowsFeedback
 from .hotkeys import WindowsHotkeyService
 from .input import WindowsInputSynth
+from .screen import UnsupportedScreenCapture
 from .system import WindowsSystemControl
 from .target import WindowsTargetProbe
 from .window import WindowsWindowControl
@@ -53,6 +54,7 @@ def build_windows(settings: Settings | None = None) -> PlatformBundle:
         system=WindowsSystemControl(),
         window=WindowsWindowControl(),
         input=WindowsInputSynth(),
+        screen=UnsupportedScreenCapture(),
     )
 
 
@@ -132,6 +134,7 @@ def run_windows(settings: Settings) -> int:
         system=WindowsSystemControl(),
         window=WindowsWindowControl(),
         input=WindowsInputSynth(),
+        screen=UnsupportedScreenCapture(),
     )
     assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
     controller = assembly.controller

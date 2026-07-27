@@ -19,6 +19,7 @@ from .apps import LinuxAppLauncher
 from .browser import LinuxBrowserLauncher
 from .feedback import LinuxFeedback
 from .input import LinuxInputSynth
+from .screen import UnsupportedScreenCapture
 from .system import LinuxSystemControl
 from .window import LinuxWindowControl
 
@@ -67,6 +68,7 @@ def build_linux(settings: Settings | None = None) -> PlatformBundle:
         system=LinuxSystemControl(),
         window=LinuxWindowControl(),
         input=LinuxInputSynth(),
+        screen=UnsupportedScreenCapture(),
     )
 
 
@@ -135,6 +137,7 @@ def run_linux(settings: Settings) -> int:
         system=LinuxSystemControl(),
         window=LinuxWindowControl(),
         input=LinuxInputSynth(),
+        screen=UnsupportedScreenCapture(),
     )
     assembly = assemble(bundle, delivery=delivery, target=probe, logger=logger)
     controller = assembly.controller

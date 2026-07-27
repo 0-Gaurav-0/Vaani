@@ -19,6 +19,7 @@ from .delivery import MacClipboardDelivery
 from .feedback import MacFeedback
 from .hotkeys import HotkeyService
 from .input import MacInputSynth
+from .screen import MacScreenCapture
 from .system import MacSystemControl
 from .target import MacTargetProbe
 from .window import MacWindowControl
@@ -59,6 +60,7 @@ def build_macos(settings: Settings | None = None) -> PlatformBundle:
         system=system,
         window=window,
         input=MacInputSynth(),
+        screen=MacScreenCapture(),
     )
 
 
@@ -104,6 +106,7 @@ def run_macos(settings: Settings) -> int:
         system=system,
         window=window,
         input=MacInputSynth(),
+        screen=MacScreenCapture(),
     )
     assembly = assemble(bundle, delivery=delivery, target=target, logger=logger)
     controller = assembly.controller
