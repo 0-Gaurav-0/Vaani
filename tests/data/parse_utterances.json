@@ -1,0 +1,57 @@
+[
+  {
+    "id": "search-zapto",
+    "utterance": "Search Zapto.com for me.",
+    "payload": {
+      "action": "plan",
+      "confidence": 0.9,
+      "steps": [{"verb": "site.search", "slots": {"query": "Zapto.com"}}]
+    },
+    "expected": {"action": "plan", "verbs": ["site.search"]}
+  },
+  {
+    "id": "open-brave-search-zepter",
+    "utterance": "open Brave and search Zepter",
+    "payload": {
+      "action": "plan",
+      "confidence": 0.88,
+      "steps": [
+        {"verb": "app.open", "slots": {"name": "Brave Browser"}},
+        {"verb": "site.search", "slots": {"query": "Zepter"}}
+      ]
+    },
+    "expected": {"action": "plan", "verbs": ["app.open", "site.search"]}
+  },
+  {
+    "id": "thank-you-refuse",
+    "utterance": "Thank you.",
+    "payload": {
+      "action": "refuse",
+      "confidence": 0.95,
+      "refuse_reason": "polite acknowledgment",
+      "steps": []
+    },
+    "expected": {"action": "refuse"}
+  },
+  {
+    "id": "fix-failing-test-delegate",
+    "utterance": "fix the failing test",
+    "payload": {
+      "action": "delegate",
+      "confidence": 0.8,
+      "delegate_prompt": "fix the failing test",
+      "steps": []
+    },
+    "expected": {"action": "delegate"}
+  },
+  {
+    "id": "unknown-verb-rejected",
+    "utterance": "teleport to mars",
+    "payload": {
+      "action": "plan",
+      "confidence": 0.7,
+      "steps": [{"verb": "spaceship.teleport", "slots": {"dest": "mars"}}]
+    },
+    "expected": {"action": null}
+  }
+]
