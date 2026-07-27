@@ -89,7 +89,22 @@ def guide_patterns() -> tuple[Pattern, ...]:
         ),
         Pattern(
             verb="guide.offer",
-            any_of=(("how do i", "how can i", "how would i", "how should i"),),
+            any_of=(
+                (
+                    "how do i",
+                    "how can i",
+                    "how would i",
+                    "how should i",
+                    "how do you",
+                    "how can you",
+                    "how would you",
+                    "how should you",
+                    "how do we",
+                    "how can we",
+                    "how would we",
+                    "how should we",
+                ),
+            ),
             slots=(
                 SlotRule(
                     name="goal",

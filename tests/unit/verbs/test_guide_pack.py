@@ -133,6 +133,27 @@ def test_guide_patterns_cover_point_and_interrogative_offer() -> None:
     assert match("how do I free port 3000", patterns)[0] == "guide.offer"
 
 
+def test_enabled_guide_offer_matches_how_can_you_phrasing() -> None:
+    registry, patterns = build_core_registry(
+        resolve_app_fn=resolve_app,
+        launch_app_fn=launch_app,
+        resolve_site_fn=resolve_site,
+        open_browser_fn=lambda **_kwargs: "Opened browser.",
+    )
+    router = Router(
+        registry,
+        patterns + register_stub_packs(registry),
+        resolve_app=resolve_app,
+        resolve_site=resolve_site,
+    )
+
+    intent = router.route("how can you free port 3000", platform=PlatformId.LINUX)
+
+    assert intent is not None
+    assert intent.verb == "guide.offer"
+    assert intent.slots["goal"] == "free port 3000"
+
+
 def test_enabled_guide_offer_beats_interrogative_r2_port_action() -> None:
     registry, patterns = build_core_registry(
         resolve_app_fn=resolve_app,

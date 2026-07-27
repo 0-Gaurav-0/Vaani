@@ -187,7 +187,15 @@ def _valid_port(raw: str) -> int | None:
 def _strip_fillers(text: str) -> str:
     result = f" {text} "
     for phrase in _FILLER_PHRASES:
-        result = re.sub(rf"(?<!\w){re.escape(phrase)}(?!\w)", " ", result)
+        if phrase in ("can you", "would you"):
+            # Preserve "how can/would you …" for guide.offer grammar hits.
+            result = re.sub(
+                rf"(?<!how )(?<!\w){re.escape(phrase)}(?!\w)",
+                " ",
+                result,
+            )
+        else:
+            result = re.sub(rf"(?<!\w){re.escape(phrase)}(?!\w)", " ", result)
     return " ".join(result.split())
 
 
