@@ -584,21 +584,129 @@ def test_screen_frame_has_no_disk_write_helpers() -> None:
     assert writers == []
 
 
+def _is_bytesio_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "BytesIO":
+        return True
+    if isinstance(func, ast.Name) and func.id == "BytesIO":
+        return True
+    return False
+
+
+def _is_path_like_expr(node: ast.AST) -> bool:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return True
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in {"Path", "PurePath"}:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in {
+            "join",
+            "with_suffix",
+            "with_name",
+            "with_stem",
+            "resolve",
+        }:
+            return True
+    return False
+
+
+def _assignment_target_names(targets: list[ast.expr]) -> list[str]:
+    return [target.id for target in targets if isinstance(target, ast.Name)]
+
+
+def _names_from_assignments(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[set[str], set[str]]:
+    bytesio_names: set[str] = set()
+    path_names: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Assign):
+            continue
+        if _is_bytesio_call(node.value):
+            for name in _assignment_target_names(node.targets):
+                bytesio_names.add(name)
+        elif _is_path_like_expr(node.value):
+            for name in _assignment_target_names(node.targets):
+                path_names.add(name)
+    return bytesio_names, path_names
+
+
+def _save_writes_disk(
+    call: ast.Call,
+    *,
+    bytesio_names: set[str],
+    path_names: set[str],
+) -> bool:
+    if not call.args:
+        return True
+    first = call.args[0]
+    if _is_bytesio_call(first):
+        return False
+    if isinstance(first, ast.Name):
+        if first.id in bytesio_names:
+            return False
+        if first.id in path_names:
+            return True
+        return False
+    return _is_path_like_expr(first)
+
+
+def _persistence_call_writes_disk(
+    call: ast.Call,
+    *,
+    bytesio_names: set[str],
+    path_names: set[str],
+) -> bool:
+    assert isinstance(call.func, ast.Attribute)
+    method = call.func.attr
+    if method in {"write_bytes", "write_text"}:
+        return True
+    if method == "save":
+        return _save_writes_disk(call, bytesio_names=bytesio_names, path_names=path_names)
+    if method == "imwrite":
+        if not call.args:
+            return True
+        first = call.args[0]
+        if isinstance(first, ast.Name) and first.id in path_names:
+            return True
+        return _is_path_like_expr(first)
+    return False
+
+
+def _screen_frame_persistence_offenders(path: Path, tree: ast.AST) -> list[str]:
+    persist_names = {"write_bytes", "write_text", "save", "imwrite"}
+    rel = path.relative_to(SRC_ROOT.parent)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        bytesio_names, path_names = _names_from_assignments(node)
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Call) or not isinstance(child.func, ast.Attribute):
+                continue
+            if child.func.attr not in persist_names:
+                continue
+            if _persistence_call_writes_disk(
+                child, bytesio_names=bytesio_names, path_names=path_names
+            ):
+                offenders.append(f"{rel}:{child.lineno}:{child.func.attr}")
+    return offenders
+
+
 def test_no_screen_frame_persistence_calls_in_src() -> None:
     """Invariant 6a: modules that reference ScreenFrame must not persist frames."""
     offenders: list[str] = []
-    persist_names = {"write_bytes", "write_text", "save", "imwrite"}
     for path in VAANI_ROOT.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if "ScreenFrame" not in text:
             continue
         tree = ast.parse(text, filename=str(path))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if node.func.attr in persist_names:
-                    offenders.append(
-                        f"{path.relative_to(SRC_ROOT.parent)}:{node.lineno}:{node.func.attr}"
-                    )
+        offenders.extend(_screen_frame_persistence_offenders(path, tree))
     assert offenders == []
 
 

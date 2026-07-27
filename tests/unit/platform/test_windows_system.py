@@ -171,9 +171,11 @@ def test_build_windows_wires_system(tmp_path: Path, monkeypatch):
 
     assert isinstance(bundle.window, WindowsWindowControl)
     assert isinstance(bundle.input, WindowsInputSynth)
-    # Remaining optional surfaces stay absent until their tasks land.
+    # Terminal stays absent; screen is wired as an honest unsupported stub (T6).
     assert bundle.terminal is None
-    assert bundle.screen is None
+    from vaani.platform.windows.screen import UnsupportedScreenCapture
+
+    assert isinstance(bundle.screen, UnsupportedScreenCapture)
 
 
 def test_list_listeners_parses_powershell_rows():

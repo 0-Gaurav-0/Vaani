@@ -71,22 +71,24 @@ def test_build_linux_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
     from vaani.config import Settings
     from vaani.platform.linux.runtime import build_linux
+    from vaani.platform.linux.screen import UnsupportedScreenCapture
     from vaani.platform.linux.system import LinuxSystemControl
     from vaani.platform.linux.window import LinuxWindowControl
 
     bundle = build_linux(Settings.from_home(tmp_path, platform="linux"))
     assert bundle.id is PlatformId.LINUX
-    # T1.2/T5.1/T5.2: system + window + input wired; terminal/screen stay None.
+    # T1.2/T5.1/T5.2/T6: system + window + input + screen wired; terminal stays None.
     assert isinstance(bundle.system, LinuxSystemControl)
     assert isinstance(bundle.window, LinuxWindowControl)
     assert isinstance(bundle.input, LinuxInputSynth)
     assert bundle.terminal is None
-    assert bundle.screen is None
+    assert isinstance(bundle.screen, UnsupportedScreenCapture)
 
 
 def test_build_macos_optional_surfaces_default_none(tmp_path: Path, monkeypatch):
     from vaani.config import Settings
     from vaani.platform.macos.runtime import build_macos
+    from vaani.platform.macos.screen import MacScreenCapture
     from vaani.platform.macos.system import MacSystemControl
     from vaani.platform.macos.window import MacWindowControl
 
@@ -96,12 +98,12 @@ def test_build_macos_optional_surfaces_default_none(tmp_path: Path, monkeypatch)
     )
     bundle = build_macos(Settings.from_home(home=tmp_path))
     assert bundle.id is PlatformId.MACOS
-    # T1.2/T5.1/T5.2: system + window + input wired; terminal/screen absent.
+    # T1.2/T5.1/T5.2/T6: system + window + input + screen wired; terminal stays None.
     assert isinstance(bundle.system, MacSystemControl)
     assert isinstance(bundle.window, MacWindowControl)
     assert isinstance(bundle.input, MacInputSynth)
     assert bundle.terminal is None
-    assert bundle.screen is None
+    assert isinstance(bundle.screen, MacScreenCapture)
 
 
 def test_build_windows_optional_surfaces_default_none(tmp_path: Path, monkeypatch):
@@ -109,14 +111,15 @@ def test_build_windows_optional_surfaces_default_none(tmp_path: Path, monkeypatc
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     from vaani.config import Settings
     from vaani.platform.windows.runtime import build_windows
+    from vaani.platform.windows.screen import UnsupportedScreenCapture
     from vaani.platform.windows.system import WindowsSystemControl
     from vaani.platform.windows.window import WindowsWindowControl
 
     bundle = build_windows(Settings.from_home(tmp_path, platform="windows"))
     assert bundle.id is PlatformId.WINDOWS
-    # T1.2/T5.1/T5.2: system + window + input wired; terminal/screen absent.
+    # T1.2/T5.1/T5.2/T6: system + window + input + screen wired; terminal stays None.
     assert isinstance(bundle.system, WindowsSystemControl)
     assert isinstance(bundle.window, WindowsWindowControl)
     assert isinstance(bundle.input, WindowsInputSynth)
     assert bundle.terminal is None
-    assert bundle.screen is None
+    assert isinstance(bundle.screen, UnsupportedScreenCapture)
