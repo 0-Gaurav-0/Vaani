@@ -17,6 +17,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
+from vaani.intent.schema import OverlayOp
+
 Command = Literal["stop", "cancel"]
 Phase = Literal["recording", "processing", "confirming", "working"]
 ALLOWED: frozenset[str] = frozenset({"stop", "cancel"})
@@ -278,6 +280,110 @@ def read_options(path: Path | str) -> list[str]:
 def clear_options(path: Path | str) -> None:
     try:
         Path(path).unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+
+
+def overlay_path(cache_dir: Path | str) -> Path:
+    return Path(cache_dir) / "overlay_ops"
+
+
+def _overlay_op_to_dict(op: OverlayOp) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "kind": op.kind,
+        "x": op.x,
+        "y": op.y,
+        "label": op.label,
+        "text": op.text,
+    }
+    if op.steps:
+        payload["steps"] = [_overlay_op_to_dict(step) for step in op.steps]
+    return payload
+
+
+def _overlay_op_from_dict(data: object) -> OverlayOp | None:
+    if not isinstance(data, dict):
+        return None
+    kind = data.get("kind")
+    if not isinstance(kind, str) or not kind:
+        return None
+    x = data.get("x", 0.0)
+    y = data.get("y", 0.0)
+    label = data.get("label", "")
+    text = data.get("text", "")
+    raw_steps = data.get("steps", ())
+    steps: tuple[OverlayOp, ...] = ()
+    if isinstance(raw_steps, list):
+        parsed_steps: list[OverlayOp] = []
+        for item in raw_steps:
+            step = _overlay_op_from_dict(item)
+            if step is None:
+                return None
+            parsed_steps.append(step)
+        steps = tuple(parsed_steps)
+    try:
+        return OverlayOp(
+            kind=kind,
+            x=float(x),
+            y=float(y),
+            label=str(label),
+            text=str(text),
+            steps=steps,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def write_overlay(
+    path: Path | str,
+    ops: Sequence[OverlayOp],
+    *,
+    expires_at: float,
+) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "expires_at": float(expires_at),
+        "ops": [_overlay_op_to_dict(op) for op in ops],
+    }
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, target)
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+
+
+def read_overlay(path: Path | str) -> tuple[tuple[OverlayOp, ...], float] | None:
+    target = Path(path)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    expires_at = data.get("expires_at")
+    if not isinstance(expires_at, (int, float)):
+        return None
+    raw_ops = data.get("ops")
+    if not isinstance(raw_ops, list):
+        return None
+    parsed: list[OverlayOp] = []
+    for item in raw_ops:
+        op = _overlay_op_from_dict(item)
+        if op is None:
+            return None
+        parsed.append(op)
+    return tuple(parsed), float(expires_at)
+
+
+def clear_overlay(path: Path | str) -> None:
+    target = Path(path)
+    try:
+        target.unlink()
     except FileNotFoundError:
         return
     except OSError:
