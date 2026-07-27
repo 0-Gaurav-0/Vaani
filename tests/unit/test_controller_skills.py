@@ -240,3 +240,84 @@ def test_ai_route_play_when_fast_path_misses(monkeypatch):
     c._worker.join(1)
     assert browser.urls == ["https://www.youtube.com/watch?v=abcdefghijk"]
     assert h.rows[0]["cleanup_status"] == "browser_action"
+
+
+def test_ai_route_open_site_and_app(monkeypatch):
+    from vaani.assistant_route import RouteDecision
+    from vaani.apps import AppTarget
+
+    class RoutingGroq(Groq):
+        def __init__(self, text, decision):
+            super().__init__(text)
+            self._decision = decision
+
+        def route(self, utterance, key, *, cancel=None):
+            return self._decision
+
+    class Browser:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, url, *, prefer=None):
+            self.urls.append(url)
+            return "Opened browser."
+
+    monkeypatch.setattr("vaani.controller.resolve_app", lambda text: None)
+    monkeypatch.setattr("vaani.controller.resolve_youtube", lambda text: None)
+    monkeypatch.setattr("vaani.controller.resolve_site", lambda text: None)
+    monkeypatch.setattr(
+        "vaani.controller.resolve_browse_query",
+        lambda query, browser=None, config_path=None: SimpleNamespace(
+            name="GitHub", url="https://github.com/", browser=browser
+        ),
+    )
+
+    browser = Browser()
+    h = History()
+    c = Controller(
+        recorder=Rec(),
+        groq=RoutingGroq(
+            "github pe jao",
+            RouteDecision(intent="open", query="github", target="site", confidence=0.9),
+        ),
+        delivery=Delivery(),
+        history=h,
+        key_provider=lambda: "key",
+        browser_launcher=browser,
+    )
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(1)
+    assert browser.urls == ["https://github.com/"]
+
+    launched = []
+
+    class AppLauncher:
+        def resolve(self, text):
+            return AppTarget("Cursor", ("cursor",))
+
+        def launch(self, app):
+            launched.append(app.name)
+            return f"Opened {app.name}."
+
+    monkeypatch.setattr(
+        "vaani.controller.resolve_app_name",
+        lambda name: AppTarget("Cursor", ("cursor",)),
+    )
+    h2 = History()
+    c2 = Controller(
+        recorder=Rec(),
+        groq=RoutingGroq(
+            "cursor kholo",
+            RouteDecision(intent="open", query="cursor", target="app", confidence=0.95),
+        ),
+        delivery=Delivery(),
+        history=h2,
+        key_provider=lambda: "key",
+        app_launcher=AppLauncher(),
+    )
+    assert c2.trigger_assistant()
+    assert c2.stop()
+    c2._worker.join(1)
+    assert launched == ["Cursor"]
+    assert h2.rows[0]["cleanup_status"] == "app_action"

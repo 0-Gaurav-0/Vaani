@@ -17,14 +17,15 @@ from pathlib import Path
 from .types import AppState, DictationMode
 from .observability import exception_category, sanitize
 from .groq import GroqError, guard_transcription
-from .apps import launch_app, resolve_app
-from .sites import resolve_site, resolve_youtube, resolve_play_target
+from .apps import launch_app, resolve_app, resolve_app_name
+from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
 from .assistant_intent import classify_assistant_intent
 from .assistant_route import (
     RouteDecision,
     RouteOption,
     default_media_options,
+    default_open_options,
     format_clarify_body,
     match_clarify_choice,
 )
@@ -432,9 +433,13 @@ class Controller:
         if decision.should_clarify:
             options = decision.options
             if not options and decision.query:
-                options = default_media_options(decision.query)
+                if decision.intent == "open" or decision.target in {"app", "site"}:
+                    options = default_open_options(decision.query)
+                else:
+                    options = default_media_options(decision.query)
             if not options:
-                options = default_media_options(raw)
+                # Ambiguous utterance: offer both open and media-ish choices.
+                options = default_open_options(raw)[:2] + default_media_options(raw)[:2]
             self._begin_clarify(token, audio, raw, options)
             return
 
@@ -545,13 +550,28 @@ class Controller:
             return
 
         if intent == "open":
+            browser = None
+            if "brave" in raw.casefold():
+                browser = "brave"
+            elif "chrome" in raw.casefold():
+                browser = "chrome"
+            want = (decision.target or "").casefold()
+            # Prefer desktop app when requested or when the name matches an app.
+            if want in {"", "app"}:
+                app = resolve_app_name(query)
+                if app is not None:
+                    open_text = f"open {app.name}"
+                    if self._assistant_try_app(token, audio, open_text):
+                        return
+            if want in {"", "site", "web", "browser"}:
+                site = resolve_browse_query(query, browser=browser)
+                if site and self._assistant_open_site(token, audio, raw, site):
+                    return
+            # Last resort: synthesize classic open phrases for resolvers.
             open_text = f"open {query}".strip()
             if self._assistant_try_app(token, audio, open_text):
                 return
             if self._assistant_try_browser(token, audio, open_text):
-                return
-            site = resolve_site(open_text)
-            if site and self._assistant_open_site(token, audio, raw, site):
                 return
             self._deliver_text(
                 token, audio, raw=raw, final=raw, history_mode="assistant",

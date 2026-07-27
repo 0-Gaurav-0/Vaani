@@ -12,6 +12,16 @@ def test_resolves_desktop_app_aliases():
     assert resolve_app("Open code").name == "Visual Studio Code"
     assert resolve_app("Show Files").name == "Files"
     assert resolve_app("Cursor kholo").name == "Cursor"
+    assert resolve_app("Chrome dikhao").name == "Chrome"
+    assert resolve_app("Can you open Slack").name == "Slack"
+
+
+def test_resolve_app_name_without_verb():
+    from vaani.apps import resolve_app_name
+
+    assert resolve_app_name("cursor").name == "Cursor"
+    assert resolve_app_name("vs code").name == "Visual Studio Code"
+    assert resolve_app_name("spotify").name == "Spotify"
 
 
 def test_resolves_installed_work_and_system_apps():

@@ -158,3 +158,13 @@ def default_media_options(query: str) -> tuple[RouteOption, ...]:
         RouteOption(f"Search Netflix: {q}", "play", q, "netflix"),
         RouteOption("Just type what I said", "paste", query, ""),
     )
+
+
+def default_open_options(query: str) -> tuple[RouteOption, ...]:
+    q = _clip_str(query) or "this"
+    return (
+        RouteOption(f"Open app: {q}", "open", q, "app"),
+        RouteOption(f"Open website: {q}", "open", q, "site"),
+        RouteOption(f"Search the web for: {q}", "open", q, "site"),
+        RouteOption("Just type what I said", "paste", query, ""),
+    )
