@@ -30,6 +30,7 @@ from vaani.verbs.agent_context import (
     materialize_agent_argv,
     seed_agent_prompt,
 )
+from vaani.verbs.packs.browser_results import register_browser_results_pack
 from vaani.verbs.packs.procs import register_procs_pack
 from vaani.verbs.packs.project import LastRun, register_project_pack
 from vaani.verbs.packs.window import register_window_pack
@@ -1240,5 +1241,6 @@ def build_core_registry(
         last_runs=shared_runs,
     )
     window = register_window_pack(registry, get_window=get_window)
+    browser_results = register_browser_results_pack(registry)
     base = tuple(patterns) if patterns is not None else core_patterns()
-    return registry, base + procs + project + window
+    return registry, base + procs + project + window + browser_results
