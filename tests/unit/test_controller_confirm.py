@@ -198,6 +198,34 @@ def test_enter_approve_esc_reject_methods(tmp_path: Path):
     assert ran["n"] == 1
 
 
+def test_approve_surfaces_partial_result(tmp_path: Path):
+    """Live bug: approve finished PARTIAL with no UI — user saw nothing."""
+    c, h, w, _control = _controller(tmp_path, text="open the first result")
+    verb = c.registry.get("browser.result.open")
+    assert verb is not None
+
+    def handler(intent, context):
+        from vaani.intent.schema import Result
+
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't open result.",
+            detail="couldn't read results; try guide or enable vision click",
+            rung=2,
+        )
+
+    object.__setattr__(verb, "handler", handler)
+
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(2)
+    assert c.confirm.peek() is not None
+    assert c.approve_pending(via="hotkey")
+    assert w.results
+    assert "couldn't open result" in w.results[-1].casefold()
+    assert h.rows and h.rows[0]["status"] is Status.PARTIAL
+
+
 def test_new_utterance_invalidates_pending(tmp_path: Path):
     c, _h, _w, _control = _controller(tmp_path, text="quit Slack")
     verb = c.registry.get("app.quit")

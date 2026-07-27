@@ -407,15 +407,80 @@ def build_core_verbs(
 
     def handle_app_open(intent: Intent, _context: Context) -> Result:
         target = intent.slots.get("target")
-        if target is None:
-            launcher = get_app_launcher() if get_app_launcher is not None else None
-            if launcher is not None:
-                target = launcher.resolve(intent.raw_utterance)
-            else:
-                target = resolve_app_fn(intent.raw_utterance)
-        if target is None:
-            return Result(status=Status.FAILED, summary="No app matched.", rung=1)
         launcher = get_app_launcher() if get_app_launcher is not None else None
+
+        def _resolve(text: str):
+            if launcher is not None:
+                return launcher.resolve(text)
+            return resolve_app_fn(text)
+
+        if target is None:
+            name = str(intent.slots.get("name") or "").strip()
+            if name:
+                target = _resolve(f"open {name}")
+            if target is None:
+                target = _resolve(intent.raw_utterance or "")
+        if target is None:
+            # Prefer catalog sites, then Google search — never invent storefront URLs.
+            name = str(intent.slots.get("name") or "").strip()
+            site_query = f"open {name}" if name else (intent.raw_utterance or "")
+            site = resolve_site_fn(site_query) if site_query else None
+            if site is not None:
+                prefer = getattr(site, "browser", None) or _prefer_browser(
+                    intent.raw_utterance, None
+                )
+                browser = (
+                    get_browser_launcher() if get_browser_launcher is not None else None
+                )
+                if browser is not None:
+                    answer = browser.open(site.url, prefer=prefer)
+                else:
+                    answer = open_browser_fn(
+                        prefer_brave=prefer != "chrome", url=site.url
+                    )
+                if isinstance(answer, str) and answer.startswith("Opened"):
+                    answer = f"Opened {site.name}."
+                _show_text(str(answer))
+                return Result(
+                    status=Status.OK,
+                    summary=str(answer),
+                    detail=str(answer),
+                    evidence=(site.url, "via=site_fallback"),
+                    rung=1,
+                )
+            query = name or str(intent.raw_utterance or "").strip()
+            # Strip a leading "open " so search uses the spoken target.
+            q_norm = " ".join(query.split())
+            if q_norm.casefold().startswith("open "):
+                q_norm = q_norm[5:].strip()
+            if q_norm:
+                prefer = _prefer_browser(intent.raw_utterance, None)
+                url = f"https://www.google.com/search?q={quote_plus(q_norm)}"
+                browser = (
+                    get_browser_launcher() if get_browser_launcher is not None else None
+                )
+                if browser is not None:
+                    answer = browser.open(url, prefer=prefer)
+                else:
+                    answer = open_browser_fn(
+                        prefer_brave=prefer != "chrome", url=url
+                    )
+                summary = f"Searched Google for {q_norm}."
+                _show_text(summary)
+                return Result(
+                    status=Status.OK,
+                    summary=summary,
+                    detail=summary,
+                    evidence=(url, "via=search_fallback"),
+                    rung=1,
+                )
+            detail = f"unknown app: {name!r}" if name else "no app name or match"
+            return Result(
+                status=Status.FAILED,
+                summary="No app matched.",
+                detail=detail,
+                rung=1,
+            )
         if launcher is not None:
             answer = launcher.launch(target)
         else:
@@ -1180,6 +1245,9 @@ def build_core_registry(
     get_terminal: Callable[[], Any | None] | None = None,
     get_cancel: Callable[[], Any | None] | None = None,
     run_command: Callable[..., Any] | None = None,
+    get_screen: Callable[[], Any | None] | None = None,
+    get_input: Callable[[], Any | None] | None = None,
+    get_guide_brain: Callable[[], Any | None] | None = None,
     quit_app_fn: Callable[[str, PlatformId], Result] | None = None,
     open_private_fn: Callable[..., str] | None = None,
     reveal_fn: Callable[[Path, PlatformId], Result] | None = None,
@@ -1198,7 +1266,6 @@ def build_core_registry(
     ``last_runs`` is shared between project verbs (writers) and ``agent.task``
     (reader) so UI-EDIT-06 can seed from the last failing test job.
     """
-    _ = resolve_site_fn  # reserved for future site-slot resolvers
     shared_runs: list[LastRun] = last_runs if last_runs is not None else []
     registry = Registry()
     for verb in build_core_verbs(
@@ -1241,6 +1308,11 @@ def build_core_registry(
         last_runs=shared_runs,
     )
     window = register_window_pack(registry, get_window=get_window)
-    browser_results = register_browser_results_pack(registry)
+    browser_results = register_browser_results_pack(
+        registry,
+        get_screen=get_screen,
+        get_input=get_input,
+        get_guide_brain=get_guide_brain,
+    )
     base = tuple(patterns) if patterns is not None else core_patterns()
     return registry, base + procs + project + window + browser_results

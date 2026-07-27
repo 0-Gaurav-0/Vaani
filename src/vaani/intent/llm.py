@@ -26,6 +26,8 @@ Honor platform and platform_notes. Use only verbs listed in the catalog.
 Prefer the smallest plan. For "open Chrome/Brave and search X", prefer ONE \
 site.search step with slots.query and slots.browser (chrome|brave) — do not \
 emit a separate app.open before search.
+app.open is only for known desktop apps. Unknown "open <name>" that is not a \
+desktop app → site.search with that name (never invent URLs).
 Other compounds → ordered steps.
 Refuse polite chit-chat / thanks. Delegate only when no catalog verb fits.
 Never invent shell commands or verbs.

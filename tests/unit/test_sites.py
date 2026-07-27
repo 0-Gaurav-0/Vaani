@@ -32,7 +32,6 @@ def test_resolves_stripe_to_stable_dashboard_url():
     assert target.name == "Stripe"
     assert target.url == "https://dashboard.stripe.com/"
 
-
 def test_claude_website_can_be_requested_explicitly():
     target = resolve_site("Open Claude website in Brave")
     assert target is not None

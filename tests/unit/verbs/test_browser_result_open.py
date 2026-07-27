@@ -74,7 +74,69 @@ def test_open_result_returns_degraded_result_when_resolver_misses() -> None:
 
     assert result.status is Status.PARTIAL
     assert result.summary == "Couldn't read results"
-    assert "try guide or enable vision click" in result.detail
+    detail = (result.detail or "").casefold()
+    assert "vision" in detail or "screen" in detail
+    assert "deps_missing" in (result.evidence or ())
+
+
+def test_register_accepts_get_guide_brain(monkeypatch) -> None:
+    from vaani.intent.schema import OverlayOp
+
+    brain_calls: list[str] = []
+
+    def brain(q, frames):
+        brain_calls.append(q)
+        return "x", (OverlayOp(kind="point", x=5, y=5, label="1"),)
+
+    class Frame:
+        width = height = 200
+        display_width = 200
+        display_height = 200
+        scale = 1.0
+        origin_x = origin_y = 0.0
+        flip_y = False
+
+    class Synth:
+        def click(self, x, y):
+            return Result(status=Status.OK, summary="ok", detail=f"{x},{y}", rung=2)
+
+    monkeypatch.setattr(
+        "vaani.vision.capture.capture_frames",
+        lambda screen: [Frame()],
+    )
+
+    verbs = build_browser_result_verbs(
+        resolve_result_url=lambda _i: None,
+        get_screen=lambda: object(),
+        get_input=lambda: Synth(),
+        get_guide_brain=lambda: brain,
+    )
+    result = verbs[0].handler(_intent(), _context())
+    assert result.status is Status.OK
+    assert brain_calls
+    assert "vision_click" in (result.evidence or ())
+
+
+def test_partial_when_capture_raises(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "vaani.vision.capture.capture_frames",
+        lambda screen: (_ for _ in ()).throw(RuntimeError("Screen Recording denied")),
+    )
+
+    class Synth:
+        def click(self, x, y):
+            return Result(status=Status.OK, summary="x", rung=2)
+
+    verbs = build_browser_result_verbs(
+        resolve_result_url=lambda _i: None,
+        get_screen=lambda: object(),
+        get_input=lambda: Synth(),
+        get_guide_brain=lambda: (lambda q, f: ("", ())),
+    )
+    result = verbs[0].handler(_intent(), _context())
+    assert result.status is Status.PARTIAL
+    assert "screen recording" in (result.detail or "").casefold()
+    assert "capture_fail" in (result.evidence or ())
 
 
 def test_open_result_is_r2_with_default_first_index() -> None:

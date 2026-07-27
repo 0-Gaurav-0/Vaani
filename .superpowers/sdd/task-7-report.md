@@ -25,3 +25,12 @@ The full unit suite has five pre-existing failures from the separately landed
 screen-capture platform work: four tests still expect `bundle.screen is None`,
 and the persistence invariant currently flags Pillow's in-memory
 `BytesIO.save()` call. This task does not modify those platform files.
+
+## Fix follow-up
+
+Commit `f5afea8` — updated platform bundle tests to expect wired screen capture
+(`MacScreenCapture` on macOS, `UnsupportedScreenCapture` on linux/windows) and
+refined the ScreenFrame persistence invariant to ignore in-memory Pillow
+`save()` calls targeting `BytesIO` sinks while still flagging path-like writes.
+
+Tests: targeted suite 27 passed; full `tests/unit` 1000 passed, 1 skipped.
