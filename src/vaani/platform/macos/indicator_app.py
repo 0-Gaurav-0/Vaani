@@ -10,6 +10,7 @@ import math
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 # Compact + flush to the absolute screen bottom (may sit over the Dock edge).
@@ -18,6 +19,59 @@ CONFIRM_WIDTH = 220
 HEIGHT = 28
 MARGIN_BOTTOM = 0
 BAR_COUNT = 15
+
+
+@dataclass(frozen=True)
+class OverlayDrawCommand:
+    """A renderer-ready guide overlay instruction in primary-display coordinates."""
+
+    kind: str
+    x: float
+    y: float
+    text: str
+
+
+def load_overlay_draw_commands(
+    path: Path, *, now: float | None = None
+) -> tuple[OverlayDrawCommand, ...]:
+    """Load the non-expired IPC payload into marker and caption draw commands."""
+    from ...indicator_protocol import read_overlay
+
+    payload = read_overlay(path)
+    if payload is None:
+        return ()
+    ops, expires_at = payload
+    if expires_at <= (time.time() if now is None else now):
+        return ()
+
+    commands: list[OverlayDrawCommand] = []
+
+    def add_ops(items: tuple[object, ...]) -> None:
+        for op in items:
+            kind = getattr(op, "kind", "")
+            if kind == "point":
+                commands.append(
+                    OverlayDrawCommand(
+                        kind="marker",
+                        x=float(getattr(op, "x", 0.0)),
+                        y=float(getattr(op, "y", 0.0)),
+                        text=str(getattr(op, "label", "")),
+                    )
+                )
+            elif kind == "caption":
+                commands.append(
+                    OverlayDrawCommand(
+                        kind="caption",
+                        x=float(getattr(op, "x", 0.0)),
+                        y=float(getattr(op, "y", 0.0)),
+                        text=str(getattr(op, "text", "")),
+                    )
+                )
+            elif kind == "tour":
+                add_ops(tuple(getattr(op, "steps", ())))
+
+    add_ops(tuple(ops))
+    return tuple(commands)
 
 
 def _paths() -> tuple[Path, Path, Path, Path, Path]:
@@ -98,6 +152,7 @@ def _run_appkit(
         NSBezierPath,
         NSColor,
         NSEvent,
+        NSFont,
         NSMakeRect,
         NSScreen,
         NSStatusBar,
@@ -107,7 +162,7 @@ def _run_appkit(
         NSWindow,
         NSWindowStyleMaskBorderless,
     )
-    from Foundation import NSObject, NSTimer
+    from Foundation import NSObject, NSString, NSTimer
     from PyObjCTools import AppHelper
 
     from ...indicator_protocol import read_pending_id, read_phase
@@ -115,6 +170,7 @@ def _run_appkit(
 
     wave = WaveformBuffer(bars=BAR_COUNT)
     ui = {"phase": "recording", "t0": time.monotonic(), "width": WIDTH}
+    overlay_path = phase_path.parent / "overlay_ops"
 
     def _width_for(phase: str) -> int:
         return CONFIRM_WIDTH if phase == "confirming" else WIDTH
@@ -285,9 +341,57 @@ def _run_appkit(
             self._drag_start = None
             self._origin_x = None
 
+    class OverlayView(NSView):
+        def initWithFrame_(self, frame):  # noqa: N802
+            self = objc.super(OverlayView, self).initWithFrame_(frame)
+            if self is None:
+                return None
+            self.commands = ()
+            return self
+
+        def isFlipped(self):  # noqa: N802
+            return True
+
+        def drawRect_(self, _rect):  # noqa: N802
+            for command in self.commands:
+                x, y = command.x, command.y
+                if command.kind == "marker":
+                    # A bright dot with a small downward triangle makes the target
+                    # visible against both light and dark apps.
+                    NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                        0.15, 0.65, 1.0, 0.95
+                    ).set()
+                    NSBezierPath.bezierPathWithOvalInRect_(
+                        NSMakeRect(x - 10, y - 10, 20, 20)
+                    ).fill()
+                    triangle = NSBezierPath.bezierPath()
+                    triangle.moveToPoint_((x - 7, y - 14))
+                    triangle.lineToPoint_((x + 7, y - 14))
+                    triangle.lineToPoint_((x, y - 25))
+                    triangle.closePath()
+                    triangle.fill()
+                    if command.text:
+                        attrs = {
+                            "NSFont": NSFont.boldSystemFontOfSize_(13),
+                            "NSForegroundColor": NSColor.whiteColor(),
+                        }
+                        NSString.stringWithString_(command.text).drawAtPoint_withAttributes_(
+                            (x + 14, y - 7), attrs
+                        )
+                elif command.kind == "caption" and command.text:
+                    attrs = {
+                        "NSFont": NSFont.systemFontOfSize_(14),
+                        "NSForegroundColor": NSColor.whiteColor(),
+                    }
+                    NSString.stringWithString_(command.text).drawAtPoint_withAttributes_(
+                        (x, y), attrs
+                    )
+
     class Delegate(NSObject):
         window = None
         view = None
+        overlay_window = None
+        overlay_view = None
         status_item = None
 
         def applicationDidFinishLaunching_(self, _n):  # noqa: N802
@@ -325,8 +429,41 @@ def _run_appkit(
             win.orderFrontRegardless()
             self.window = win
             self.view = view
+            # V1 uses the primary display only. OverlayOp has display-relative
+            # coordinates but no display identifier, so rendering one operation
+            # per screen would duplicate pointers on secondary displays.
+            overlay_screen = NSScreen.mainScreen().frame()
+            overlay_window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                overlay_screen,
+                NSWindowStyleMaskBorderless,
+                NSBackingStoreBuffered,
+                False,
+            )
+            overlay_window.setLevel_(NSStatusWindowLevel)
+            overlay_window.setOpaque_(False)
+            overlay_window.setBackgroundColor_(NSColor.clearColor())
+            overlay_window.setHasShadow_(False)
+            overlay_window.setHidesOnDeactivate_(False)
+            overlay_window.setIgnoresMouseEvents_(True)
+            overlay_window.setCollectionBehavior_(1 << 0)  # can join all spaces
+            overlay_view = OverlayView.alloc().initWithFrame_(
+                NSMakeRect(
+                    0,
+                    0,
+                    float(overlay_screen.size.width),
+                    float(overlay_screen.size.height),
+                )
+            )
+            overlay_window.setContentView_(overlay_view)
+            self.overlay_window = overlay_window
+            self.overlay_view = overlay_view
             print(
                 f"[vaani] bottom pill ready x={int(x)} y={int(y)} visible={win.isVisible()}",
+                flush=True,
+            )
+            print(
+                "[vaani] guide overlay primary-display only (DEGRADED: "
+                "OverlayOp has no display identifier)",
                 flush=True,
             )
             NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
@@ -375,6 +512,15 @@ def _run_appkit(
                     self.status_item.button().setToolTip_("Vaani recording")
             if self.view is not None:
                 self.view.setNeedsDisplay_(True)
+            commands = load_overlay_draw_commands(overlay_path)
+            if self.overlay_view is not None:
+                self.overlay_view.commands = commands
+                self.overlay_view.setNeedsDisplay_(True)
+            if self.overlay_window is not None:
+                if commands:
+                    self.overlay_window.orderFrontRegardless()
+                else:
+                    self.overlay_window.orderOut_(None)
             if self.window is not None:
                 screen = NSScreen.mainScreen().frame()
                 frame = self.window.frame()
