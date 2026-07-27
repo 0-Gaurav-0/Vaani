@@ -470,3 +470,39 @@ def test_disambiguation_voice_ordinal_then_confirm(tmp_path: Path):
     write_command(control, f"approve:{pending.id}")
     c._poll_indicator_control()
     assert killed == [((11,), "term")]
+
+
+def test_controller_syncs_policy_hotkeys_on_confirm(tmp_path: Path):
+    """Staging confirm arms Esc+Enter; clearing disarms both when idle."""
+    calls: list[tuple[bool, bool]] = []
+
+    class SpyHotkeys:
+        def set_policy_keys(self, *, cancel: bool, approve: bool) -> None:
+            calls.append((cancel, approve))
+
+    c, _h, _w, _control = _controller(tmp_path, text="quit Slack")
+    c.hotkeys = SpyHotkeys()
+    verb = c.registry.get("app.quit")
+    assert verb is not None
+
+    def handler(intent, context):
+        from vaani.intent.schema import Result
+
+        return Result(status=Status.OK, summary="Quit Slack.", rung=1)
+
+    object.__setattr__(verb, "handler", handler)
+
+    calls.clear()
+    assert c.trigger_assistant()
+    assert calls[-1] == (True, False)  # recording → cancel only
+
+    assert c.stop()
+    assert calls[-1] == (True, False)  # processing → cancel only
+    c._worker.join(2)
+
+    assert c.confirm.peek() is not None
+    assert calls[-1] == (True, True)  # confirm → cancel + approve
+
+    assert c.reject_pending(via="hotkey")
+    assert c.confirm.peek() is None
+    assert calls[-1] == (False, False)  # idle, no pending → pass through

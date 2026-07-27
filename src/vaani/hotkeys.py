@@ -108,8 +108,7 @@ HotkeyRegistrar = HotkeyManager
 class XInputHotkeyManager:
     """Global listener using xinput test-xi2, avoiding passive-grab conflicts.
 
-    Esc rejects a pending confirm (cancel family). Return/Enter approves when
-    a PendingAction is staged (wired via ``on_approve``).
+    Esc/Enter are observed only while armed via ``set_policy_keys``.
     """
     def __init__(
         self,
@@ -128,11 +127,18 @@ class XInputHotkeyManager:
         self.enter = 36
         self._escape_seen = False
         self._enter_seen = False
+        self._policy_cancel = False
+        self._policy_approve = False
 
     def register(self) -> None:
         self._stop.clear(); self._thread = threading.Thread(target=self._poll, daemon=True); self._thread.start()
 
     start = register
+
+    def set_policy_keys(self, *, cancel: bool, approve: bool) -> None:
+        """Arm/disarm Esc (cancel) and Enter (approve) observation."""
+        self._policy_cancel = bool(cancel)
+        self._policy_approve = bool(approve)
 
     def _poll(self) -> None:
         try:
@@ -143,16 +149,29 @@ class XInputHotkeyManager:
             try:
                 out = subprocess.check_output(["xinput", "query-state", device], text=True, stderr=subprocess.DEVNULL)
                 down = {int(c) for c, state in re.findall(r"key\[(\d+)\]=(up|down)", out) if state == "down"}
-                if self.escape in down and not self._escape_seen:
-                    self._escape_seen = True
-                    if self.on_cancel: self.on_cancel()
-                elif self.escape not in down:
-                    self._escape_seen = False
-                if self.enter in down and not self._enter_seen:
-                    self._enter_seen = True
-                    if self.on_approve: self.on_approve()
-                elif self.enter not in down:
-                    self._enter_seen = False
+                if self._policy_cancel or self._policy_approve:
+                    if self._policy_cancel:
+                        if self.escape in down and not self._escape_seen:
+                            self._escape_seen = True
+                            if self.on_cancel:
+                                self.on_cancel()
+                        elif self.escape not in down:
+                            self._escape_seen = False
+                    else:
+                        self._escape_seen = self.escape in down
+                    if self._policy_approve:
+                        if self.enter in down and not self._enter_seen:
+                            self._enter_seen = True
+                            if self.on_approve:
+                                self.on_approve()
+                        elif self.enter not in down:
+                            self._enter_seen = False
+                    else:
+                        self._enter_seen = self.enter in down
+                else:
+                    # Track held state so re-arming mid-hold does not edge-fire.
+                    self._escape_seen = self.escape in down
+                    self._enter_seen = self.enter in down
                 active = self.space in down and self.ctrl in down and self.super in down
                 if active and not self._triggered:
                     self._triggered = True; self.on_trigger(ASSISTANT)
@@ -190,5 +209,7 @@ class XInputHotkeyManager:
             try: self._proc.wait(timeout=1)
             except subprocess.TimeoutExpired: self._proc.kill()
         self._proc = None; self._thread = None; self._down.clear(); self._triggered = False
+        self._policy_cancel = False
+        self._policy_approve = False
 
     stop = unregister

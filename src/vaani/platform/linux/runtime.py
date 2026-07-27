@@ -169,6 +169,7 @@ def run_linux(settings: Settings) -> int:
         on_cancel=controller.cancel,
         on_approve=controller.approve_pending,
     )
+    controller.policy_hotkeys = escape_monitor
     try:
         log_path = settings.log_dir / "vaani.log"
         session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
@@ -186,18 +187,18 @@ def run_linux(settings: Settings) -> int:
         )
         hotkeys.register()
         escape_monitor.register()
+        controller._sync_policy_hotkeys()
         logger.info(
             "startup complete; hold Ctrl+Space to dictate (release to stop); "
             "Ctrl+Shift+Space literal; Ctrl+Alt+Space assistant; "
-            "Esc cancels/rejects; Enter approves confirm"
+            "Esc/Enter only while recording or confirm"
         )
         print(
             "Vaani hotkeys ready (hold-to-talk):\n"
             "  Hold Ctrl+Space           → smart dictation\n"
             "  Hold Ctrl+Shift+Space     → literal\n"
             "  Hold Ctrl+Alt+Space       → assistant\n"
-            "  Esc                       → cancel / reject confirm\n"
-            "  Enter                     → approve confirm\n"
+            "  Esc / Enter               → only while recording or confirm\n"
             "Release the chord to stop — pill stays up while processing.",
             flush=True,
         )

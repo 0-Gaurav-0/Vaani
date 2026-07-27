@@ -73,8 +73,65 @@ def test_xsync_badaccess_is_registration_failure():
 
 def test_xinput_escape_cancel_is_edge_triggered(monkeypatch):
     out=[]; m=__import__('vaani.hotkeys', fromlist=['XInputHotkeyManager']).XInputHotkeyManager(lambda _:None, on_cancel=lambda: out.append(1))
+    m.set_policy_keys(cancel=True, approve=False)
     m._escape_seen=False
     # Equivalent state transitions from xinput polling; Escape is observed but not consumed.
     down={9};
-    if 9 in down and not m._escape_seen: m._escape_seen=True; m.on_cancel()
+    if m._policy_cancel and 9 in down and not m._escape_seen: m._escape_seen=True; m.on_cancel()
     assert out == [1]
+
+
+def test_xinput_policy_disarmed_skips_esc_enter():
+    from vaani.hotkeys import XInputHotkeyManager
+
+    cancels: list[int] = []
+    approves: list[int] = []
+    m = XInputHotkeyManager(
+        lambda _: None,
+        on_cancel=lambda: cancels.append(1),
+        on_approve=lambda: approves.append(1),
+    )
+    assert m._policy_cancel is False
+    assert m._policy_approve is False
+    # Simulate the poll edge logic while disarmed.
+    down = {9, 36}
+    if m._policy_cancel or m._policy_approve:
+        if m._policy_cancel and m.escape in down and not m._escape_seen:
+            m._escape_seen = True
+            if m.on_cancel:
+                m.on_cancel()
+        if m._policy_approve and m.enter in down and not m._enter_seen:
+            m._enter_seen = True
+            if m.on_approve:
+                m.on_approve()
+    else:
+        m._escape_seen = m.escape in down
+        m._enter_seen = m.enter in down
+    assert cancels == []
+    assert approves == []
+
+    m.set_policy_keys(cancel=True, approve=True)
+    # Keys still held from before arming — should not edge-fire.
+    if m._policy_cancel:
+        if m.escape in down and not m._escape_seen:
+            m._escape_seen = True
+            m.on_cancel()
+        elif m.escape not in down:
+            m._escape_seen = False
+    if m._policy_approve:
+        if m.enter in down and not m._enter_seen:
+            m._enter_seen = True
+            m.on_approve()
+        elif m.enter not in down:
+            m._enter_seen = False
+    assert cancels == []
+    assert approves == []
+
+    # Fresh edges after release + press.
+    m._escape_seen = False
+    m._enter_seen = False
+    down = {9}
+    if m.escape in down and not m._escape_seen:
+        m._escape_seen = True
+        m.on_cancel()
+    assert cancels == [1]

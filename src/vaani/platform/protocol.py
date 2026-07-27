@@ -57,6 +57,10 @@ class AppTarget:
 class HotkeyService(Protocol):
     def register(self) -> None: ...
     def unregister(self) -> None: ...
+    # Optional: platforms that steal Esc/Enter implement this so the controller
+    # can arm them only while recording/processing or confirm/disambiguate.
+    # Callers must use getattr(..., "set_policy_keys", None) for compatibility.
+    def set_policy_keys(self, *, cancel: bool, approve: bool) -> None: ...
 
 
 @runtime_checkable
