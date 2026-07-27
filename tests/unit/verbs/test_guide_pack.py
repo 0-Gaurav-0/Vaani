@@ -57,7 +57,7 @@ def _verbs(**kwargs):
     return {verb.name: verb for verb in build_guide_verbs(**kwargs)}
 
 
-def test_point_captures_maps_and_shows_tag_free_overlay() -> None:
+def test_point_captures_maps_and_returns_tag_free_overlay() -> None:
     screen = FakeScreen(
         ScreenFrame(
             width=100,
@@ -90,9 +90,20 @@ def test_point_captures_maps_and_shows_tag_free_overlay() -> None:
     assert "[POINT:" not in result.summary
     assert result.overlay[0].x == 112
     assert result.overlay[0].y == 62
-    assert overlay.shown == [(result.overlay, 8.0)]
+    assert overlay.shown == []
     assert screen.calls == [0]
     assert brain_calls[0][0] == "export button"
+
+
+def test_lazy_guide_brain_is_not_called_for_non_point_verbs() -> None:
+    def broken_brain_getter():
+        raise AssertionError("non-guide-point verb must not resolve guide brain")
+
+    result = _verbs(get_guide_brain=broken_brain_getter)["guide.offer"].handler(
+        _intent("guide.offer", {"goal": "open settings"}), _context()
+    )
+
+    assert result.status is Status.OK
 
 
 def test_point_without_screen_is_unsupported() -> None:

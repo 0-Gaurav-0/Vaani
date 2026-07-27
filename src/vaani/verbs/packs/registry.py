@@ -116,7 +116,7 @@ BUILTIN_PACKS: dict[str, PackDescriptor] = {
         "Guide / point-on-screen mode",
         binaries=(),
         permissions=frozenset({"screen"}),
-        default_enabled=False,
+        default_enabled=True,
     ),
     "computer-use": _descriptor(
         "computer-use",
@@ -319,7 +319,7 @@ def register_stub_packs(
     get_input: Callable[[], Any | None] | None = None,
     get_screen: Callable[[], Any | None] | None = None,
     get_overlay: Callable[[], Any | None] | None = None,
-    guide_brain: Callable[..., Any] | None = None,
+    get_guide_brain: Callable[[], Callable[..., Any] | None] | None = None,
 ) -> tuple[Pattern, ...]:
     """Register installable pack verbs (git/forge/pkg/docker/guide/computer-use).
 
@@ -350,7 +350,7 @@ def register_stub_packs(
             registry,
             get_screen=get_screen,
             get_overlay=get_overlay,
-            guide_brain=guide_brain,
+            get_guide_brain=get_guide_brain,
         )
     )
     patterns.extend(

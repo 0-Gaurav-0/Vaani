@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .codex import ResultWindow
@@ -20,6 +21,8 @@ from .platform.protocol import PlatformBundle
 from .policy.dryrun import dispatch
 from .secrets import effective_key
 from .surface.result import make_assistant_sink
+from .surface.overlay import FileOverlay
+from .vision.guide_brain import make_guide_brain
 
 
 @dataclass(frozen=True)
@@ -84,10 +87,13 @@ def assemble(
         window=getattr(bundle, "window", None),
         terminal=getattr(bundle, "terminal", None),
         input_synth=getattr(bundle, "input", None),
+        screen_capture=getattr(bundle, "screen", None),
+        overlay=FileOverlay(Path(settings.indicator_control_path).parent),
         supervisor=supervisor,
         settings=settings if supervisor is not None else None,
         vocab_path=getattr(settings, "vocab_path", None),
     )
+    controller.guide_brain = make_guide_brain(groq, controller.key_provider)
     result_window = ResultWindow(make_assistant_sink(bundle.feedback))
     controller.result_window = result_window
     agent = AgentRunner(

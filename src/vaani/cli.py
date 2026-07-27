@@ -20,6 +20,7 @@ from vaani.policy.dryrun import dispatch, materialize_argv
 from vaani.policy.undo import UndoStack, register_undo
 from vaani.secrets import load_env_file
 from vaani.sites import resolve_site
+from vaani.surface.overlay import FileOverlay
 from vaani.verbs.packs.core import build_core_registry
 from vaani.verbs.packs.registry import PackRegistry, register_stub_packs
 from vaani.verbs.registry import Registry
@@ -293,11 +294,23 @@ def build_registry(
     )
     register_undo(registry, UndoStack())
     input_synth = _input_for(plat)
+    screen = None
+    overlay = None
+    if settings is not None:
+        overlay = FileOverlay(settings.indicator_control_path.parent)
+        try:
+            screen = getattr(build_platform(settings), "screen", None)
+        except Exception:
+            # Headless/permission-limited ``vaani do`` remains usable; guide
+            # handlers report unsupported capture rather than raising.
+            screen = None
     register_stub_packs(
         registry,
         run_fn=exec_run,
         get_platform=lambda: plat,
         get_input=lambda: input_synth,
+        get_screen=lambda: screen,
+        get_overlay=lambda: overlay,
     )
     pack_reg = packs if packs is not None else _packs_for_settings(settings)
     pack_reg.apply(registry)

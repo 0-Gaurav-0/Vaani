@@ -77,7 +77,7 @@ class Settings:
 
     @property
     def overlay_path(self) -> Path:
-        return self.cache_dir / "overlay.json"
+        return self.cache_dir / "overlay_ops"
 
     @property
     def vocab_path(self) -> Path:

@@ -2,6 +2,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from vaani.controller import Controller
+from vaani.intent.schema import OverlayOp, Result, Status
+from vaani.surface.overlay import FakeOverlay
 from vaani.types import AppState
 
 class Rec:
@@ -36,6 +38,28 @@ def test_smart_and_literal_flow():
 
 def test_cancel_returns_idle_without_history():
     c,h=make(); c.trigger('smart'); assert c.cancel(); assert c.state is AppState.IDLE; assert not h.rows
+
+
+def test_controller_owns_guide_overlay_lifecycle():
+    overlay = FakeOverlay()
+    h = History()
+    c = Controller(
+        recorder=Rec(), groq=Groq(), delivery=Delivery(), history=h,
+        key_provider=lambda: "key", max_duration=60, overlay=overlay,
+    )
+    op = OverlayOp(kind="point", x=1, y=2, label="Settings")
+
+    c._finish_assistant_result(
+        Result(status=Status.OK, summary="Here", overlay=(op,)),
+        raw="point to settings", verb_name="guide.point", token=0,
+    )
+    assert overlay.shown == [((op,), 8.0)]
+
+    c._finish_assistant_result(
+        Result(status=Status.OK, summary="Done"),
+        raw="open browser", verb_name="browser.open", token=0,
+    )
+    assert overlay.clear_count == 1
 
 
 def test_indicator_control_file_stop(tmp_path):
