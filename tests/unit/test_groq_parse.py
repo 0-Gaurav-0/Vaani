@@ -23,7 +23,8 @@ def test_parse_intent_returns_fenced_json_content():
         payload = json.loads(req.read())
         assert payload["model"] == "llama-3.1-8b-instant"
         assert payload["temperature"] == 0
-        assert payload["max_tokens"] == 1024
+        assert payload["max_tokens"] == 512
+        assert payload["response_format"] == {"type": "json_object"}
         assert payload["messages"][0]["content"] == "system prompt"
         assert payload["messages"][1]["content"] == "user utterance"
         return httpx.Response(

@@ -314,8 +314,10 @@ class GroqClient:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": 1024,
+            "max_tokens": 512,
             "temperature": 0,
+            # Nudge models that support it; ignored harmlessly if unsupported.
+            "response_format": {"type": "json_object"},
         }
         started = self._clock()
         try:

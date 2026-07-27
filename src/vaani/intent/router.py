@@ -1,6 +1,7 @@
 """Ladder router: grammar first, never an LLM for rung 1/2."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Callable, Sequence
@@ -19,6 +20,8 @@ from vaani.intent.schema import Context, Intent, IntentPlan
 from vaani.intent.wake import parse_agent_wake
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
+
+_logger = logging.getLogger(__name__)
 
 # Multi-action speech — skip single-hit app/site resolvers and ask the plan LLM.
 _COMPOUND_RE = re.compile(
@@ -161,12 +164,23 @@ class Router:
             )
             if mapped is not None:
                 return mapped
+            _logger.info(
+                "event=llm_parse_stage stage=understand status=compound_miss "
+                "utterance=%r fallback=resolvers",
+                (utterance or raw)[:120],
+            )
 
         # Rung 1 — today's resolver order (app before site) preserves §4.2.
         if "app.open" in enabled and self.resolve_app is not None:
             app = self.resolve_app(utterance or raw)
             if app is not None:
                 name = getattr(app, "name", None) or str(app)
+                if compound:
+                    _logger.info(
+                        "event=llm_parse_stage stage=execute status=fallback_app_open "
+                        "name=%r note=compound_llm_failed",
+                        name,
+                    )
                 return self._intent(
                     "app.open",
                     {"name": name, "target": app},

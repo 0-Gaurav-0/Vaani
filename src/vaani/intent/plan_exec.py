@@ -9,6 +9,7 @@ Policy B (design §4.4):
 """
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 from collections.abc import Callable, Sequence
@@ -31,6 +32,8 @@ from vaani.verbs.registry import Registry
 DispatchFn = Callable[[Verb, Intent, Context], Result]
 RiskCheckFn = Callable[[RiskClass], bool]
 MaterializeFn = Callable[[PlanStep, Verb, Context], tuple[str, ...]]
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -134,6 +137,16 @@ class PlanExecutor:
                 summary="Empty plan",
                 detail=plan.refuse_reason or plan.delegate_prompt or "",
             )
+        step_summary = " -> ".join(
+            f"{s.verb}({','.join(f'{k}={v!r}' for k, v in s.slots.items())})"
+            for s in plan.steps
+        )
+        _logger.info(
+            "event=llm_parse_stage stage=execute status=start steps=%s plan=%s utterance=%r",
+            len(plan.steps),
+            step_summary,
+            (plan.raw_utterance or plan.utterance)[:120],
+        )
         return self._run_steps(plan.steps, context, ok_count=0, summaries=[])
 
     def continue_after_confirm(self, intent: Intent, context: Context) -> Result:
@@ -196,6 +209,12 @@ class PlanExecutor:
                 )
 
             intent = self._intent_for_step(step, verb)
+            _logger.info(
+                "event=llm_parse_stage stage=execute status=step index=%s verb=%s slots=%s",
+                index,
+                step.verb,
+                dict(step.slots),
+            )
 
             if self._risk_requires_confirm(verb.risk):
                 rest = tuple(steps[index + 1 :])
@@ -211,6 +230,11 @@ class PlanExecutor:
                 detail = format_confirm_detail(
                     step, rest, materialized=pending.materialized
                 )
+                _logger.info(
+                    "event=llm_parse_stage stage=execute status=needs_confirm verb=%s rest=%s",
+                    step.verb,
+                    len(rest),
+                )
                 return Result(
                     status=Status.NEEDS_CONFIRM,
                     summary=f"Confirm {verb.title}?",
@@ -221,6 +245,13 @@ class PlanExecutor:
                 )
 
             result = self._dispatch(verb, intent, context)
+            _logger.info(
+                "event=llm_parse_stage stage=execute status=done index=%s verb=%s result=%s summary=%r",
+                index,
+                step.verb,
+                result.status.value,
+                (result.summary or "")[:80],
+            )
             if result.status is Status.OK or result.status is Status.DRY_RUN:
                 ok_count += 1
                 if result.summary:
