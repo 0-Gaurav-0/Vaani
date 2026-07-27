@@ -181,16 +181,47 @@ def test_hotkeys_hold_to_talk_press_release():
     service.register()
     assert started["value"] is True
     assert "<ctrl>+<space>" in service._listener.press
-    assert "<esc>" in service._listener.press
+    assert "<esc>" not in service._listener.press
     assert "<ctrl>+<space>" in service._listener.release
     service._listener.press["<ctrl>+<space>"]()
     service._listener.release["<ctrl>+<space>"]()
+    service.set_policy_keys(cancel=True, approve=False)
+    assert "<esc>" in service._listener.press
     service._listener.press["<esc>"]()
     assert triggers == ["smart"]
     assert releases == ["smart"]
     assert cancels == ["cancel"]
     service.unregister()
     assert started["value"] is False
+
+
+def test_windows_set_policy_keys_gates_enter():
+    approves: list[str] = []
+
+    class FakeListener:
+        def __init__(self, press_mapping, release_mapping=None):
+            self.press = press_mapping
+            self.release = release_mapping or {}
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    service = WindowsHotkeyService(
+        lambda _m: None,
+        on_approve=lambda: approves.append("ok"),
+        listener_factory=FakeListener,
+    )
+    service.register()
+    assert "<enter>" not in service._listener.press
+    service.set_policy_keys(cancel=False, approve=True)
+    service._listener.press["<enter>"]()
+    assert approves == ["ok"]
+    service.set_policy_keys(cancel=False, approve=False)
+    assert "<enter>" not in service._listener.press
+    service.unregister()
 
 
 def test_hotkeys_literal_and_assistant_chords():

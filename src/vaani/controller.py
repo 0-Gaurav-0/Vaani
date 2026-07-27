@@ -237,6 +237,7 @@ class Controller:
                 pass
             self._feedback("start")
             threading.Thread(target=self._duration_guard, args=(token,), daemon=True).start()
+            self._sync_policy_hotkeys()
             return True
 
     start = trigger
@@ -263,6 +264,27 @@ class Controller:
         if self.hotkeys is None: return
         if hasattr(self.hotkeys, "on_trigger"): self.hotkeys.on_trigger = self.handle_hotkey
         if hasattr(self.hotkeys, "register"): self.hotkeys.register()
+        self._sync_policy_hotkeys()
+
+    def _sync_policy_hotkeys(self) -> None:
+        """Arm Esc/Enter only while recording, processing, or confirm/disambiguate."""
+        with self._lock:
+            state = self.state
+        recording_or_processing = state in (AppState.RECORDING, AppState.PROCESSING)
+        confirm = self.confirm.peek() is not None
+        disambiguate = self.disambiguate.peek() is not None
+        cancel = recording_or_processing or confirm or disambiguate
+        approve = confirm and not disambiguate
+        for obj in (self.hotkeys, getattr(self, "policy_hotkeys", None)):
+            if obj is None:
+                continue
+            setter = getattr(obj, "set_policy_keys", None)
+            if not callable(setter):
+                continue
+            try:
+                setter(cancel=cancel, approve=approve)
+            except Exception:
+                self.logger.exception("event=policy_hotkeys_sync_failed")
 
     def stop(self) -> bool:
         with self._lock:
@@ -270,6 +292,7 @@ class Controller:
             token = self._token; self.state = AppState.PROCESSING; self._emit("processing"); self._cancel.clear()
         # SessionLoop keeps polling indicator control during PROCESSING/IDLE.
         self._feedback("processing")
+        self._sync_policy_hotkeys()
         try: audio = self.recorder.stop()
         except Exception as exc:
             self._fail(exc, "mic")
@@ -290,7 +313,9 @@ class Controller:
             if self.state is AppState.RECORDING:
                 try: self.recorder.cleanup()
                 except Exception: pass
-                self.state = AppState.IDLE; self._emit("cancelled"); self._feedback("busy"); return True
+                self.state = AppState.IDLE; self._emit("cancelled"); self._feedback("busy")
+                self._sync_policy_hotkeys()
+                return True
             if self.state is AppState.PROCESSING:
                 self._token += 1
                 try:
@@ -299,7 +324,9 @@ class Controller:
                 except Exception:
                     pass
                 self.state = AppState.IDLE
-                self._feedback("busy"); self._emit("cancelled"); return True
+                self._feedback("busy"); self._emit("cancelled")
+                self._sync_policy_hotkeys()
+                return True
         return False
 
     def approve_pending(self, action_id: str | None = None, *, via: str = "hotkey") -> bool:
@@ -482,6 +509,7 @@ class Controller:
                                     duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000))
                 self.state = AppState.IDLE; self._emit("delivered")
                 self._feedback("success")
+            self._sync_policy_hotkeys()
         except Exception as exc:
             if self._cancel.is_set():
                 return
@@ -705,6 +733,7 @@ class Controller:
             self.state = AppState.PROCESSING
             self._token += 1
             token = self._token
+        self._sync_policy_hotkeys()
         try:
             result = dispatch(verb, intent, context)
             # Diff-before-apply / second-stage confirms (e.g. agent.task patch).
@@ -768,6 +797,7 @@ class Controller:
             self.state = AppState.PROCESSING
             self._token += 1
             token = self._token
+        self._sync_policy_hotkeys()
         try:
             if requires_confirm(verb.risk) and verb.pack in PROBE_PACKS:
                 probe = dispatch(verb, intent, context)
@@ -985,6 +1015,7 @@ class Controller:
             self.state = AppState.IDLE
             self._emit("assistant_complete")
             self._feedback("success")
+        self._sync_policy_hotkeys()
 
     def _materialize(
         self, intent: Any, platform: Any, context: Any = None
@@ -1040,6 +1071,7 @@ class Controller:
         except Exception:
             pass
         self._surface_result(result)
+        self._sync_policy_hotkeys()
 
     def _enter_disambiguating(
         self,
@@ -1093,6 +1125,7 @@ class Controller:
             verb.name,
             len(staged.options),
         )
+        self._sync_policy_hotkeys()
 
     def _clear_confirm_ui(self) -> None:
         try:
@@ -1109,6 +1142,7 @@ class Controller:
                 setter(None)
             except Exception:
                 pass
+        self._sync_policy_hotkeys()
 
     def _invalidate_pending(self, *, reason: str) -> None:
         rejected = self.confirm.invalidate()
@@ -1166,6 +1200,7 @@ class Controller:
         with self._lock: self.state = AppState.IDLE; self._emit("failure", category)
         self.logger.error("controller failure category=%s detail=%s", category, sanitize(exc))
         self._feedback(category or "failure")
+        self._sync_policy_hotkeys()
 
     def _feedback(self, cue: str) -> None:
         try:

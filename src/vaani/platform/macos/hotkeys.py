@@ -2,6 +2,9 @@
 
 The Carbon event loop is pumped on the **main thread** (see ``pump``).
 Background-thread ReceiveNextEvent often never delivers hotkey presses.
+
+Esc/Enter are registered only while armed via ``set_policy_keys`` so they
+pass through to other apps when Vaani is idle with no confirm UI.
 """
 from __future__ import annotations
 
@@ -25,15 +28,20 @@ _SHIFT = 1 << 9
 _OPTION = 1 << 11
 _CONTROL = 1 << 12
 
-# Hold-to-talk family (2-key smart chord; variants add Shift / Control).
-# Esc rejects a pending confirm (same cancel family); Return approves.
-_BINDINGS: tuple[tuple[int, int, str, str], ...] = (
+# Hold-to-talk family (always registered). Esc/Enter are policy keys.
+_HOLD_BINDINGS: tuple[tuple[int, int, str, str], ...] = (
     (_KEY_SPACE, _OPTION, SMART, "Option+Space"),
     (_KEY_SPACE, _OPTION | _SHIFT, LITERAL, "Option+Shift+Space"),
     (_KEY_SPACE, _OPTION | _CONTROL, ASSISTANT, "Control+Option+Space"),
-    (_KEY_ESCAPE, 0, "cancel", "Esc"),
-    (_KEY_RETURN, 0, "approve", "Enter"),
 )
+
+# Stable Carbon hotkey IDs for transient Esc/Enter (outside hold range).
+_POLICY_CANCEL_ID = 100
+_POLICY_APPROVE_ID = 101
+_POLICY_SPECS: dict[str, tuple[int, int, str, str, int]] = {
+    "cancel": (_KEY_ESCAPE, 0, "cancel", "Esc", _POLICY_CANCEL_ID),
+    "approve": (_KEY_RETURN, 0, "approve", "Enter", _POLICY_APPROVE_ID),
+}
 
 _EVENT_LOOP_TIMED_OUT = -9875
 _EVENT_NOT_HANDLED = -9874
@@ -88,6 +96,9 @@ class HotkeyService:
         self._handler_proc: Any | None = None
         self._handler_ref = ctypes.c_void_p()
         self._hotkey_refs: list[ctypes.c_void_p] = []
+        self._policy_refs: dict[str, ctypes.c_void_p] = {}
+        self._policy_cancel = False
+        self._policy_approve = False
         self._app_target: int | None = None
         self._dispatcher_target: int | None = None
         self._registered = False
@@ -107,21 +118,107 @@ class HotkeyService:
             self._register_carbon()
             self._registered = True
 
-    def _register_test_factory(self) -> None:
-        mapping: dict[str, Callable[[], None]] = {
+    def set_policy_keys(self, *, cancel: bool, approve: bool) -> None:
+        """Arm/disarm Esc (cancel) and Enter (approve) without touching hold chords."""
+        with self._lock:
+            cancel_wanted = bool(cancel)
+            approve_wanted = bool(approve)
+            if (
+                cancel_wanted == self._policy_cancel
+                and approve_wanted == self._policy_approve
+            ):
+                return
+            self._policy_cancel = cancel_wanted
+            self._policy_approve = approve_wanted
+            if not self._registered:
+                return
+            if self._listener is not None:
+                self._sync_test_policy_mapping()
+                return
+            if self._carbon is not None:
+                self._sync_carbon_policy_keys_unlocked()
+
+    def _hold_mapping(self) -> dict[str, Callable[[], None]]:
+        return {
             "<alt>+<space>": self._make_trigger(SMART),
             "<alt>+<shift>+<space>": self._make_trigger(LITERAL),
             "<ctrl>+<alt>+<space>": self._make_trigger(ASSISTANT),
         }
-        if self.on_cancel is not None:
+
+    def _sync_test_policy_mapping(self) -> None:
+        listener = self._listener
+        if listener is None:
+            return
+        mapping = getattr(listener, "mapping", None)
+        if not isinstance(mapping, dict):
+            return
+        for key in ("<esc>", "<enter>", "<return>"):
+            mapping.pop(key, None)
+        if self._policy_cancel and self.on_cancel is not None:
             mapping["<esc>"] = self._make_cancel()
-        if self.on_approve is not None:
+        if self._policy_approve and self.on_approve is not None:
             mapping["<enter>"] = self._make_approve()
             mapping["<return>"] = self._make_approve()
+
+    def _register_test_factory(self) -> None:
+        mapping = self._hold_mapping()
         listener = self._listener_factory(mapping)
         listener.start()
         self._listener = listener
         self._registered = True
+        self._sync_test_policy_mapping()
+
+    def _resolve_action(self, hotkey_id: int) -> tuple[str, str] | None:
+        if 0 <= hotkey_id < len(_HOLD_BINDINGS):
+            _key, _mods, action, label = _HOLD_BINDINGS[hotkey_id]
+            return action, label
+        for _name, (_key, _mods, action, label, pid) in _POLICY_SPECS.items():
+            if pid == hotkey_id:
+                return action, label
+        return None
+
+    def _sync_carbon_policy_keys_unlocked(self) -> None:
+        carbon = self._carbon
+        app_target = self._app_target
+        if carbon is None or not app_target:
+            return
+        wanted = {
+            "cancel": self._policy_cancel,
+            "approve": self._policy_approve,
+        }
+        for name, armed in wanted.items():
+            if armed and name not in self._policy_refs:
+                key_code, modifiers, action, label, hotkey_id = _POLICY_SPECS[name]
+                hk = EventHotKeyID(signature=_fourcc("vani"), id=hotkey_id)
+                ref = ctypes.c_void_p()
+                status = carbon.RegisterEventHotKey(
+                    key_code,
+                    modifiers,
+                    hk,
+                    app_target,
+                    0,
+                    ctypes.byref(ref),
+                )
+                if status != 0:
+                    self.logger.error(
+                        "event=hotkey_policy_register_failed action=%s label=%s status=%s",
+                        action,
+                        label,
+                        status,
+                    )
+                    continue
+                self._policy_refs[name] = ref
+                self.logger.info(
+                    "event=hotkey_policy_armed action=%s label=%s", action, label
+                )
+            elif not armed and name in self._policy_refs:
+                ref = self._policy_refs.pop(name)
+                try:
+                    carbon.UnregisterEventHotKey(ref)
+                except Exception:
+                    pass
+                action = _POLICY_SPECS[name][2]
+                self.logger.info("event=hotkey_policy_disarmed action=%s", action)
 
     def _register_carbon(self) -> None:
         lib_name = ctypes.util.find_library("Carbon")
@@ -205,11 +302,11 @@ class HotkeyService:
                     err,
                 )
                 return 0
-            idx = int(hotkey_id.id)
-            if idx < 0 or idx >= len(_BINDINGS):
-                service.logger.warning("event=hotkey_unknown_id id=%s", idx)
+            resolved = service._resolve_action(int(hotkey_id.id))
+            if resolved is None:
+                service.logger.warning("event=hotkey_unknown_id id=%s", hotkey_id.id)
                 return 0
-            _key, _mods, action, label = _BINDINGS[idx]
+            action, label = resolved
             try:
                 if kind == _K_EVENT_HOT_KEY_RELEASED:
                     if action in {"cancel", "approve"}:
@@ -295,7 +392,7 @@ class HotkeyService:
             raise RuntimeError(f"InstallEventHandler failed ({err})")
 
         signature = _fourcc("vani")
-        for index, (key_code, modifiers, action, label) in enumerate(_BINDINGS):
+        for index, (key_code, modifiers, action, label) in enumerate(_HOLD_BINDINGS):
             hotkey_id = EventHotKeyID(signature=signature, id=index)
             ref = ctypes.c_void_p()
             status = carbon.RegisterEventHotKey(
@@ -333,6 +430,9 @@ class HotkeyService:
                 "Option+Space / Option+Shift+Space / Control+Option+Space."
             )
 
+        # Apply any policy arming requested before register completed.
+        self._sync_carbon_policy_keys_unlocked()
+
         self.logger.info(
             "event=hotkey_armed count=%s pump=main_thread",
             len(self._hotkey_refs),
@@ -342,7 +442,7 @@ class HotkeyService:
             "  Hold Option+Space           → smart dictation\n"
             "  Hold Option+Shift+Space     → literal\n"
             "  Hold Control+Option+Space   → assistant\n"
-            "  Esc                         → cancel\n"
+            "  Esc / Enter                 → only while recording or confirm\n"
             "Release the chord to stop — the pill vanishes on release.",
             flush=True,
         )
@@ -382,6 +482,10 @@ class HotkeyService:
             self._listener = None
             refs = list(self._hotkey_refs)
             self._hotkey_refs.clear()
+            policy_refs = list(self._policy_refs.values())
+            self._policy_refs.clear()
+            self._policy_cancel = False
+            self._policy_approve = False
             handler_ref = self._handler_ref
             self._handler_ref = ctypes.c_void_p()
             carbon = self._carbon
@@ -406,7 +510,7 @@ class HotkeyService:
                     pass
             return
         if carbon is not None:
-            for ref in refs:
+            for ref in refs + policy_refs:
                 try:
                     carbon.UnregisterEventHotKey(ref)
                 except Exception:
@@ -428,7 +532,7 @@ class HotkeyService:
 
     def _make_cancel(self) -> Callable[[], None]:
         def _cb() -> None:
-            if self.on_cancel is None:
+            if self.on_cancel is None or not self._policy_cancel:
                 return
             try:
                 self.on_cancel()
@@ -439,7 +543,7 @@ class HotkeyService:
 
     def _make_approve(self) -> Callable[[], None]:
         def _cb() -> None:
-            if self.on_approve is None:
+            if self.on_approve is None or not self._policy_approve:
                 return
             try:
                 self.on_approve()

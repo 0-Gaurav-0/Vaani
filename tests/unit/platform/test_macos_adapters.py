@@ -258,13 +258,53 @@ def test_hotkey_service_register_unregister():
     )
     service.register()
     assert started["value"]
-    # Simulate chords.
-    # Find callbacks by inspecting the factory-built listener.
+    # Esc/Enter start disarmed — hold chords still work.
     listener = service._listener
     assert "<alt>+<space>" in listener.mapping
+    assert "<esc>" not in listener.mapping
     listener.mapping["<alt>+<space>"]()
-    listener.mapping["<esc>"]()
     assert triggers == ["smart"]
+
+    service.set_policy_keys(cancel=True, approve=False)
+    assert "<esc>" in listener.mapping
+    listener.mapping["<esc>"]()
     assert cancels == ["cancel"]
+
+    service.set_policy_keys(cancel=False, approve=False)
+    assert "<esc>" not in listener.mapping
     service.unregister()
     assert stopped["value"]
+
+
+def test_macos_set_policy_keys_toggles_enter():
+    from vaani.platform.macos.hotkeys import HotkeyService
+
+    approves: list[str] = []
+
+    class FakeListener:
+        def __init__(self, mapping):
+            self.mapping = mapping
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def join(self):
+            return None
+
+    service = HotkeyService(
+        lambda _m: None,
+        on_approve=lambda: approves.append("ok"),
+        listener_factory=FakeListener,
+    )
+    service.register()
+    assert "<enter>" not in service._listener.mapping
+    service.set_policy_keys(cancel=False, approve=True)
+    assert "<enter>" in service._listener.mapping
+    service._listener.mapping["<enter>"]()
+    assert approves == ["ok"]
+    service.set_policy_keys(cancel=False, approve=False)
+    assert "<enter>" not in service._listener.mapping
+    service.unregister()

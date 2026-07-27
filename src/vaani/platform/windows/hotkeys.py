@@ -45,9 +45,10 @@ def _normalize_key(key: Any) -> str | None:
 
 
 class WindowsHotkeyService:
-    """Ctrl+Space family hold-to-talk; Esc cancels.
+    """Ctrl+Space family hold-to-talk; Esc/Enter only when policy-armed.
 
     Press starts capture; release of the chord (typically Space) stops it.
+    Esc/Enter are gated by ``set_policy_keys`` (callbacks only; never suppressed).
     """
 
     def __init__(
@@ -73,6 +74,8 @@ class WindowsHotkeyService:
         self._press_count = 0
         self._release_count = 0
         self._registered = False
+        self._policy_cancel = False
+        self._policy_approve = False
 
     def register(self) -> None:
         with self._lock:
@@ -83,6 +86,35 @@ class WindowsHotkeyService:
                 return
             self._register_pynput()
             self._registered = True
+
+    def set_policy_keys(self, *, cancel: bool, approve: bool) -> None:
+        """Arm/disarm Esc (cancel) and Enter (approve) callback handling."""
+        with self._lock:
+            cancel_wanted = bool(cancel)
+            approve_wanted = bool(approve)
+            if (
+                cancel_wanted == self._policy_cancel
+                and approve_wanted == self._policy_approve
+            ):
+                return
+            self._policy_cancel = cancel_wanted
+            self._policy_approve = approve_wanted
+            if self._listener is not None and self._listener_factory is not None:
+                self._sync_test_policy_mapping()
+
+    def _sync_test_policy_mapping(self) -> None:
+        listener = self._listener
+        if listener is None:
+            return
+        press = getattr(listener, "press", None)
+        if not isinstance(press, dict):
+            return
+        press.pop("<esc>", None)
+        press.pop("<enter>", None)
+        if self._policy_cancel and self.on_cancel is not None:
+            press["<esc>"] = self._make_cancel()
+        if self._policy_approve and self.on_approve is not None:
+            press["<enter>"] = self._make_approve()
 
     def _register_test_factory(self) -> None:
         press_mapping: dict[str, Callable[[], None]] = {
@@ -95,10 +127,6 @@ class WindowsHotkeyService:
             "<ctrl>+<shift>+<space>": self._make_release(LITERAL),
             "<ctrl>+<alt>+<space>": self._make_release(ASSISTANT),
         }
-        if self.on_cancel is not None:
-            press_mapping["<esc>"] = self._make_cancel()
-        if self.on_approve is not None:
-            press_mapping["<enter>"] = self._make_approve()
         factory = self._listener_factory
         try:
             listener = factory(press_mapping, release_mapping)
@@ -109,6 +137,7 @@ class WindowsHotkeyService:
             start()
         self._listener = listener
         self._registered = True
+        self._sync_test_policy_mapping()
 
     def _register_pynput(self) -> None:
         from pynput import keyboard
@@ -120,22 +149,24 @@ class WindowsHotkeyService:
             if token is None:
                 return
             if token == "esc":
+                if not service._policy_cancel or service.on_cancel is None:
+                    return
                 service.logger.info("event=hotkey_pressed action=cancel label=Esc")
                 print("[vaani] hotkey pressed: Esc (cancel)", flush=True)
-                if service.on_cancel is not None:
-                    try:
-                        service.on_cancel()
-                    except Exception:
-                        service.logger.exception("event=hotkey_cancel_error")
+                try:
+                    service.on_cancel()
+                except Exception:
+                    service.logger.exception("event=hotkey_cancel_error")
                 return
             if token == "enter":
+                if not service._policy_approve or service.on_approve is None:
+                    return
                 service.logger.info("event=hotkey_pressed action=approve label=Enter")
                 print("[vaani] hotkey pressed: Enter (approve)", flush=True)
-                if service.on_approve is not None:
-                    try:
-                        service.on_approve()
-                    except Exception:
-                        service.logger.exception("event=hotkey_approve_error")
+                try:
+                    service.on_approve()
+                except Exception:
+                    service.logger.exception("event=hotkey_approve_error")
                 return
             service._pressed.add(token)
             action = service._match_action()
@@ -210,8 +241,7 @@ class WindowsHotkeyService:
             "  Hold Ctrl+Space           → smart dictation\n"
             "  Hold Ctrl+Shift+Space     → literal\n"
             "  Hold Ctrl+Alt+Space       → assistant\n"
-            "  Esc                       → cancel / reject confirm\n"
-            "  Enter                     → approve confirm\n"
+            "  Esc / Enter               → only while recording or confirm\n"
             "Release the chord to stop — the pill switches to processing.",
             flush=True,
         )
@@ -242,6 +272,8 @@ class WindowsHotkeyService:
             self._registered = False
             self._held_action = None
             self._pressed.clear()
+            self._policy_cancel = False
+            self._policy_approve = False
         self.logger.info(
             "event=hotkey_unregister presses=%s releases=%s",
             self._press_count,
@@ -286,7 +318,7 @@ class WindowsHotkeyService:
 
     def _make_cancel(self) -> Callable[[], None]:
         def _cb() -> None:
-            if self.on_cancel is None:
+            if self.on_cancel is None or not self._policy_cancel:
                 return
             try:
                 self.on_cancel()
@@ -297,7 +329,7 @@ class WindowsHotkeyService:
 
     def _make_approve(self) -> Callable[[], None]:
         def _cb() -> None:
-            if self.on_approve is None:
+            if self.on_approve is None or not self._policy_approve:
                 return
             try:
                 self.on_approve()

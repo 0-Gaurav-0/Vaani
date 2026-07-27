@@ -150,10 +150,12 @@ def run_macos(settings: Settings) -> int:
         logger.info("event=startup_macos log=%s debug=%s", log_path, settings.debug)
         logger.info("hotkey interpreter paths: %s", ", ".join(python_paths()))
         hotkeys.register()
+        controller._sync_policy_hotkeys()
         logger.info(
             "startup complete; hold Option+Space to dictate "
             "(release to stop); Option+Shift+Space literal; "
-            "Control+Option+Space assistant"
+            "Control+Option+Space assistant; "
+            "Esc/Enter only while recording or confirm"
         )
         signal.signal(signal.SIGINT, request_shutdown)
         signal.signal(signal.SIGTERM, request_shutdown)

@@ -179,10 +179,12 @@ def run_windows(settings: Settings) -> int:
         logger.info("hotkey interpreter paths: %s", ", ".join(python_paths()))
         print(setup_help_text(brief=True), flush=True)
         hotkeys.register()
+        controller._sync_policy_hotkeys()
         logger.info(
             "startup complete; hold Ctrl+Space to dictate "
             "(release to stop); Ctrl+Shift+Space literal; "
-            "Ctrl+Alt+Space assistant"
+            "Ctrl+Alt+Space assistant; "
+            "Esc/Enter only while recording or confirm"
         )
         signal.signal(signal.SIGINT, request_shutdown)
         try:
