@@ -19,6 +19,8 @@ class GroqModelSettings:
     # Instant 8B is much faster than gpt-oss-120b for cleanup; quality is enough
     # for punctuation / light Hinglish cleanup.
     cleanup_model: str = "llama-3.1-8b-instant"
+    # Fast structured parse; falls back to cleanup_model when unset.
+    parse_model: str | None = None
     response_format: str = "verbose_json"
     max_completion_tokens: int = 4096
 

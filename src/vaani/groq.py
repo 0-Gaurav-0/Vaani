@@ -296,3 +296,67 @@ class GroqClient:
             raise
         except Exception:
             return CleanupResult(_fallback(question), True)
+
+    def parse_intent(
+        self,
+        system: str,
+        user: str,
+        key: str,
+        *,
+        cancel: Event | None = None,
+        deadline: float = 1.5,
+    ) -> str | None:
+        """Fast structured chat completion for intent/plan JSON. Soft-fails to None."""
+        model = self.settings.parse_model or self.settings.cleanup_model
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": 1024,
+            "temperature": 0,
+        }
+        started = self._clock()
+        try:
+            self._logger.info("event=groq_parse_start model=%s deadline=%s", model, deadline)
+            response = self._request(
+                "POST",
+                "/chat/completions",
+                key,
+                deadline=deadline,
+                cancel=cancel,
+                json=payload,
+            )
+            if cancel and cancel.is_set():
+                raise GroqError("cancelled", "request cancelled")
+            if response.status_code >= 400:
+                return None
+            try:
+                value = response.json()["choices"][0]["message"]["content"]
+            except (ValueError, KeyError, IndexError, TypeError):
+                return None
+            if not isinstance(value, str):
+                return None
+            cleaned = value.strip()
+            if cleaned.startswith("```") and cleaned.endswith("```"):
+                if "\n" not in cleaned:
+                    cleaned = cleaned[3:-3].strip()
+                else:
+                    first, _, rest = cleaned.partition("\n")
+                    if first == "```" or re.fullmatch(r"```[\w-]+", first):
+                        cleaned = rest[:-3].strip()
+            if not cleaned:
+                return None
+            self._logger.info(
+                "event=groq_parse_done chars=%s elapsed=%.2f",
+                len(cleaned),
+                self._clock() - started,
+            )
+            return cleaned
+        except GroqError as exc:
+            if exc.category == "cancelled":
+                raise
+            return None
+        except Exception:
+            return None
