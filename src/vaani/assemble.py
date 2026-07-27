@@ -11,9 +11,13 @@ from .exec.agent import AgentRunner
 from .exec.supervisor import Supervisor
 from .groq import GroqClient
 from .history import HistoryStore
+from .intent.llm import make_llm_parse
+from .intent.plan_exec import PlanExecutor
+from .intent.schema import Intent
 from .observability import configure_logging
 from .platform import detect_os
 from .platform.protocol import PlatformBundle
+from .policy.dryrun import dispatch
 from .secrets import effective_key
 from .surface.result import make_assistant_sink
 
@@ -94,6 +98,37 @@ def assemble(
     )
     controller.codex = agent
     controller.agent = agent
+
+    # Grammar miss → Groq LLM plan parser; multi-step plans via PlanExecutor.
+    llm_parse = make_llm_parse(
+        groq,
+        controller.key_provider,
+        controller.registry,
+        detect_os,
+    )
+    controller.router.llm_parse = llm_parse
+
+    def _materialize_plan_step(step: Any, verb: Any, context: Any) -> tuple[str, ...]:
+        intent = Intent(
+            verb=verb.name,
+            slots=dict(step.slots),
+            rung=verb.rung,
+            confidence=1.0,
+            source="llm",
+            mode="act",
+            utterance="",
+            raw_utterance="",
+            modifiers=frozenset(),
+            brain=None,
+        )
+        return controller._materialize(intent, context.platform, context)
+
+    controller.plan_executor = PlanExecutor(
+        registry=controller.registry,
+        dispatch=dispatch,
+        materialize=_materialize_plan_step,
+    )
+
     return Assembly(
         controller=controller,
         history=history,
