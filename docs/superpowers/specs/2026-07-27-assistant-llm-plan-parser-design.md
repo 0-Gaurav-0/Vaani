@@ -49,6 +49,7 @@ The ladder already reserved the missing middle rung: *grammar → LLM parse → 
 |---|---|
 | Model host | **Groq** chat completions (reuse API key + HTTP client patterns) |
 | Model role | **Parse / plan only** — not execution |
+| OS handling | **One parse model**; prompt + enabled catalog built per `PlatformId` at runtime |
 | Confirm multi-step | **B** — run R0/R1; pause at first R2+; continue after approve |
 | Agent | Only via wake phrase **or** explicit LLM `delegate` when no catalog fit |
 | Grammar | Always wins when it matches; LLM not consulted |
@@ -107,27 +108,42 @@ Router continues to return a single `Intent` for the grammar path. The controlle
 
 Single grammar hits can be wrapped as a one-step plan at the controller boundary so execution is uniform.
 
-### 4.2 Catalog card (prompt input)
+### 4.2 Runtime OS embedding (shared brain, OS-shaped prompt)
 
-Built each request from `Registry.enabled(platform)` — compact, not full handler docs:
+**Shared across OSes:** transcription (Groq STT), normalize/lexicon, grammar miss → parse LLM → plan / delegate / refuse, PlanExecutor + confirm policy B, agent wake phrase.
+
+**OS-specific at runtime (not separate models):** the parse prompt is assembled on the host so the model only sees what this OS can actually run.
+
+| Prompt slice | Source | Why |
+|---|---|---|
+| `platform` | `detect_os()` → `macos` \| `linux` \| `windows` | Model prefers OS-native names/slots |
+| `verbs[]` | `Registry.enabled(platform)` only | Drops `UNSUPPORTED` verbs (e.g. Wayland window ops) |
+| `support` note | `DEGRADED` flag + short note when present | Honest (“volume may be approximate on Windows”) |
+| `examples` / aliases | Small per-OS hint block (optional, ≤ ~15 lines) | e.g. macOS: “Terminal”, “Google Chrome”; Windows: “cmd”, “powershell”; Linux: “nautilus” vs “xdg-open” |
+| `focus` / workspace | Context providers on this OS | Basename only; no secrets |
 
 ```json
 {
+  "platform": "macos",
+  "platform_notes": "Use macOS app names (Google Chrome, Terminal, Brave Browser). Prefer app.open/window.focus over shell.",
   "verbs": [
     {
       "name": "site.search",
       "title": "Search the web",
       "slots": {"query": "str", "browser": "str?"},
       "risk": "R0",
-      "rung": 1
+      "rung": 1,
+      "support": "supported"
     }
   ]
 }
 ```
 
-Omit `agent.task` from the tool list shown to the parse model (delegation is a separate output channel). Cap prompt size: titles + slot names only; drop pack-internal verbs if needed later.
+Handlers stay OS-specific under `platform/<os>/` — the LLM never emits argv. It only picks **verb + slots**; the existing pack handler + SystemControl/WindowControl for that OS do the real work. That is how “OS commands differ” without forking the understanding stack.
 
-Optional context blurb (short): focused app name, workspace basename — never secrets, never full paths with home expansion dumps.
+Omit `agent.task` from the verb list (delegation is a separate output channel). Cap prompt size: titles + slot names + short `platform_notes`; drop pack-internal verbs if needed later.
+
+Optional context blurb (short): focused app name, workspace basename — never secrets, never full home-path dumps.
 
 ### 4.3 Model output (JSON only)
 
