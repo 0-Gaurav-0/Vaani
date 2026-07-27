@@ -18,7 +18,8 @@ from .types import AppState, DictationMode
 from .observability import exception_category, sanitize
 from .groq import GroqError
 from .apps import launch_app, resolve_app
-from .sites import resolve_site
+from .sites import resolve_site, resolve_youtube
+from .skills import load_skill_index, match_skill
 from .indicator_protocol import clear_command, read_command
 
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
@@ -84,8 +85,12 @@ class Controller:
             # While Groq is working, ignore new dictation — keep the processing pill.
             if self.state is AppState.PROCESSING:
                 self._emit("busy")
-                self.logger.info("event=input_blocked reason=processing")
+                # Avoid flooding the log when the middle button is held through processing.
+                if not getattr(self, "_logged_processing_block", False):
+                    self.logger.info("event=input_blocked reason=processing")
+                    self._logged_processing_block = True
                 return False
+            self._logged_processing_block = False
             if self.state is not AppState.IDLE:
                 self._emit("busy")
                 self._feedback("busy")
@@ -135,6 +140,16 @@ class Controller:
         try: audio = self.recorder.stop()
         except Exception as exc:
             self._amplitude_stop.set()
+            # Accidental click / bounce: treat too-short clips as a quiet cancel.
+            detail = str(exc).lower()
+            if "duration out of range" in detail or "invalid audio" in detail:
+                try: self.recorder.cleanup()
+                except Exception: pass
+                with self._lock:
+                    self.state = AppState.IDLE
+                self._emit("cancelled")
+                self.logger.info("event=recording_ignored reason=too_short")
+                return False
             self._fail(exc, "mic")
             return False
         worker = threading.Thread(target=self._process, args=(token, audio), daemon=True)
@@ -157,6 +172,7 @@ class Controller:
                     pass
                 self.state = AppState.IDLE
                 self._feedback("busy"); self._emit("cancelled"); return True
+        self.logger.info("event=cancel_ignored state=%s", getattr(self.state, "name", self.state))
         return False
 
     def _poll_indicator_control(self) -> None:
@@ -238,8 +254,10 @@ class Controller:
                 float(getattr(audio, "duration_seconds", 0) or 0),
                 size,
             )
-            result = self.groq.transcribe(audio.path, key, cancel=self._cancel, delete_audio=True,
-                                          language="en" if self.mode == "assistant" else None)
+            # Always Latin/Hinglish path: auto language often mislabels Hindi as Urdu/Arabic.
+            result = self.groq.transcribe(
+                audio.path, key, cancel=self._cancel, delete_audio=True, language="en"
+            )
             if self._cancel.is_set() or token != self._token: return
             raw = result.text; final = raw; cleanup_status = "skipped"; history_mode = self.mode or "literal"
             prefix, question = normalize_answer_prefix(raw)
@@ -255,6 +273,7 @@ class Controller:
                     else resolve_app(raw)
                 )
                 if app:
+                    self.logger.info("event=assistant_route kind=app name=%s", app.name)
                     answer = (
                         self.app_launcher.launch(app)
                         if self.app_launcher is not None
@@ -269,9 +288,13 @@ class Controller:
                                             duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000))
                         self.state = AppState.IDLE; self._emit("assistant_complete"); self._feedback("success")
                     return
-                site = resolve_site(raw)
+                site = resolve_youtube(raw) or resolve_site(raw)
                 browser = self._browser_intent(raw)
                 if site or browser:
+                    self.logger.info(
+                        "event=assistant_route kind=browser site=%s",
+                        getattr(site, "name", "") or "blank",
+                    )
                     url = site.url if site else "about:blank"
                     requested = site.browser if site else ("chrome" if "chrome" in raw.casefold() else "brave")
                     prefer = "chrome" if requested == "chrome" else "brave"
@@ -292,6 +315,40 @@ class Controller:
                     return
                 if self.codex is None:
                     raise RuntimeError("assistant runner unavailable")
+                skills = load_skill_index()
+                skill = match_skill(raw, skills)
+                if skill is not None and hasattr(self.codex, "run_skill"):
+                    mcp_list = list(skill.mcps)
+                    self.logger.info(
+                        "event=assistant_route kind=skill id=%s mcps=%s",
+                        skill.id,
+                        ",".join(mcp_list) or "-",
+                    )
+                    self._feedback("processing")
+                    answer = self.codex.run_skill(
+                        skill.body(), raw, mcps=mcp_list
+                    )
+                    if self.result_window is not None and hasattr(self.result_window, "show"):
+                        self.result_window.show(answer)
+                    if getattr(answer, "cancelled", False) or getattr(answer, "timed_out", False):
+                        raise RuntimeError("assistant skill cancelled or timed out")
+                    final = (answer.stdout or answer.stderr or "").strip() or "Skill finished with no output."
+                    with self._lock:
+                        if self._cancel.is_set() or token != self._token: return
+                        self.history.insert(
+                            raw_text=raw,
+                            final_text=final,
+                            mode="assistant",
+                            delivery_status="displayed",
+                            cleanup_status="skill_action",
+                            duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+                        )
+                        self.state = AppState.IDLE
+                        self._emit("assistant_complete")
+                        self._feedback("success")
+                    return
+                self.logger.info("event=assistant_route kind=codex chars=%s", len(raw))
+                self._feedback("processing")
                 answer = self.codex.run(raw)
                 if self.result_window is not None and hasattr(self.result_window, "show"):
                     self.result_window.show(answer)

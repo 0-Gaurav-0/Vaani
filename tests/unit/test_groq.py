@@ -15,6 +15,7 @@ def test_models_and_transcription_multipart(tmp_path):
         seen.append(req)
         if req.url.path.endswith('/models'): return httpx.Response(200,json={'data':[{'id':'whisper-large-v3-turbo'}]})
         body=req.read(); assert b'whisper-large-v3-turbo' in body and b'response_format' in body
+        assert b'language' in body and b'prompt' in body and b'Hinglish' in body
         return httpx.Response(200,json={'text':' hello ','language':'en'})
     p=tmp_path/'x.wav'; p.write_bytes(b'RIFF')
     c=client(h); assert c.models('secret')[1] is False; assert c.transcribe(p,'secret').text=='hello'; assert len(seen)==2

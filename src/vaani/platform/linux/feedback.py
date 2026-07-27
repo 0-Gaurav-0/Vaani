@@ -96,6 +96,7 @@ class LinuxFeedback:
         if self.control_path:
             env["VAANI_INDICATOR_CONTROL"] = self.control_path
         env["VAANI_INDICATOR_PHASE"] = self.phase_path
+        env["VAANI_DAEMON_PID"] = str(os.getpid())
         try:
             write_phase(self.phase_path, "recording")
         except Exception:

@@ -10,12 +10,13 @@ dependencies = [
   "httpx",
   "keyring",
   "python-xlib; sys_platform == 'linux'",
+  "jeepney; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
 macos = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
 windows = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
-linux = ["python-xlib"]
+linux = ["python-xlib", "jeepney"]
 
 [project.scripts]
 vaani = "vaani.__main__:main"

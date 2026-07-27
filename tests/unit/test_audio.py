@@ -57,3 +57,32 @@ def test_startup_sweep_owned_files_only(tmp_path):
     link=d/'link'; link.symlink_to(own)
     sweep_audio_directory(d, uid=os.getuid())
     assert not own.exists() and link.is_symlink()
+
+
+def test_reap_orphan_parec_matches_vaani_argv_only(monkeypatch):
+    from vaani import audio as audio_mod
+
+    calls = []
+
+    def fake_check_output(argv, **kwargs):
+        return " 1111 fake-recorder --rate=16000\n 2222 parec --device=@DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le --file-format=wav\n"
+
+    def fake_kill(pid, sig):
+        calls.append((pid, sig))
+
+    monkeypatch.setattr(audio_mod.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(audio_mod.os, "kill", fake_kill)
+    monkeypatch.setattr(audio_mod.time, "sleep", lambda _s: None)
+    # Second ps pass empty so no SIGKILL follow-up.
+    seen = {"n": 0}
+
+    def check_output2(argv, **kwargs):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return fake_check_output(argv, **kwargs)
+        return ""
+
+    monkeypatch.setattr(audio_mod.subprocess, "check_output", check_output2)
+    killed = audio_mod.reap_orphan_parec()
+    assert killed == 1
+    assert calls and calls[0][0] == 2222

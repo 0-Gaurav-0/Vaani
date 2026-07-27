@@ -8,7 +8,10 @@ def test_resolves_desktop_app_aliases():
     assert resolve_app("Launch the Terminal").name == "Terminal"
     assert resolve_app("Start Text Editor").name == "Text Editor"
     assert resolve_app("Open VS Code").name == "Visual Studio Code"
+    assert resolve_app("Open vscode").name == "Visual Studio Code"
+    assert resolve_app("Open code").name == "Visual Studio Code"
     assert resolve_app("Show Files").name == "Files"
+    assert resolve_app("Cursor kholo").name == "Cursor"
 
 
 def test_resolves_installed_work_and_system_apps():

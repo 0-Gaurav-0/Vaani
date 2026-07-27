@@ -2,18 +2,19 @@
 from __future__ import annotations
 
 import os
+import select
 import signal
 import subprocess
 import sys
 
-from ...audio import AudioRecorderImpl
+from ...audio import AudioRecorderImpl, reap_orphan_parec
 from ...codex import CodexRunner, ResultWindow
 from ...config import Settings, sweep_audio_directory
 from ...controller import Controller
 from ...delivery import ClipboardDelivery
 from ...groq import GroqClient
 from ...history import HistoryStore
-from ...hotkeys import HotkeyManager, XInputHotkeyManager
+from ...hotkeys import MiddleButtonHotkeyManager
 from ...observability import configure_logging
 from ...secrets import SecretServiceKeyStore, effective_key
 from ...x11 import X11Probe
@@ -39,6 +40,16 @@ def _reap_orphan_indicators() -> None:
             )
         except Exception:
             pass
+
+
+def _reap_orphan_mic() -> None:
+    """Release the microphone if a prior Vaani crash left ``parec`` running."""
+    try:
+        killed = reap_orphan_parec()
+        if killed:
+            print(f"[vaani] released mic: reaped {killed} orphan recorder(s)", flush=True)
+    except Exception:
+        pass
 
 
 def build_linux(settings: Settings | None = None) -> PlatformBundle:
@@ -88,8 +99,34 @@ class _NoopDelivery:
         raise RuntimeError("use platform.run() to construct live Linux delivery")
 
 
+def _detect_display_backend(env: dict | None = None) -> str:
+    """Pick the Linux backend: Wayland if the session is Wayland, else X11.
+
+    ``WAYLAND_DISPLAY`` is the primary signal (set by the compositor for any
+    Wayland session, GNOME/KDE/Sway alike); ``XDG_SESSION_TYPE=wayland`` is
+    the fallback for the rare case a Wayland compositor doesn't set the
+    former. Anything else (including XWayland-only setups, which still
+    export ``DISPLAY``) defaults to the existing X11 backend.
+    """
+    env = env if env is not None else os.environ
+    if env.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    if env.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+        return "wayland"
+    return "x11"
+
+
 def run_linux(settings: Settings) -> int:
+    if _detect_display_backend() == "wayland":
+        from .wayland.runtime import run_wayland
+
+        return run_wayland(settings)
+    return _run_x11(settings)
+
+
+def _run_x11(settings: Settings) -> int:
     _reap_orphan_indicators()
+    _reap_orphan_mic()
     sweep_audio_directory(settings.audio_dir)
     os.environ["VAANI_AMPLITUDE_PATH"] = str(settings.amplitude_path)
     os.environ["VAANI_INDICATOR_CONTROL"] = str(settings.indicator_control_path)
@@ -101,8 +138,7 @@ def run_linux(settings: Settings) -> int:
     except Exception as exc:
         logger.error("startup failure category=shortcut detail=%s", type(exc).__name__)
         print(
-            "[vaani] X11 display unavailable — global hotkeys need X11 "
-            "(Wayland: use XWayland or an X11 session). "
+            "[vaani] X11 display unavailable — no X server reachable. "
             f"detail={type(exc).__name__}",
             file=sys.stderr,
             flush=True,
@@ -144,14 +180,16 @@ def run_linux(settings: Settings) -> int:
     controller.codex = assistant
     controller.result_window = ResultWindow(show_assistant_result)
 
-    def on_hotkey_press(mode: str) -> None:
-        # Hold-to-talk: press starts. Block entirely while PROCESSING.
+    def on_hotkey_press(mode: str) -> bool:
+        # Hold-to-talk: press starts. Ignore repeats while already capturing.
         from ...types import AppState
 
         if controller.state is AppState.PROCESSING:
             logger.info("event=input_blocked reason=processing source=press")
-            return
-        controller.trigger(mode)
+            return False
+        if controller.state is AppState.RECORDING:
+            return False
+        return bool(controller.trigger(mode))
 
     def on_hotkey_release(_mode: str) -> None:
         from ...types import AppState
@@ -161,16 +199,25 @@ def run_linux(settings: Settings) -> int:
         # Release stops capture; pill switches to processing animation.
         controller.stop()
 
+    def on_signal_toggle(_signum=None, _frame=None):
+        # vaani-toggle script / optional external binding: press toggles start/stop.
+        from ...types import AppState
+
+        if controller.state is AppState.RECORDING:
+            controller.stop()
+        elif controller.state is AppState.IDLE:
+            controller.trigger("smart")
+        else:
+            logger.info("event=input_blocked reason=processing source=signal")
+
     def assistant_trigger(_signum=None, _frame=None):
         on_hotkey_press("assistant")
 
-    hotkeys = HotkeyManager(
-        on_hotkey_press, display=display, on_release=on_hotkey_release
+    # Middle button owns hold-to-talk on ThinkPads; Ctrl+Space stays with the desktop.
+    hotkeys = MiddleButtonHotkeyManager(
+        on_hotkey_press, on_release=on_hotkey_release, on_cancel=controller.cancel
     )
     controller.hotkeys = hotkeys
-    escape_monitor = XInputHotkeyManager(
-        on_hotkey_press, on_cancel=controller.cancel
-    )
     try:
         log_path = settings.log_dir / "vaani.log"
         session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
@@ -179,39 +226,47 @@ def run_linux(settings: Settings) -> int:
             f"[vaani] debug={'on' if settings.debug else 'off'} (use --debug)",
             flush=True,
         )
-        print(f"[vaani] session={session_type} (X11 hotkeys; Wayland needs XWayland)", flush=True)
+        print(
+            f"[vaani] session={session_type} (middle-button hold-to-talk; X11 used for paste)",
+            flush=True,
+        )
         logger.info(
-            "event=startup_linux log=%s debug=%s session=%s",
+            "event=startup_linux log=%s debug=%s session=%s backend=middle-button",
             log_path,
             settings.debug,
             session_type,
         )
         hotkeys.register()
-        escape_monitor.register()
         logger.info(
-            "startup complete; hold Ctrl+Space to dictate (release to stop); "
-            "Ctrl+Shift+Space literal; Ctrl+Alt+Space assistant; Esc cancels"
+            "startup complete; hold ThinkPad middle button to dictate (release to stop); "
+            "double-press+hold for assistant; Esc cancels; Ctrl+Space is not used"
         )
         print(
-            "Vaani hotkeys ready (hold-to-talk):\n"
-            "  Hold Ctrl+Space           → smart dictation\n"
-            "  Hold Ctrl+Shift+Space     → literal\n"
-            "  Hold Ctrl+Alt+Space       → assistant\n"
-            "  Esc                       → cancel\n"
-            "Release the chord to stop — pill stays up while processing.",
+            "Vaani hotkeys ready (ThinkPad middle button):\n"
+            "  Hold middle button              → smart dictation\n"
+            "  Double-press + hold middle      → assistant\n"
+            "  Esc                             → cancel\n"
+            "Release to stop — pill stays up while processing.\n"
+            "Ctrl+Space is left for the desktop / IME.\n"
+            "Assistant: say “open …” / “play … on YouTube” for fast actions;\n"
+            "  say “run the <skill> skill …” for Agent Skills (lazy MCP);\n"
+            "  other requests use isolated Codex (up to ~30s).",
             flush=True,
         )
         signal.signal(signal.SIGINT, lambda *_: controller.shutdown())
         signal.signal(signal.SIGTERM, lambda *_: controller.shutdown())
-        signal.signal(signal.SIGUSR1, lambda *_: on_hotkey_press("smart"))
+        signal.signal(signal.SIGUSR1, on_signal_toggle)
         signal.signal(signal.SIGUSR2, lambda *_: controller.cancel())
         assistant_signal = getattr(
             signal, "SIGUSR3", getattr(signal, "SIGRTMIN", signal.SIGUSR1 + 2)
         )
         signal.signal(assistant_signal, assistant_trigger)
         while not controller._shutdown:
-            event = display.next_event()
-            hotkeys.handle_event(event)
+            # Keep the X11 connection drained for clipboard/focus helpers.
+            readable, _, _ = select.select([display.fileno()], [], [], 0.2)
+            if readable or display.pending_events():
+                while display.pending_events():
+                    display.next_event()
     except KeyboardInterrupt:
         controller.shutdown()
     except Exception as exc:
@@ -224,9 +279,16 @@ def run_linux(settings: Settings) -> int:
         controller.shutdown()
         return 1
     finally:
-        escape_monitor.unregister()
         try:
             hotkeys.unregister()
+        except Exception:
+            pass
+        try:
+            recorder.cleanup()
+        except Exception:
+            pass
+        try:
+            _reap_orphan_mic()
         except Exception:
             pass
         try:
