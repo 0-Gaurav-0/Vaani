@@ -1,8 +1,9 @@
 """Interrogative detection for act-mode safety (T2.5 / parallel-agents §0).
 
-Guide/screen-offer is deferred. Interrogatives that resolve to mutating verbs
-(R2+) refuse with a short "say it as a command" nudge — never execute, never
-stage confirm, never open guide.
+Interrogatives that resolve to mutating verbs (R2+) refuse with a short
+"say it as a command" nudge — never execute or stage confirmation. R0 guide
+verbs may handle their own grammar hits, such as safe screen pointers and
+how-to offers.
 """
 from __future__ import annotations
 
