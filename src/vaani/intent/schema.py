@@ -117,6 +117,26 @@ class Intent:
 
 
 @dataclass(frozen=True)
+class PlanStep:
+    verb: str
+    slots: Mapping[str, Any]
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class IntentPlan:
+    """Ordered executable plan from the parse LLM (or a single grammar hit wrapped)."""
+
+    steps: tuple[PlanStep, ...]
+    utterance: str
+    raw_utterance: str
+    source: str  # "llm" | "grammar"
+    confidence: float
+    delegate_prompt: str | None = None
+    refuse_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class Context:
     platform: PlatformId
     workspace: Path | None
