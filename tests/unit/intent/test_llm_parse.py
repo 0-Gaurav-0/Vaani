@@ -262,6 +262,22 @@ def test_make_llm_parse_returns_none_on_bad_json() -> None:
     assert parse("hello") is None
 
 
+def test_loads_json_extracts_object_from_prose() -> None:
+    from vaani.intent.llm import _loads_json
+
+    wrapped = (
+        'Sure, here is the plan:\n'
+        '{"action":"plan","confidence":0.9,"steps":'
+        '[{"verb":"site.search","slots":{"query":"Zapto"}}],'
+        '"delegate_prompt":null,"refuse_reason":null}\n'
+        "Hope that helps!"
+    )
+    payload = _loads_json(wrapped)
+    assert isinstance(payload, dict)
+    assert payload["action"] == "plan"
+    assert payload["steps"][0]["verb"] == "site.search"
+
+
 def test_make_llm_parse_returns_none_when_groq_raises() -> None:
     class BoomGroq:
         def parse_intent(self, *_a: object, **_k: object) -> str:

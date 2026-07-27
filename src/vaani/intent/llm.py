@@ -18,13 +18,15 @@ _logger = logging.getLogger(__name__)
 
 PARSE_SYSTEM_PROMPT = """\
 You are Vaani's intent compiler, not a chat assistant.
-Emit JSON only with keys: action (plan|delegate|refuse), confidence, steps, \
-delegate_prompt, refuse_reason.
-Honor platform and platform_notes from the catalog. Use only verbs listed there.
-Prefer the smallest plan that fulfills the utterance. Compounds → ordered steps.
-Refuse polite chit-chat / thanks (noop) — never delegate those.
-Delegate only when the catalog cannot express the ask (coding / multi-file / unclear).
-Never invent shell commands or verbs not in the catalog.
+Reply with ONE JSON object only — no prose, no markdown, do not echo the catalog.
+Keys: action (plan|delegate|refuse), confidence (0-1), steps (array), \
+delegate_prompt (string|null), refuse_reason (string|null).
+Each step: {"verb":"<catalog name>","slots":{...}}.
+Honor platform and platform_notes. Use only verbs listed in the catalog.
+Prefer the smallest plan. Compounds → ordered steps (e.g. app.open then site.search).
+Refuse polite chit-chat / thanks. Delegate only when no catalog verb fits.
+Never invent shell commands or verbs.
+Example: {"action":"plan","confidence":0.9,"steps":[{"verb":"app.open","slots":{"name":"Google Chrome"}},{"verb":"site.search","slots":{"query":"Zapto"}}],"delegate_prompt":null,"refuse_reason":null}
 """
 
 
@@ -122,10 +124,23 @@ def make_llm_parse(
                 key,
             )
             if not raw_text:
+                _logger.info(
+                    "event=llm_parse_stage stage=understand status=empty_response utterance=%r",
+                    utterance[:120],
+                )
                 return None
+            _logger.info(
+                "event=llm_parse_stage stage=understand status=raw chars=%s preview=%r",
+                len(raw_text),
+                raw_text[:400],
+            )
             payload = _loads_json(raw_text)
             if payload is None:
-                _logger.debug("event=llm_parse status=bad_json")
+                _logger.info(
+                    "event=llm_parse_stage stage=understand status=bad_json chars=%s preview=%r",
+                    len(raw_text),
+                    raw_text[:400],
+                )
                 return None
             enabled = {verb.name: verb for verb in registry.enabled(platform)}
             plan = validate_plan_payload(
@@ -135,7 +150,10 @@ def make_llm_parse(
                 raw_utterance=utterance,
             )
             if plan is None:
-                _logger.debug("event=llm_parse status=invalid_plan")
+                _logger.info(
+                    "event=llm_parse_stage stage=understand status=invalid_plan payload=%r",
+                    _safe_preview(payload),
+                )
                 return None
             action = (
                 "refuse"
@@ -145,31 +163,101 @@ def make_llm_parse(
                 else "plan"
             )
             _logger.info(
-                "event=llm_parse action=%s steps=%s",
+                "event=llm_parse_stage stage=understand status=ok action=%s steps=%s plan=%s",
                 action,
                 len(plan.steps),
+                _format_plan_steps(plan),
             )
             return plan
         except Exception:
-            _logger.debug("event=llm_parse status=error", exc_info=True)
+            _logger.info("event=llm_parse_stage stage=understand status=error", exc_info=True)
             return None
 
     return llm_parse
 
 
+def _format_plan_steps(plan: IntentPlan) -> str:
+    if plan.refuse_reason:
+        return f"refuse:{plan.refuse_reason[:80]}"
+    if plan.delegate_prompt:
+        return f"delegate:{plan.delegate_prompt[:80]}"
+    parts: list[str] = []
+    for step in plan.steps:
+        slot_bits = ",".join(f"{k}={v!r}" for k, v in step.slots.items())
+        parts.append(f"{step.verb}({slot_bits})")
+    return " -> ".join(parts) if parts else "(empty)"
+
+
+def _safe_preview(payload: object) -> str:
+    try:
+        text = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(payload)
+    return text[:400]
+
+
 def _loads_json(text: str) -> object | None:
-    cleaned = text.strip()
-    if cleaned.startswith("```") and cleaned.endswith("```"):
-        if "\n" not in cleaned:
-            cleaned = cleaned[3:-3].strip()
-        else:
-            first, _, rest = cleaned.partition("\n")
-            if first == "```" or re.fullmatch(r"```[\w-]+", first):
-                cleaned = rest[:-3].strip()
+    cleaned = _strip_fences(text.strip())
     try:
         return json.loads(cleaned)
     except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    extracted = _extract_json_object(cleaned)
+    if extracted is None:
         return None
+    try:
+        return json.loads(extracted)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _strip_fences(cleaned: str) -> str:
+    if cleaned.startswith("```") and cleaned.endswith("```"):
+        if "\n" not in cleaned:
+            return cleaned[3:-3].strip()
+        first, _, rest = cleaned.partition("\n")
+        if first == "```" or re.fullmatch(r"```[\w-]+", first):
+            return rest[:-3].strip()
+    # Leading fence without matching end (common model glitch).
+    if cleaned.startswith("```"):
+        first, _, rest = cleaned.partition("\n")
+        if first == "```" or re.fullmatch(r"```[\w-]+", first):
+            cleaned = rest
+        else:
+            cleaned = cleaned[3:]
+        if cleaned.rstrip().endswith("```"):
+            cleaned = cleaned.rstrip()[:-3]
+        return cleaned.strip()
+    return cleaned
+
+
+def _extract_json_object(text: str) -> str | None:
+    """Return the first top-level `{...}` slice, ignoring leading/trailing prose."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
 
 
 def _nonempty_steps(raw: object) -> bool:
