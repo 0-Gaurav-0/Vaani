@@ -68,7 +68,14 @@ def procs_patterns() -> tuple[Pattern, ...]:
     return (
         Pattern(
             verb="system.port.free",
-            any_of=(("free port", "kill whatever is on port", "kill the thing on port"),),
+            any_of=(
+                (
+                    "free port",
+                    "kill port",
+                    "kill whatever is on port",
+                    "kill the thing on port",
+                ),
+            ),
             slots=(SlotRule(name="port", regex=r"port\s+(\d+)"),),
             priority=50,
             fixed_slots={"signal": "term"},

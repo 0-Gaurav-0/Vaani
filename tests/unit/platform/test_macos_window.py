@@ -37,9 +37,9 @@ def test_focus_activate_argv():
     assert result.status is Status.OK
     assert result.rung == 4
     assert rec.calls == [
-        ["osascript", "-e", 'tell application "Chrome" to activate']
+        ["osascript", "-e", 'tell application "Google Chrome" to activate']
     ]
-    assert "Chrome" in result.summary
+    assert "Google Chrome" in result.summary
 
 
 def test_focus_ax_denied_no_runner_call():

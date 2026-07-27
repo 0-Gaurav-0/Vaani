@@ -60,6 +60,15 @@ class MacWindowControl:
         blocked = self._ax_block()
         if blocked is not None:
             return blocked
+        # Spoken aliases ("chrome") → native macOS app name ("Google Chrome").
+        try:
+            from vaani.platform.macos.apps import lookup_app
+
+            resolved = lookup_app(name)
+            if resolved is not None:
+                name = resolved.native_name or resolved.name
+        except Exception:
+            pass
         script = f'tell application "{name}" to activate'
         argv = ["osascript", "-e", script]
         return self._run_ok(

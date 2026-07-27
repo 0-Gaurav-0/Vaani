@@ -26,6 +26,9 @@ _BUILTIN: tuple[tuple[str, str], ...] = (
     ("git hub", "github"),
     ("git hub cli", "gh"),
     ("g h", "gh"),
+    # ASR often glues "kill port" / "free port".
+    ("killport", "kill port"),
+    ("freeport", "free port"),
 )
 
 
