@@ -1,6 +1,7 @@
 """Ladder router: grammar first, never an LLM for rung 1/2."""
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from vaani.intent.interrogative import (
 )
 from vaani.intent.lexicon import Lexicon
 from vaani.intent.normalize import detect_modifiers, normalize
-from vaani.intent.schema import Context, Intent
+from vaani.intent.schema import Context, Intent, IntentPlan
 from vaani.intent.wake import parse_agent_wake
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
@@ -72,7 +73,7 @@ class Router:
         *,
         resolve_app: Callable[[str], Any] | None = None,
         resolve_site: Callable[[str], Any] | None = None,
-        llm_parse: Callable[[str], Intent | None] | None = None,
+        llm_parse: Callable[[str], IntentPlan | None] | None = None,
         lexicon: Lexicon | None = None,
         vocab_path: Path | str | None = None,
     ) -> None:
@@ -87,8 +88,8 @@ class Router:
         else:
             self.lexicon = Lexicon.for_matching(vocab_path)
 
-    def route(self, transcript: str, *, platform: PlatformId) -> Intent | None:
-        """Map ``transcript`` to an Intent for ``platform``, or None."""
+    def route(self, transcript: str, *, platform: PlatformId) -> Intent | IntentPlan | None:
+        """Map ``transcript`` to an Intent/IntentPlan for ``platform``, or None."""
         raw = transcript
         modifiers = set(detect_modifiers(transcript))
         interrogative = is_interrogative(raw)
@@ -199,7 +200,25 @@ class Router:
                     modifiers=mods,
                 )
 
-        if "agent.task" in enabled:
+        # Grammar miss → LLM plan parser (before any agent fallback).
+        # refuse / mapped outcomes return immediately (refuse → None, no agent).
+        # parse failure (None / raise) may still hit optional env fallback below.
+        if self.llm_parse is not None:
+            try:
+                plan = self.llm_parse(utterance)
+            except Exception:
+                plan = None
+            if plan is not None:
+                return self._map_llm_plan(
+                    plan,
+                    enabled=enabled,
+                    utterance=utterance,
+                    raw=raw,
+                    mods=mods,
+                )
+
+        # Blind agent.task fallback only behind explicit opt-in.
+        if os.environ.get("VAANI_AGENT_FALLBACK") == "1" and "agent.task" in enabled:
             return self._intent(
                 "agent.task",
                 {"prompt": raw},
@@ -209,6 +228,58 @@ class Router:
                 confidence=0.5,
                 source="fallback",
                 modifiers=mods,
+            )
+        return None
+
+    def _map_llm_plan(
+        self,
+        plan: IntentPlan | None,
+        *,
+        enabled: set[str],
+        utterance: str,
+        raw: str,
+        mods: frozenset[str],
+    ) -> Intent | IntentPlan | None:
+        if plan is None:
+            return None
+        if plan.refuse_reason:
+            return None
+        if plan.delegate_prompt:
+            if "agent.task" not in enabled:
+                return None
+            return self._intent(
+                "agent.task",
+                {"prompt": plan.delegate_prompt},
+                rung=6,
+                utterance=utterance,
+                raw=raw,
+                confidence=plan.confidence,
+                source="llm",
+                modifiers=mods,
+            )
+        if len(plan.steps) == 1:
+            step = plan.steps[0]
+            if step.verb not in enabled:
+                return None
+            verb = self.registry.get(step.verb)
+            rung = verb.rung if verb is not None else 1
+            return self._intent(
+                step.verb,
+                dict(step.slots),
+                rung=rung,
+                utterance=utterance,
+                raw=raw,
+                confidence=plan.confidence,
+                source="llm",
+                modifiers=mods,
+            )
+        if len(plan.steps) > 1:
+            return IntentPlan(
+                steps=plan.steps,
+                utterance=utterance,
+                raw_utterance=raw,
+                source="llm",
+                confidence=plan.confidence,
             )
         return None
 

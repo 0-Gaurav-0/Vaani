@@ -91,9 +91,8 @@ def test_open_claude_app_vs_website() -> None:
 def test_browser_negative_does_not_match_allowlist() -> None:
     router = _router()
     intent = router.route("open chrome and run ls", platform=PlatformId.LINUX)
-    assert intent is not None
-    assert intent.verb == "agent.task"
-    assert intent.rung == 6
+    # Grammar miss + no llm_parse → None (no blind agent.task fallback).
+    assert intent is None
 
 
 def test_rung_1_2_resolve_with_brain_mocked_to_raise() -> None:
@@ -119,14 +118,123 @@ def test_rung_1_2_resolve_with_brain_mocked_to_raise() -> None:
         assert router.llm_parse is boom
 
 
+def test_grammar_hit_never_calls_llm_parse() -> None:
+    calls: list[str] = []
+
+    def spy(text: str):
+        calls.append(text)
+        raise AssertionError("llm_parse must not run on grammar hit")
+
+    router = _router(llm_parse=spy)
+    intent = router.route("open Terminal", platform=PlatformId.LINUX)
+    assert intent is not None
+    assert intent.verb == "app.open"
+    assert intent.source == "grammar"
+    assert calls == []
+
+
+def test_miss_llm_one_step_returns_intent() -> None:
+    from vaani.intent.schema import Intent, IntentPlan, PlanStep
+
+    def parse(_text: str) -> IntentPlan:
+        return IntentPlan(
+            steps=(PlanStep(verb="site.search", slots={"query": "Zapto.com"}),),
+            utterance="search zapto.com for me",
+            raw_utterance="Search Zapto.com for me",
+            source="llm",
+            confidence=0.9,
+        )
+
+    router = _router(llm_parse=parse)
+    intent = router.route("Search Zapto.com for me", platform=PlatformId.LINUX)
+    assert isinstance(intent, Intent)
+    assert intent.verb == "site.search"
+    assert intent.source == "llm"
+    assert intent.confidence == 0.9
+    assert intent.slots["query"] == "Zapto.com"
+
+
+def test_miss_llm_refuse_returns_none() -> None:
+    from vaani.intent.schema import IntentPlan
+
+    def parse(_text: str) -> IntentPlan:
+        return IntentPlan(
+            steps=(),
+            utterance="thank you",
+            raw_utterance="Thank you.",
+            source="llm",
+            confidence=1.0,
+            refuse_reason="polite noop",
+        )
+
+    router = _router(llm_parse=parse)
+    assert router.route("Thank you.", platform=PlatformId.LINUX) is None
+
+
+def test_miss_llm_delegate_returns_agent_task() -> None:
+    from vaani.intent.schema import Intent, IntentPlan
+
+    def parse(_text: str) -> IntentPlan:
+        return IntentPlan(
+            steps=(),
+            utterance="fix the failing test",
+            raw_utterance="fix the failing test",
+            source="llm",
+            confidence=0.8,
+            delegate_prompt="fix the failing test",
+        )
+
+    router = _router(llm_parse=parse)
+    intent = router.route("fix the failing test", platform=PlatformId.LINUX)
+    assert isinstance(intent, Intent)
+    assert intent.verb == "agent.task"
+    assert intent.source == "llm"
+    assert intent.rung == 6
+    assert intent.slots["prompt"] == "fix the failing test"
+
+
+def test_miss_llm_raise_returns_none() -> None:
+    def boom(_text: str):
+        raise RuntimeError("parse failed")
+
+    router = _router(llm_parse=boom)
+    assert router.route("gibberish xyz", platform=PlatformId.LINUX) is None
+
+
+def test_miss_llm_multi_step_returns_plan() -> None:
+    from vaani.intent.schema import IntentPlan, PlanStep
+
+    def parse(_text: str) -> IntentPlan:
+        return IntentPlan(
+            steps=(
+                PlanStep(verb="app.open", slots={"name": "Brave Browser"}),
+                PlanStep(verb="site.search", slots={"query": "Zepter"}),
+            ),
+            utterance="open brave and search zepter",
+            raw_utterance="open Brave and search Zepter",
+            source="llm",
+            confidence=0.85,
+        )
+
+    router = _router(llm_parse=parse)
+    plan = router.route("open Brave and search Zepter", platform=PlatformId.LINUX)
+    assert isinstance(plan, IntentPlan)
+    assert len(plan.steps) == 2
+    assert plan.source == "llm"
+
+
 @pytest.mark.parametrize("row", _load_utterances(
     Path(__file__).resolve().parents[2] / "data" / "utterances.yaml"
 ))
 def test_utterance_corpus(row: dict[str, object]) -> None:
     router = _router()
     intent = router.route(str(row["utterance"]), platform=PlatformId.LINUX)
+    expected = row["verb"]
+    if expected is None:
+        assert intent is None
+        return
     assert intent is not None
-    assert intent.verb == row["verb"]
+    assert intent.verb == expected
     if "rung" in row:
         assert intent.rung == row["rung"]
     not_verb = row.get("not_verb")
