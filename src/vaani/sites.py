@@ -16,16 +16,43 @@ class SiteTarget:
 
 
 PUBLIC_SITES: tuple[tuple[tuple[str, ...], str, str], ...] = (
-    (("gmail", "mail"), "Gmail", "https://mail.google.com/mail/u/0/#inbox"),
+    (("gmail", "mail", "google mail"), "Gmail", "https://mail.google.com/mail/u/0/#inbox"),
     (("basecamp",), "Basecamp", "https://app.basecamp.com/"),
     (("paddle",), "Paddle", "https://vendors.paddle.com/"),
     (("stripe dashboard", "stripe"), "Stripe", "https://dashboard.stripe.com/"),
     (("postmark",), "Postmark", "https://account.postmarkapp.com/"),
     (("agent skills", "skills website", "skills dot sh"), "Agent Skills", "https://www.skills.sh/"),
     (("chatgpt", "chat gpt"), "ChatGPT", "https://chatgpt.com/"),
-    (("claude",), "Claude", "https://claude.ai/new"),
-    (("gemini",), "Gemini", "https://gemini.google.com/app"),
+    (("claude", "claude ai"), "Claude", "https://claude.ai/new"),
+    (("gemini", "google gemini"), "Gemini", "https://gemini.google.com/app"),
     (("youtube", "you tube"), "YouTube", "https://www.youtube.com/"),
+    (("github", "git hub"), "GitHub", "https://github.com/"),
+    (("gitlab", "git lab"), "GitLab", "https://gitlab.com/"),
+    (("linkedin", "linked in"), "LinkedIn", "https://www.linkedin.com/"),
+    (("twitter", "x.com", "x dot com"), "X", "https://x.com/"),
+    (("reddit",), "Reddit", "https://www.reddit.com/"),
+    (("wikipedia", "wiki"), "Wikipedia", "https://wikipedia.org/"),
+    (("google", "google search"), "Google", "https://www.google.com/"),
+    (("notion",), "Notion", "https://www.notion.so/"),
+    (("figma",), "Figma", "https://www.figma.com/"),
+    (("drive", "google drive"), "Google Drive", "https://drive.google.com/"),
+    (("docs", "google docs"), "Google Docs", "https://docs.google.com/"),
+    (("maps", "google maps"), "Google Maps", "https://maps.google.com/"),
+    (("whatsapp web", "whatsapp"), "WhatsApp Web", "https://web.whatsapp.com/"),
+    (("amazon",), "Amazon", "https://www.amazon.in/"),
+    (("flipkart",), "Flipkart", "https://www.flipkart.com/"),
+    (("stackoverflow", "stack overflow"), "Stack Overflow", "https://stackoverflow.com/"),
+)
+
+_OPEN_SITE_RE = re.compile(
+    r"\b("
+    r"open|launch|go\s+to|show|visit|browse|surf|navigate|"
+    r"kholo|khol|dikhao|dikha|jao|chalo"
+    r")\b"
+)
+_DOMAIN_RE = re.compile(
+    r"^(?:https?://)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[^\s]*)?)$",
+    re.I,
 )
 
 RICKROLL_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -111,15 +138,69 @@ def load_local_sites(path: Path | None = None) -> tuple[tuple[tuple[str, ...], s
     return tuple(sites)
 
 
+def resolve_site_name(
+    name: str, *, config_path: Path | None = None, browser: str | None = None
+) -> SiteTarget | None:
+    """Match a site by spoken name alone (no open/go-to verb required)."""
+    normalized = " ".join((name or "").casefold().strip().split())
+    if not normalized:
+        return None
+    ranked: list[tuple[int, str, str]] = []
+    for aliases, site_name, url in (*load_local_sites(config_path), *PUBLIC_SITES):
+        for alias in aliases:
+            if _contains_phrase(normalized, alias) or normalized == alias:
+                ranked.append((len(alias), site_name, url))
+                break
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    _alias_len, site_name, url = ranked[0]
+    return SiteTarget(site_name, url, browser)
+
+
+def resolve_browse_query(
+    query: str, *, config_path: Path | None = None, browser: str | None = None
+) -> SiteTarget | None:
+    """Open a known site, a typed domain, or a web search for the query."""
+    from urllib.parse import quote_plus
+
+    cleaned = " ".join((query or "").strip().split())
+    if not cleaned:
+        return None
+    known = resolve_site_name(cleaned, config_path=config_path, browser=browser)
+    if known is not None:
+        return known
+    compact = cleaned.casefold().replace(" ", "")
+    domain_match = _DOMAIN_RE.match(cleaned) or _DOMAIN_RE.match(compact)
+    if domain_match:
+        host_path = domain_match.group(1)
+        url = f"https://{host_path}"
+        label = host_path.split("/", 1)[0]
+        return SiteTarget(label, url, browser)
+    # Spoken "dot com" → domain
+    spoken = re.sub(
+        r"\s+dot\s+",
+        ".",
+        cleaned.casefold(),
+    )
+    spoken = spoken.replace(" ", "")
+    domain_match = _DOMAIN_RE.match(spoken)
+    if domain_match:
+        host_path = domain_match.group(1)
+        return SiteTarget(host_path.split("/", 1)[0], f"https://{host_path}", browser)
+    return SiteTarget(
+        f"Search: {cleaned}",
+        f"https://www.google.com/search?q={quote_plus(cleaned)}",
+        browser,
+    )
+
+
 def resolve_site(command: str, *, config_path: Path | None = None) -> SiteTarget | None:
     normalized = " ".join(command.casefold().strip().split())
-    if not re.search(r"\b(open|launch|go to|show|kholo|khol)\b", normalized):
+    if not _OPEN_SITE_RE.search(normalized):
         return None
     browser = "brave" if "brave" in normalized else "chrome" if "chrome" in normalized else None
-    for aliases, name, url in (*load_local_sites(config_path), *PUBLIC_SITES):
-        if any(_contains_phrase(normalized, alias) for alias in aliases):
-            return SiteTarget(name, url, browser)
-    return None
+    return resolve_site_name(normalized, config_path=config_path, browser=browser)
 
 
 def _youtube_query_clean(query: str) -> str:

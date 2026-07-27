@@ -38,6 +38,29 @@ APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
     (("document viewer", "pdf viewer"), AppTarget("Document Viewer", ("evince",))),
     (("archive manager",), AppTarget("Archive Manager", ("file-roller",))),
     (("gnome tweaks", "tweaks"), AppTarget("Tweaks", ("gnome-tweaks",))),
+    (
+        ("google chrome", "chrome"),
+        AppTarget(
+            "Chrome",
+            ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"),
+        ),
+    ),
+    (("brave browser", "brave"), AppTarget("Brave", ("brave-browser", "brave"))),
+    (("firefox",), AppTarget("Firefox", ("firefox",))),
+    (("spotify",), AppTarget("Spotify", ("spotify",))),
+    (("slack",), AppTarget("Slack", ("slack",))),
+    (("discord",), AppTarget("Discord", ("discord",))),
+    (("obsidian",), AppTarget("Obsidian", ("obsidian",))),
+)
+
+_OPEN_APP_RE = re.compile(
+    r"\b("
+    r"open|launch|start|show|visit|"
+    r"kholo|khol|dikhao|dikha|chalu\s*karo|shuru\s*karo"
+    r")\b"
+)
+_WEB_HINT_RE = re.compile(
+    r"\b(website|web\s*app|in\s+brave|in\s+chrome|browser|site)\b"
 )
 
 
@@ -45,16 +68,31 @@ def _contains_phrase(text: str, phrase: str) -> bool:
     return re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text) is not None
 
 
+def resolve_app_name(name: str) -> AppTarget | None:
+    """Match an app by spoken name alone (no open/launch verb required)."""
+    normalized = " ".join((name or "").casefold().strip().split())
+    if not normalized:
+        return None
+    # Longest alias first so "claude desktop" beats "claude".
+    ranked: list[tuple[int, AppTarget]] = []
+    for aliases, target in APPS:
+        for alias in aliases:
+            if _contains_phrase(normalized, alias) or normalized == alias:
+                ranked.append((len(alias), target))
+                break
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
+
+
 def resolve_app(command: str) -> AppTarget | None:
     normalized = " ".join(command.casefold().strip().split())
-    if not re.search(r"\b(open|launch|start|show|kholo|khol|chalu\s*karo|shuru\s*karo)\b", normalized):
+    if not _OPEN_APP_RE.search(normalized):
         return None
-    if any(word in normalized for word in (" website", " web app", " in brave", " in chrome", " browser")):
+    if _WEB_HINT_RE.search(normalized):
         return None
-    for aliases, target in APPS:
-        if any(_contains_phrase(normalized, alias) for alias in aliases):
-            return target
-    return None
+    return resolve_app_name(normalized)
 
 
 def launch_app(target: AppTarget) -> str:

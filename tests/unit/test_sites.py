@@ -126,6 +126,28 @@ def test_hinglish_kholo_opens_site():
     assert target.name == "Gmail"
 
 
+def test_browse_verbs_and_known_sites():
+    assert resolve_site("GitHub pe jao").name == "GitHub"
+    assert resolve_site("visit Wikipedia").name == "Wikipedia"
+    assert resolve_site("browse LinkedIn").name == "LinkedIn"
+
+
+def test_resolve_browse_query_domain_and_search():
+    from vaani.sites import resolve_browse_query
+
+    domain = resolve_browse_query("github.com")
+    assert domain is not None
+    assert domain.url.startswith("https://github.com")
+
+    spoken = resolve_browse_query("stackoverflow dot com")
+    assert spoken is not None
+    assert "stackoverflow.com" in spoken.url
+
+    search = resolve_browse_query("best mechanical keyboards")
+    assert search is not None
+    assert "google.com/search" in search.url
+
+
 def test_codex_fast_command_is_ephemeral_and_isolated():
     command = CodexRunner.command_for("codex", "explain this")
     assert "--ephemeral" in command

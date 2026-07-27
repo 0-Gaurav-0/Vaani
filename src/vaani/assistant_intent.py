@@ -4,8 +4,8 @@ from __future__ import annotations
 import re
 
 _ACTION_PATTERNS = (
-    r"\b(open|launch|start|play|watch|search|run)\b",
-    r"\b(kholo|chalao|chalu|shuru)\b",
+    r"\b(open|launch|start|play|watch|search|run|visit|browse|surf|navigate)\b",
+    r"\b(kholo|khol|chalao|chalu|shuru|dikhao|dikha|jao|chalo)\b",
     r"\byoutube\b",
     r"\bskill\b",
 )
