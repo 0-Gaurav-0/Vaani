@@ -21,6 +21,7 @@ class GroqModelSettings:
     cleanup_model: str = "llama-3.1-8b-instant"
     # Fast structured parse; falls back to cleanup_model when unset.
     parse_model: str | None = None
+    vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     response_format: str = "verbose_json"
     max_completion_tokens: int = 4096
 

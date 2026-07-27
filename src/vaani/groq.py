@@ -1,9 +1,11 @@
 """Small, synchronous, redaction-safe Groq HTTP adapter."""
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -296,6 +298,82 @@ class GroqClient:
             raise
         except Exception:
             return CleanupResult(_fallback(question), True)
+
+    def vision_chat(
+        self,
+        question: str,
+        frames: Sequence[Any],
+        key: str,
+        *,
+        system: str,
+        cancel: Event | None = None,
+    ) -> str | None:
+        """Ask a vision-capable model about in-memory screenshot frames.
+
+        ``frames`` may contain ``ScreenFrame`` instances or label/image pairs
+        such as ``vision.capture.LabeledFrame``. Images are sent only as
+        request-local data URLs and are never persisted.
+        """
+        content: list[dict[str, Any]] = [{"type": "text", "text": question}]
+        total = len(frames)
+        for position, item in enumerate(frames, start=1):
+            frame = getattr(item, "image", item)
+            data = getattr(frame, "data", None)
+            width = getattr(frame, "width", 0)
+            height = getattr(frame, "height", 0)
+            mime = getattr(frame, "mime", "image/jpeg")
+            display_index = getattr(frame, "display_index", position - 1)
+            label = getattr(
+                item,
+                "label",
+                f"screen {position} of {total} — "
+                f"display {display_index + 1} ({width}x{height})",
+            )
+            if not isinstance(data, bytes) or not data:
+                return None
+            encoded = base64.b64encode(data).decode("ascii")
+            content.extend(
+                (
+                    {"type": "text", "text": label},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{encoded}"},
+                    },
+                )
+            )
+
+        if total == 0:
+            return None
+        payload = {
+            "model": self.settings.vision_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            "max_tokens": 160,
+            "temperature": 0,
+        }
+        try:
+            response = self._request(
+                "POST",
+                "/chat/completions",
+                key,
+                deadline=CLEANUP_DEADLINE,
+                cancel=cancel,
+                json=payload,
+            )
+            if cancel and cancel.is_set():
+                raise GroqError("cancelled", "request cancelled")
+            if response.status_code >= 400:
+                return None
+            value = response.json()["choices"][0]["message"]["content"]
+            return value.strip() if isinstance(value, str) and value.strip() else None
+        except GroqError as exc:
+            if exc.category == "cancelled":
+                raise
+            return None
+        except (ValueError, KeyError, IndexError, TypeError):
+            return None
 
     def parse_intent(
         self,

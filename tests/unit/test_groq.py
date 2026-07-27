@@ -5,6 +5,7 @@ import httpx
 import pytest
 import json as _json
 from vaani.groq import GroqClient, GroqError, is_hindi, is_english, is_hinglish
+from vaani.intent.schema import ScreenFrame
 
 def client(handler):
     return GroqClient(transport=httpx.MockTransport(handler), sleep=lambda _: None)
@@ -73,3 +74,25 @@ def test_cancelled_retry_makes_no_second_request():
     def h(req): calls.append(1); e.set(); return httpx.Response(500)
     with pytest.raises(GroqError): client(h).models('k',cancel=e)
     assert len(calls)==1
+
+
+def test_vision_chat_sends_labeled_base64_image_without_network():
+    def h(req):
+        payload = json.loads(req.read())
+        assert req.url.path == "/openai/v1/chat/completions"
+        assert payload["model"] == "meta-llama/llama-4-scout-17b-16e-instruct"
+        content = payload["messages"][1]["content"]
+        assert content[1]["text"] == "screen 1 of 1 — display 1 (2x1)"
+        assert content[2]["image_url"]["url"] == "data:image/jpeg;base64,/9g="
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "There. [POINT:none]"}}]}
+        )
+
+    result = client(h).vision_chat(
+        "Where is it?",
+        (ScreenFrame(width=2, height=1, data=b"\xff\xd8"),),
+        "secret",
+        system="point",
+    )
+
+    assert result == "There. [POINT:none]"
