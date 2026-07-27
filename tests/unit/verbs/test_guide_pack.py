@@ -88,8 +88,8 @@ def test_point_captures_maps_and_shows_tag_free_overlay() -> None:
     assert result.status is Status.OK
     assert result.summary == "The export button is here."
     assert "[POINT:" not in result.summary
-    assert result.overlay[0].x == 110
-    assert result.overlay[0].y == 70
+    assert result.overlay[0].x == 112
+    assert result.overlay[0].y == 62
     assert overlay.shown == [(result.overlay, 8.0)]
     assert screen.calls == [0]
     assert brain_calls[0][0] == "export button"

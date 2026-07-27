@@ -21,7 +21,11 @@ from vaani.intent.schema import (
 from vaani.platform.protocol import PlatformId
 from vaani.verbs.registry import Registry
 from vaani.vision.capture import ScreenCaptureError, capture_frames
-from vaani.vision.coords import DisplayGeom, screenshot_to_global
+from vaani.vision.coords import (
+    DisplayGeom,
+    global_to_overlay_local,
+    screenshot_to_global,
+)
 
 PACK_NAME = "guide"
 _OVERLAY_TAG_RE = re.compile(r"\[(?:POINT|CAPTION):[^\]]+\]")
@@ -129,21 +133,27 @@ def _geom(frame: Any) -> DisplayGeom:
     )
 
 
-def _to_global(op: OverlayOp, geom: DisplayGeom) -> OverlayOp | None:
-    """Convert model screenshot coordinates, rejecting points outside its frame."""
+def _to_overlay_local(op: OverlayOp, geom: DisplayGeom) -> OverlayOp | None:
+    """Convert model screenshot coords to overlay-local top-left space."""
     if op.kind == "tour":
         steps: list[OverlayOp] = []
         for step in op.steps:
-            converted = _to_global(step, geom)
+            converted = _to_overlay_local(step, geom)
             if converted is not None:
                 steps.append(converted)
         return replace(op, steps=tuple(steps))
     if op.kind not in {"point", "caption"}:
         return op
-    point = screenshot_to_global(op.x, op.y, geom)
-    if point is None:
+    global_pt = screenshot_to_global(op.x, op.y, geom)
+    if global_pt is None:
         return None
-    return replace(op, x=point[0], y=point[1])
+    local_pt = global_to_overlay_local(global_pt[0], global_pt[1], geom)
+    if local_pt is None:
+        return None
+    lx, ly = local_pt
+    if geom.flip_y:
+        ly = geom.display_h - ly
+    return replace(op, x=lx, y=ly)
 
 
 def _default_offer_hint(goal: str) -> str:
@@ -214,7 +224,7 @@ def build_guide_verbs(
         ops = tuple(
             converted
             for op in raw_ops
-            if (converted := _to_global(op, geom)) is not None
+            if (converted := _to_overlay_local(op, geom)) is not None
         )
         if ops:
             overlay.show(ops)
