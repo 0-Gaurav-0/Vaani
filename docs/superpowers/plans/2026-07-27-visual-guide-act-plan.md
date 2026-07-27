@@ -451,6 +451,11 @@ Spec §4.4: **one transparent fullscreen click-through overlay per display**, no
    screen_capture=getattr(bundle, "screen", None),
    overlay=FileOverlay(Path(settings.indicator_control_path).parent),
    ```
+   After Controller construction, wire vision:
+   ```python
+   from vaani.vision.guide_brain import make_guide_brain
+   controller.guide_brain = make_guide_brain(groq, controller.key_provider)
+   ```
    Extend `register_stub_packs` call inside `Controller.__init__` with lazy getters (same pattern as `get_input=lambda: self.input`):
    ```python
    get_screen=lambda: self.screen,
