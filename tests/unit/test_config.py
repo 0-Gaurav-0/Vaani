@@ -40,7 +40,7 @@ def test_platform_roots_macos_and_windows(tmp_path):
     assert mac.indicator_control_path == mac.cache_dir / "indicator_control.json"
     assert mac.jobs_path == mac.data_dir / "jobs.json"
     assert mac.packs_path == mac.data_dir / "packs.json"
-    assert mac.overlay_path == mac.cache_dir / "overlay.json"
+    assert mac.overlay_path == mac.cache_dir / "overlay_ops"
     assert mac.vocab_path == mac.data_dir / "vocab.json"
 
     win = Settings.from_home(tmp_path, platform="win32")
@@ -49,5 +49,5 @@ def test_platform_roots_macos_and_windows(tmp_path):
     assert win.cache_dir.name == "Cache"
     assert win.jobs_path == win.data_dir / "jobs.json"
     assert win.packs_path == win.data_dir / "packs.json"
-    assert win.overlay_path == win.cache_dir / "overlay.json"
+    assert win.overlay_path == win.cache_dir / "overlay_ops"
     assert win.vocab_path == win.data_dir / "vocab.json"

@@ -53,6 +53,7 @@ from .policy.disambiguate import (
 from .policy.dryrun import attach_workspace, dispatch, materialize_argv
 from .policy.undo import UndoStack, register_undo
 from .surface.result import format_result_message, show_result
+from .surface.overlay import FileOverlay
 from .verbs.packs.core import browser_intent, build_core_registry
 from .verbs.packs.registry import PackRegistry, register_stub_packs
 
@@ -84,6 +85,9 @@ class Controller:
                  window: Any | None = None,
                  terminal: Any | None = None,
                  input_synth: Any | None = None,
+                 screen_capture: Any | None = None,
+                 overlay: Any | None = None,
+                 guide_brain: Callable[..., Any] | None = None,
                  supervisor: Any | None = None,
                  settings: Any | None = None,
                  vocab_path: str | os.PathLike[str] | None = None):
@@ -97,6 +101,8 @@ class Controller:
         self.window = window
         self.terminal = terminal
         self.input = input_synth
+        self.screen = screen_capture
+        self.guide_brain = guide_brain
         if supervisor is not None:
             self.supervisor = supervisor
         else:
@@ -139,6 +145,7 @@ class Controller:
         self._cancel = threading.Event(); self._token = 0; self._worker: threading.Thread | None = None
         self._record_started = 0.0; self._audio = None; self._shutdown = False
         cache_dir = Path(self.amplitude_path).parent
+        self.overlay = overlay if overlay is not None else FileOverlay(cache_dir)
         self.indicator_phase_path = str(resolve_phase_path(cache_dir=cache_dir))
         self.indicator_pending_path = str(resolve_pending_path(cache_dir=cache_dir))
         self.indicator_options_path = str(resolve_options_path(cache_dir=cache_dir))
@@ -175,6 +182,9 @@ class Controller:
             run_fn=exec_run,
             get_platform=detect_os,
             get_input=lambda: self.input,
+            get_screen=lambda: self.screen,
+            get_overlay=lambda: self.overlay,
+            get_guide_brain=lambda: self.guide_brain,
         )
         packs_settings = settings
         if packs_settings is None:
@@ -230,6 +240,7 @@ class Controller:
             # Disambiguation waits for the transcript: ordinals select, else cancel.
             if self.confirm.peek() is not None:
                 self._invalidate_pending(reason="utterance")
+            self._clear_overlay()
             self.mode = mode.value if isinstance(mode, DictationMode) else str(mode)
             self._cancel.clear(); self._token += 1; token = self._token
             try: self._audio = self.recorder.start()
@@ -306,6 +317,7 @@ class Controller:
 
     def cancel(self) -> bool:
         """Cancel capture/processing, or reject pending confirm/disambiguate (Esc)."""
+        self._clear_overlay()
         prompt = self.disambiguate.peek()
         if prompt is not None and self.state is AppState.IDLE:
             return self.reject_pending(prompt.id, via="hotkey")
@@ -1190,6 +1202,7 @@ class Controller:
             raise RuntimeError(result.detail or result.summary or "assistant failed")
         final = result.detail or result.summary
         name = verb_name or (intent.verb if intent is not None else "")
+        self._update_overlay(result, name)
         if not name:
             try:
                 routed = self.router.route(raw, platform=detect_os())
@@ -1238,6 +1251,21 @@ class Controller:
             self._emit("assistant_complete")
             self._feedback("success")
         self._sync_policy_hotkeys()
+
+    def _update_overlay(self, result: Result, verb_name: str) -> None:
+        if result.overlay:
+            try:
+                self.overlay.show(result.overlay, ttl=8.0)
+            except Exception:
+                self.logger.exception("event=overlay_show_failed")
+        elif result.status is Status.OK and not verb_name.startswith("guide."):
+            self._clear_overlay()
+
+    def _clear_overlay(self) -> None:
+        try:
+            self.overlay.clear()
+        except Exception:
+            self.logger.exception("event=overlay_clear_failed")
 
     def _materialize(
         self, intent: Any, platform: Any, context: Any = None

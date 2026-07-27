@@ -81,7 +81,7 @@ def _controller(tmp_path: Path, *, text: str):
     return c, h, w
 
 
-def test_interrogative_refuses_without_handler_or_confirm(tmp_path: Path):
+def test_interrogative_routes_to_enabled_guide_offer_without_action(tmp_path: Path):
     c, h, w = _controller(tmp_path, text="how do I free port 3000")
     verb = c.registry.get("system.port.free")
     assert verb is not None
@@ -103,9 +103,8 @@ def test_interrogative_refuses_without_handler_or_confirm(tmp_path: Path):
     assert calls == []
     assert h.rows
     final = h.rows[0]["final_text"].casefold()
-    assert "say it as a command" in final or "free port 3000" in final
-    assert w.results
-    assert any("say it as a command" in t.casefold() for t in w.results)
+    assert final == "say: free port 3000"
+    assert w.results == []
 
 
 def test_imperative_still_stages_confirm(tmp_path: Path):

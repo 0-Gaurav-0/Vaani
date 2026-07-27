@@ -47,6 +47,7 @@ class OverlaySurface(Protocol):
 
 OverlayGetter = Callable[[], OverlaySurface | None]
 GuideBrain = Callable[[str, Sequence[Any]], tuple[str, tuple[OverlayOp, ...]]]
+GuideBrainGetter = Callable[[], GuideBrain | None]
 OfferHintFn = Callable[[str], str]
 
 GUIDE_VERB_NAMES: frozenset[str] = frozenset(
@@ -176,6 +177,7 @@ def build_guide_verbs(
     get_screen: ScreenGetter | None = None,
     get_overlay: OverlayGetter | None = None,
     guide_brain: GuideBrain | None = None,
+    get_guide_brain: GuideBrainGetter | None = None,
     offer_hint_fn: OfferHintFn | None = None,
 ) -> tuple[Verb, ...]:
     """Build guide verbs with optional platform surfaces and vision brain."""
@@ -188,7 +190,8 @@ def build_guide_verbs(
         overlay = get_overlay() if get_overlay is not None else None
         if overlay is None:
             return _unsupported("guide.point", "guide overlay is unavailable")
-        if guide_brain is None:
+        brain = get_guide_brain() if get_guide_brain is not None else guide_brain
+        if brain is None:
             return _unsupported("guide.point", "guide vision brain is unavailable")
         try:
             frames = capture_frames(screen)
@@ -211,7 +214,7 @@ def build_guide_verbs(
 
         target = str(intent.slots.get("target") or intent.utterance)
         try:
-            summary, raw_ops = guide_brain(target, frames)
+            summary, raw_ops = brain(target, frames)
         except Exception:
             return Result(
                 status=Status.FAILED,
@@ -227,7 +230,6 @@ def build_guide_verbs(
             if (converted := _to_overlay_local(op, geom)) is not None
         )
         if ops:
-            overlay.show(ops)
             _LAST_OVERLAY_OPS[id(overlay)] = ops
         return Result(
             status=Status.OK,
@@ -265,7 +267,6 @@ def build_guide_verbs(
                 evidence=("guide.last_result", "empty"),
                 rung=5,
             )
-        overlay.show(ops)
         return Result(
             status=Status.OK,
             summary="Showing the last guide result.",
@@ -321,6 +322,7 @@ def register_guide_pack(
     get_screen: ScreenGetter | None = None,
     get_overlay: OverlayGetter | None = None,
     guide_brain: GuideBrain | None = None,
+    get_guide_brain: GuideBrainGetter | None = None,
     offer_hint_fn: OfferHintFn | None = None,
 ) -> tuple[Pattern, ...]:
     """Register guide verbs and return their grammar patterns."""
@@ -328,6 +330,7 @@ def register_guide_pack(
         get_screen=get_screen,
         get_overlay=get_overlay,
         guide_brain=guide_brain,
+        get_guide_brain=get_guide_brain,
         offer_hint_fn=offer_hint_fn,
     ):
         registry.register(verb)
