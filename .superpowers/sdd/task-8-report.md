@@ -23,3 +23,19 @@
 
 - The guide pack remains disabled by default. Runtime screen/overlay/brain
   wiring is intentionally deferred to Task 10.
+
+## Task 8 review fix — guide.offer you/we phrasing
+
+- Expanded `guide.offer` `any_of` to include `how do/can/would/should you/we`
+  variants, aligned with the slot regex `(?:i|you|we)`.
+- Normalization no longer strips `can you` / `would you` when preceded by
+  `how`, so `"how can you free port 3000"` survives matching intact.
+- Added router test `test_enabled_guide_offer_matches_how_can_you_phrasing`.
+
+```text
+$ .venv/bin/python -m pytest tests/unit/verbs/test_guide_pack.py -q
+.......                                                                  [100%]
+7 passed in 0.03s
+```
+
+Commit: `b2e0e83` — `fix(guide): match how can you/we phrases for guide.offer`

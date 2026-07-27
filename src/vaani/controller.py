@@ -175,6 +175,9 @@ class Controller:
             get_terminal=lambda: self.terminal,
             get_cancel=lambda: self._cancel,
             run_command=exec_run,
+            get_screen=lambda: self.screen,
+            get_input=lambda: self.input,
+            get_guide_brain=lambda: self.guide_brain,
         )
         patterns = patterns + register_undo(self.registry, self.undo)
         patterns = patterns + register_stub_packs(
@@ -822,6 +825,11 @@ class Controller:
                     raise RuntimeError(
                         result.detail or result.summary or "assistant failed"
                     )
+                self.logger.info(
+                    "event=confirm_dispatch status=%s summary=%r",
+                    result.status.value,
+                    (result.summary or "")[:160],
+                )
                 if result.status is Status.OK:
                     self.undo.record_success(verb, intent, result)
                 self._surface_result(result)
@@ -851,8 +859,14 @@ class Controller:
                 raise RuntimeError(
                     result.detail or result.summary or "assistant failed"
                 )
+            self.logger.info(
+                "event=confirm_dispatch status=%s summary=%r",
+                result.status.value,
+                (result.summary or "")[:160],
+            )
             if result.status is Status.OK:
                 self.undo.record_success(verb, intent, result)
+            self._surface_result(result)
             self._finish_assistant_result(
                 result,
                 raw=intent.raw_utterance,
@@ -1249,7 +1263,8 @@ class Controller:
             )
             self.state = AppState.IDLE
             self._emit("assistant_complete")
-            self._feedback("success")
+            cue = "busy" if result.status is Status.PARTIAL else "success"
+            self._feedback(cue)
         self._sync_policy_hotkeys()
 
     def _update_overlay(self, result: Result, verb_name: str) -> None:

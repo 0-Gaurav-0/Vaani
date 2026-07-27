@@ -280,6 +280,10 @@ def build_registry(
         supervisor.adopt_or_clear()
     except Exception:
         supervisor = None
+    # Late-bound: assigned after build_core_registry; lambdas close over names.
+    input_synth = None
+    screen = None
+    guide_brain = None
     registry, _patterns = build_core_registry(
         resolve_app_fn=resolve_app_fn,
         launch_app_fn=launch_app_fn,
@@ -291,10 +295,12 @@ def build_registry(
         get_platform=lambda: plat,
         get_supervisor=lambda: supervisor,
         run_command=exec_run,
+        get_screen=lambda: screen,
+        get_input=lambda: input_synth,
+        get_guide_brain=lambda: guide_brain,
     )
     register_undo(registry, UndoStack())
     input_synth = _input_for(plat)
-    screen = None
     overlay = None
     if settings is not None:
         overlay = FileOverlay(settings.indicator_control_path.parent)
@@ -311,7 +317,7 @@ def build_registry(
         get_input=lambda: input_synth,
         get_screen=lambda: screen,
         get_overlay=lambda: overlay,
-        get_guide_brain=lambda: None,
+        get_guide_brain=lambda: guide_brain,
     )
     pack_reg = packs if packs is not None else _packs_for_settings(settings)
     pack_reg.apply(registry)

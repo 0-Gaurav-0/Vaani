@@ -39,6 +39,7 @@ OpenUrl = Callable[[str, Intent], str]
 InputGetter = Callable[[], Any | None]
 ScreenGetter = Callable[[], Any | None]
 GuideBrain = Callable[[str, Any], tuple[str, tuple[OverlayOp, ...]]]
+GuideBrainGetter = Callable[[], GuideBrain | None]
 VisionClickFn = Callable[[int, Intent, Context], Result | None]
 
 
@@ -152,11 +153,13 @@ def _default_open_url(url: str, _intent: Intent) -> str:
 
 
 def _geom_from_frame(frame: Any) -> DisplayGeom:
+    width = int(getattr(frame, "width", 0) or 0)
+    height = int(getattr(frame, "height", 0) or 0)
     return DisplayGeom(
-        shot_w=int(frame.width),
-        shot_h=int(frame.height),
-        display_w=int(frame.display_width or frame.width),
-        display_h=int(frame.display_height or frame.height),
+        shot_w=width,
+        shot_h=height,
+        display_w=int(getattr(frame, "display_width", None) or width),
+        display_h=int(getattr(frame, "display_height", None) or height),
         origin_x=float(getattr(frame, "origin_x", 0.0) or 0.0),
         origin_y=float(getattr(frame, "origin_y", 0.0) or 0.0),
         flip_y=bool(getattr(frame, "flip_y", False)),
@@ -170,42 +173,96 @@ def _vision_click_fallback(
     *,
     get_screen: ScreenGetter | None,
     get_input: InputGetter | None,
-    guide_brain: GuideBrain | None,
+    guide_brain: GuideBrain | None = None,
+    get_guide_brain: GuideBrainGetter | None = None,
 ) -> Result | None:
     """When structured URL resolve misses, POINT the Nth result and click.
 
     Caller must already have passed ConfirmEngine (R2) — never auto-click unapproved.
+    Returns Result on success/click-fail, or None when vision cannot run (caller PARTIAL).
     """
     _ = intent
-    if get_screen is None or get_input is None or guide_brain is None:
-        return None
+    brain = get_guide_brain() if get_guide_brain is not None else guide_brain
+    if get_screen is None or get_input is None or brain is None:
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail=(
+                "vision click unavailable (screen/input/brain not wired) — "
+                "grant Screen Recording + Accessibility and restart Vaani"
+            ),
+            evidence=("browser.result.open", f"index={index}", "deps_missing"),
+            rung=2,
+        )
     screen = get_screen()
     synth = get_input()
     if screen is None or synth is None or not hasattr(synth, "click"):
-        return None
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail=(
+                "vision click unavailable (screen/input missing) — "
+                "grant Screen Recording + Accessibility and restart Vaani"
+            ),
+            evidence=("browser.result.open", f"index={index}", "runtime_missing"),
+            rung=2,
+        )
     try:
         from vaani.vision.capture import capture_frames
 
         frames = capture_frames(screen)
     except Exception as exc:  # noqa: BLE001
         _LOG.info("event=browser_result_vision_capture_fail err=%s", exc)
-        return None
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail=(
+                "screen capture failed — grant Screen Recording to the "
+                "Vaani/Python binary and restart"
+            ),
+            evidence=("browser.result.open", f"index={index}", "capture_fail"),
+            rung=2,
+        )
     if not frames:
-        return None
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail="screen capture returned no frames",
+            evidence=("browser.result.open", f"index={index}", "no_frames"),
+            rung=2,
+        )
     question = f"point at search result number {index} organic link"
     try:
-        _speech, ops = guide_brain(question, frames)
+        _speech, ops = brain(question, frames)
     except Exception as exc:  # noqa: BLE001
         _LOG.info("event=browser_result_vision_brain_fail err=%s", exc)
-        return None
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail=f"vision brain failed: {exc}",
+            evidence=("browser.result.open", f"index={index}", "brain_fail"),
+            rung=2,
+        )
     point_ops = [op for op in ops if op.kind == "point"]
     if not point_ops:
-        return None
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail=f"vision did not find result {index}",
+            evidence=("browser.result.open", f"index={index}", "no_point"),
+            rung=2,
+        )
     op = point_ops[0]
     frame = frames[0]
     global_pt = screenshot_to_global(op.x, op.y, _geom_from_frame(frame))
     if global_pt is None:
-        return None
+        return Result(
+            status=Status.PARTIAL,
+            summary="Couldn't read results",
+            detail="vision point outside screenshot bounds",
+            evidence=("browser.result.open", f"index={index}", "bad_coords"),
+            rung=2,
+        )
     gx, gy = global_pt
     clicked = synth.click(gx, gy)
     if clicked.status is not Status.OK:
@@ -227,6 +284,7 @@ def build_browser_result_verbs(
     get_screen: ScreenGetter | None = None,
     get_input: InputGetter | None = None,
     guide_brain: GuideBrain | None = None,
+    get_guide_brain: GuideBrainGetter | None = None,
     vision_click: VisionClickFn | None = None,
 ) -> tuple[Verb, ...]:
     resolver = resolve_result_url or _macos_resolve_result_url
@@ -254,13 +312,17 @@ def build_browser_result_verbs(
                 get_screen=get_screen,
                 get_input=get_input,
                 guide_brain=guide_brain,
+                get_guide_brain=get_guide_brain,
             )
         if result is not None:
             return result
         return Result(
             status=Status.PARTIAL,
             summary="Couldn't read results",
-            detail=("couldn't read results; try guide or enable vision click"),
+            detail=(
+                "couldn't read results — structured URL miss and vision "
+                "unavailable; grant Screen Recording + Accessibility"
+            ),
             evidence=("browser.result.open", f"index={index}", "miss"),
             rung=2,
         )
@@ -291,6 +353,7 @@ def register_browser_results_pack(
     get_screen: ScreenGetter | None = None,
     get_input: InputGetter | None = None,
     guide_brain: GuideBrain | None = None,
+    get_guide_brain: GuideBrainGetter | None = None,
 ) -> tuple[Pattern, ...]:
     for verb in build_browser_result_verbs(
         resolve_result_url=resolve_result_url,
@@ -298,6 +361,7 @@ def register_browser_results_pack(
         get_screen=get_screen,
         get_input=get_input,
         guide_brain=guide_brain,
+        get_guide_brain=get_guide_brain,
     ):
         registry.register(verb)
     return browser_result_patterns()

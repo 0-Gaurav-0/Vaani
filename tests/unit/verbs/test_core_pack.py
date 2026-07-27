@@ -228,6 +228,81 @@ def test_app_quit_uses_injected_fn() -> None:
     assert seen == [("Slack", PlatformId.LINUX)]
 
 
+def test_app_open_name_slot_falls_back_to_site() -> None:
+    """LLM often emits app.open(name=…); known PUBLIC_SITES still open by URL."""
+    opened: list[dict] = []
+
+    def open_browser(**kwargs):
+        opened.append(kwargs)
+        return "Opened browser."
+
+    registry, _ = _registry(
+        resolve_app_fn=lambda _t: None,
+        open_browser_fn=open_browser,
+    )
+    verb = registry.get("app.open")
+    assert verb is not None
+    result = verb.handler(
+        _intent("app.open", {"name": "Gmail"}, utterance="Open Gmail"),
+        _context(),
+    )
+    assert result.status is Status.OK
+    assert result.summary == "Opened Gmail."
+    assert opened and "mail.google.com" in opened[0]["url"]
+    assert "via=site_fallback" in (result.evidence or ())
+
+
+def test_app_open_unknown_name_falls_back_to_site_search() -> None:
+    opened: list[dict] = []
+
+    def open_browser(**kwargs):
+        opened.append(kwargs)
+        return "Opened browser."
+
+    registry, _ = _registry(
+        resolve_app_fn=lambda _t: None,
+        resolve_site_fn=lambda _t: None,
+        open_browser_fn=open_browser,
+    )
+    verb = registry.get("app.open")
+    assert verb is not None
+    result = verb.handler(
+        _intent("app.open", {"name": "Blinkit"}, utterance="Open Blinkit"),
+        _context(),
+    )
+    assert result.status is Status.OK
+    assert opened and "google.com/search" in opened[0]["url"]
+    assert "Blinkit" in opened[0]["url"] or "blinkit" in opened[0]["url"].casefold()
+    assert "via=search_fallback" in (result.evidence or ())
+    assert "Blinkit" in (result.summary or "")
+
+
+def test_app_open_empty_name_still_fails() -> None:
+    registry, _ = _registry(
+        resolve_app_fn=lambda _t: None,
+        resolve_site_fn=lambda _t: None,
+    )
+    verb = registry.get("app.open")
+    assert verb is not None
+    result = verb.handler(
+        Intent(
+            verb="app.open",
+            slots={},
+            rung=1,
+            confidence=1.0,
+            source="test",
+            mode="act",
+            utterance="",
+            raw_utterance="",
+            modifiers=frozenset(),
+            brain=None,
+        ),
+        _context(),
+    )
+    assert result.status is Status.FAILED
+    assert result.summary == "No app matched."
+
+
 def test_files_reveal_requires_workspace() -> None:
     registry, _ = _registry()
     verb = registry.get("files.reveal")

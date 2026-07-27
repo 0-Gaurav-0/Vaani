@@ -13,6 +13,8 @@ _PLATFORM_NOTES: dict[PlatformId, str] = {
     PlatformId.MACOS: (
         "Use macOS app names (Google Chrome, Terminal, Brave Browser). "
         "Prefer app.open/window.focus over shell. "
+        "app.open is only for known desktop apps. "
+        "Unknown open <name> (not a desktop app) → site.search — never invent URLs. "
         "On-screen where/what → guide.point. "
         "Open the first result/site/link (ASR: first side) → browser.result.open, "
         "never site.search for that ask."
@@ -20,6 +22,8 @@ _PLATFORM_NOTES: dict[PlatformId, str] = {
     PlatformId.WINDOWS: (
         "Use Windows app names (cmd, powershell, Microsoft Edge, Chrome). "
         "Prefer app.open/window.focus over shell. "
+        "app.open is only for known desktop apps. "
+        "Unknown open <name> (not a desktop app) → site.search — never invent URLs. "
         "On-screen where/what → guide.point. "
         "Open the first result/site/link (ASR: first side) → browser.result.open, "
         "never site.search for that ask."
@@ -27,6 +31,8 @@ _PLATFORM_NOTES: dict[PlatformId, str] = {
     PlatformId.LINUX: (
         "Use Linux desktop apps (firefox, google-chrome, nautilus, gnome-terminal). "
         "Prefer app.open/xdg-open patterns over raw shell. "
+        "app.open is only for known desktop apps. "
+        "Unknown open <name> (not a desktop app) → site.search — never invent URLs. "
         "On-screen where/what → guide.point. "
         "Open the first result/site/link (ASR: first side) → browser.result.open, "
         "never site.search for that ask."
