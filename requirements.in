@@ -3,6 +3,10 @@
 httpx
 keyring
 python-xlib
+# Already a transitive dep of keyring->secretstorage on Linux; declared
+# directly because platform/linux/wayland/portal.py imports it for the
+# XDG Desktop Portal (GlobalShortcuts) D-Bus calls.
+jeepney
 pytest
 #
 # macOS (Darwin): do not install python-xlib. Use the packaging extra instead:

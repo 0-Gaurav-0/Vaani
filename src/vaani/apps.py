@@ -18,7 +18,7 @@ APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
     (("claude desktop", "claude app", "claude"), AppTarget("Claude", ("claude-desktop",))),
     (("terminal", "gnome terminal"), AppTarget("Terminal", ("gnome-terminal",))),
     (("text editor", "gedit"), AppTarget("Text Editor", ("gnome-text-editor", "gedit"))),
-    (("visual studio code", "vs code", "code editor"), AppTarget("Visual Studio Code", ("code",))),
+    (("visual studio code", "vs code", "vscode", "vs-code", "code editor", "code"), AppTarget("Visual Studio Code", ("code",))),
     (("file manager", "files"), AppTarget("Files", ("nautilus",))),
     (("calculator",), AppTarget("Calculator", ("gnome-calculator",))),
     (("system settings", "settings"), AppTarget("Settings", ("gnome-control-center",))),
@@ -47,7 +47,7 @@ def _contains_phrase(text: str, phrase: str) -> bool:
 
 def resolve_app(command: str) -> AppTarget | None:
     normalized = " ".join(command.casefold().strip().split())
-    if not re.search(r"\b(open|launch|start|show)\b", normalized):
+    if not re.search(r"\b(open|launch|start|show|kholo|khol|chalu\s*karo|shuru\s*karo)\b", normalized):
         return None
     if any(word in normalized for word in (" website", " web app", " in brave", " in chrome", " browser")):
         return None
