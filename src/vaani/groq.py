@@ -32,20 +32,25 @@ CLEANUP_INSTRUCTION = (
     "Return only the edited transcript."
 )
 
-# Whisper auto-detect often labels Hindi as Urdu/Arabic. Double STT (en+hi in
-# parallel) + this Latin prompt picks readable Hinglish without Urdu script.
+# Double STT: auto + hi in parallel (NOT language=en — that translates Hindi→English).
+# Prompt forces Latin Hinglish transcription without translation.
 DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
 TRANSCRIPTION_PROMPT = (
-    "English and Hinglish dictation in Latin letters only. "
-    "Write Hindi words in Latin script, never Arabic or Devanagari."
+    "Transcribe exactly what was spoken in Latin letters only. "
+    "Do not translate. Keep Hindi/Hinglish words as spoken "
+    "(kya, hai, kholo, chahiye). Never use Arabic or Devanagari."
 )
 
 _PROMPT_BLEED_PATTERNS = (
     re.escape(TRANSCRIPTION_PROMPT),
+    r"transcribe exactly what was spoken in latin letters only\.?",
+    r"do not translate\.?",
+    r"keep hindi/?hinglish words as spoken[^.]*\.?",
+    r"never use arabic or devanagari\.?",
+    # Legacy prompt crumbs still emitted by Whisper from older sessions/models.
     r"english and hinglish dictation in latin letters only\.?",
-    r"write hindi words in latin script(?:,? never arabic or devanagari)?\.?",
+    r"dictation in latin letters only\.?",
     r"in latin letters only\.?",
-    r"never arabic or devanagari\.?",
 )
 
 # Whisper silence / YouTube-trained hallucinations and prompt crumbs.
@@ -207,10 +212,38 @@ def is_hinglish(text: str, language: str | None = None) -> bool:
 _ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF]")
 _DEVANAGARI_SCRIPT_RE = re.compile(r"[\u0900-\u097F]")
 _LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
+# Spoken Hinglish particles — prefer keeping these over an English translation.
+_HINGLISH_TOKEN_RE = re.compile(
+    r"\b("
+    r"hai|hain|kya|kyaa|nahi|nahin|naahi|mera|meri|mere|aap|tum|hum|"
+    r"karo|karna|karke|kholo|khol|dikhao|dikha|chahiye|chahie|kaise|kyun|"
+    r"kyunki|lekin|magar|aur|toh|bhi|mat|achha|accha|theek|thik|bas|"
+    r"abhi|phir|wahan|yahan|yaha|waha|mujhe|mujhko|usko|isko|yeh|ye|"
+    r"woh|vo|hua|huye|huya|gaya|gayi|raha|rahi|rahe|wala|wali|"
+    r"ka|ki|ke|se|mein|mai|main|par|pe|ko|ne|jo|kitna|kitni|"
+    r"bahut|bohot|thoda|zyada|jaldi|dhire|sahi|galat|samajh|baat|"
+    r"kaam|yaar|bhai|bolo|sun|suno|dekh|dekho|bolo|batao|kar\s*do"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _candidate_score(text: str) -> float:
+    """Score Latin Hinglish retention; long English translations must not win."""
+    hinglish_hits = len(_HINGLISH_TOKEN_RE.findall(text))
+    latin_n = len(_LATIN_CHAR_RE.findall(text))
+    deva_n = len(_DEVANAGARI_SCRIPT_RE.findall(text))
+    # Cap latin contribution so a translated English paragraph cannot beat
+    # a shorter true Hinglish line.
+    return float(hinglish_hits) * 80.0 + min(latin_n, 48) * 0.4 - float(deva_n) * 5.0
 
 
 def pick_latin_transcript(*candidates: str) -> str | None:
-    """Pick the best Latin-Hinglish candidate; never Arabic/Urdu or Devanagari."""
+    """Pick the best Latin-Hinglish candidate; never Arabic/Urdu or Devanagari.
+
+    Prefers transcripts that keep spoken Hinglish words over Whisper's
+    English *translations* of the same audio.
+    """
     scored: list[tuple[float, str]] = []
     latin_only: list[tuple[float, str]] = []
     for raw in candidates:
@@ -219,10 +252,10 @@ def pick_latin_transcript(*candidates: str) -> str | None:
             continue
         if _ARABIC_SCRIPT_RE.search(guarded):
             continue
+        score = _candidate_score(guarded)
+        scored.append((score, guarded))
         latin_n = len(_LATIN_CHAR_RE.findall(guarded))
         deva_n = len(_DEVANAGARI_SCRIPT_RE.findall(guarded))
-        score = float(latin_n) - 3.0 * float(deva_n)
-        scored.append((score, guarded))
         if latin_n > 0 and deva_n == 0:
             latin_only.append((score, guarded))
     pool = latin_only or scored
@@ -409,26 +442,27 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """Double STT (en + hi in parallel); return best Latin-Hinglish text.
+        """Parallel auto+hi STT; pick Latin Hinglish (never English translation).
 
-        Parallel cuts wall time ~in half vs sequential en-then-hi. Clean English
-        still finishes in roughly one Whisper round-trip.
+        ``language=en`` is intentionally avoided — Whisper then *translates*
+        Hindi/mix into wrong English. Auto + hi keep spoken words; the picker
+        prefers Hinglish particles over longer English paraphrases.
         """
         path = Path(audio)
         started = self._clock()
 
-        def _one(language: str) -> TranscriptResult:
+        def _one(language: str | None) -> TranscriptResult:
             return self.transcribe(
                 path, key, cancel=cancel, delete_audio=False, language=language
             )
 
-        en: TranscriptResult | None = None
+        auto: TranscriptResult | None = None
         hi: TranscriptResult | None = None
         errors: list[BaseException] = []
         try:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures = {
-                    pool.submit(_one, "en"): "en",
+                    pool.submit(_one, None): "auto",
                     pool.submit(_one, "hi"): "hi",
                 }
                 for fut in as_completed(futures):
@@ -445,35 +479,38 @@ class GroqClient:
                             type(exc).__name__,
                         )
                         continue
-                    if label == "en":
-                        en = result
+                    if label == "auto":
+                        auto = result
                     else:
                         hi = result
-            if en is None and hi is None:
+            if auto is None and hi is None:
                 if errors:
                     raise errors[0]
                 raise GroqError("malformed", "empty transcription")
-            candidates = [c.text for c in (en, hi) if c is not None]
+            candidates = [c.text for c in (auto, hi) if c is not None]
             picked = pick_latin_transcript(*candidates)
             if not picked:
                 self._logger.info(
-                    "event=groq_transcribe_pick rejected en_chars=%s hi_chars=%s elapsed=%.2f",
-                    len(en.text) if en else 0,
+                    "event=groq_transcribe_pick rejected auto_chars=%s hi_chars=%s elapsed=%.2f",
+                    len(auto.text) if auto else 0,
                     len(hi.text) if hi else 0,
                     self._clock() - started,
                 )
                 return TranscriptResult("", None)
-            en_g = guard_transcription(en.text) if en else None
+            auto_g = guard_transcription(auto.text) if auto else None
             language = (
-                en.language
-                if en is not None and en_g == picked
+                auto.language
+                if auto is not None and auto_g == picked
                 else (hi.language if hi is not None else None)
             )
             self._logger.info(
-                "event=groq_transcribe_pick chars=%s language=%s elapsed=%.2f parallel=1",
+                "event=groq_transcribe_pick chars=%s language=%s elapsed=%.2f parallel=1 "
+                "auto_chars=%s hi_chars=%s",
                 len(picked),
                 language or "unknown",
                 self._clock() - started,
+                len(auto.text) if auto else 0,
+                len(hi.text) if hi else 0,
             )
             return TranscriptResult(picked, language)
         finally:
