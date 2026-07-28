@@ -17,6 +17,7 @@ from pathlib import Path
 from .types import AppState, DictationMode
 from .observability import exception_category, sanitize
 from .groq import GroqError, guard_transcription
+from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
 from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
@@ -306,12 +307,31 @@ class Controller:
                 float(getattr(audio, "duration_seconds", 0) or 0),
                 size,
             )
-            # Always Latin/Hinglish path: auto language often mislabels Hindi as Urdu/Arabic.
-            result = self.groq.transcribe(
-                audio.path, key, cancel=self._cancel, delete_audio=True, language="en"
-            )
+            if is_silent_wav(Path(audio.path)):
+                self.logger.info("event=transcription_rejected reason=silence")
+                try:
+                    Path(audio.path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                with self._lock:
+                    if self._cancel.is_set() or token != self._token:
+                        return
+                    self.state = AppState.IDLE
+                    self._emit("cancelled")
+                self._feedback("busy")
+                return
+            # Double STT (en+hi) → Latin Hinglish; avoid forced-en Hindi garble.
+            transcribe_h = getattr(self.groq, "transcribe_hinglish", None)
+            if callable(transcribe_h):
+                result = transcribe_h(
+                    audio.path, key, cancel=self._cancel, delete_audio=True
+                )
+            else:
+                result = self.groq.transcribe(
+                    audio.path, key, cancel=self._cancel, delete_audio=True, language="en"
+                )
             if self._cancel.is_set() or token != self._token: return
-            guarded = guard_transcription(result.text)
+            guarded = guard_transcription(result.text) if result.text else None
             if guarded is None:
                 self.logger.info("event=transcription_rejected reason=prompt_bleed")
                 with self._lock:

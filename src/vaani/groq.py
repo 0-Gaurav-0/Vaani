@@ -48,14 +48,36 @@ _PROMPT_BLEED_PATTERNS = (
     r"youtube pe gaana chalao,\s*yeh kaam kar do\.?",
 )
 
+# Whisper silence / YouTube-trained hallucinations and prompt crumbs.
+_LEADING_BLEED_RE = re.compile(
+    r"^(?:"
+    r"english\s+and\s+hinglish\b[^.]*\.?\s*"
+    r"|english\.?\s+"
+    r"|hinglish\.?\s+"
+    r"|examples[,:]?\s+"
+    r")+",
+    re.IGNORECASE,
+)
+_TRAILING_BLEED_RE = re.compile(
+    r"(?:\s+|,)+(?:thank\s+you|thanks\s+for\s+watching)\.?\s*$",
+    re.IGNORECASE,
+)
+_JUNK_ONLY_RE = re.compile(
+    r"^(?:"
+    r"thank\s+you|thanks\s+for\s+watching|english|hinglish|examples|"
+    r"so\s+much\s+for\s+you|you|the\s+end|subtitle[s]?\s+by\s+\w+"
+    r")(?:\s+(?:thank\s+you|thanks\s+for\s+watching|english|hinglish|examples))*"
+    r"\.?$",
+    re.IGNORECASE,
+)
+
 
 def guard_transcription(text: str, prompt: str | None = None) -> str | None:
-    """Return cleaned transcript, or None when Whisper echoed the prompt."""
+    """Return cleaned transcript, or None when Whisper echoed junk/prompt."""
     raw = (text or "").strip()
     if not raw:
         return None
-    lowered = raw.casefold()
-    if lowered.startswith("english and hinglish"):
+    if _JUNK_ONLY_RE.fullmatch(raw):
         return None
     prompt_text = TRANSCRIPTION_PROMPT if prompt is None else prompt
     cleaned = raw
@@ -66,8 +88,17 @@ def guard_transcription(text: str, prompt: str | None = None) -> str | None:
     )
     for pattern in patterns:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
-    cleaned = " ".join(cleaned.split()).strip(" ,.-;:")
-    return cleaned or None
+    # Strip edge crumbs repeatedly (Whisper often stacks them).
+    for _ in range(3):
+        nxt = _LEADING_BLEED_RE.sub("", cleaned)
+        nxt = _TRAILING_BLEED_RE.sub("", nxt)
+        nxt = " ".join(nxt.split()).strip(" ,.-;:")
+        if nxt == cleaned:
+            break
+        cleaned = nxt
+    if not cleaned or _JUNK_ONLY_RE.fullmatch(cleaned):
+        return None
+    return cleaned
 
 
 _FILLER_RE = re.compile(
@@ -164,6 +195,39 @@ def is_hindi(text: str, language: str | None = None) -> bool:
 def is_hinglish(text: str, language: str | None = None) -> bool:
     if is_hindi(text, language) or not re.search(r"[A-Za-z]", text): return False
     return bool(re.search(r"\b(acha|accha|hai|kya|nahi|nahin|mera|aap|tum|karna|kaise)\b", text.lower()))
+
+
+_ARABIC_SCRIPT_RE = re.compile(r"[\u0600-\u06FF]")
+_DEVANAGARI_SCRIPT_RE = re.compile(r"[\u0900-\u097F]")
+_LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
+
+
+def pick_latin_transcript(*candidates: str) -> str | None:
+    """Pick the best Latin-Hinglish candidate; never Arabic/Urdu or Devanagari."""
+    scored: list[tuple[float, str]] = []
+    latin_only: list[tuple[float, str]] = []
+    for raw in candidates:
+        guarded = guard_transcription(raw)
+        if not guarded:
+            continue
+        if _ARABIC_SCRIPT_RE.search(guarded):
+            continue
+        latin_n = len(_LATIN_CHAR_RE.findall(guarded))
+        deva_n = len(_DEVANAGARI_SCRIPT_RE.findall(guarded))
+        score = float(latin_n) - 3.0 * float(deva_n)
+        scored.append((score, guarded))
+        if latin_n > 0 and deva_n == 0:
+            latin_only.append((score, guarded))
+    pool = latin_only or scored
+    if not pool:
+        return None
+    pool.sort(key=lambda item: item[0], reverse=True)
+    winner = pool[0][1]
+    if _DEVANAGARI_SCRIPT_RE.search(winner):
+        for _score, text in latin_only:
+            return text
+        return None
+    return winner
 
 def _fallback(text: str) -> str:
     return text.strip()
@@ -329,6 +393,47 @@ class GroqClient:
                     Path(audio).unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def transcribe_hinglish(
+        self,
+        audio: Path,
+        key: str,
+        *,
+        cancel: Event | None = None,
+        delete_audio: bool = False,
+    ) -> TranscriptResult:
+        """Double STT (en + hi); return the best Latin-Hinglish transcript."""
+        path = Path(audio)
+        en = self.transcribe(
+            path, key, cancel=cancel, delete_audio=False, language="en"
+        )
+        if cancel and cancel.is_set():
+            if delete_audio:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise GroqError("cancelled", "request cancelled")
+        hi = self.transcribe(
+            path, key, cancel=cancel, delete_audio=delete_audio, language="hi"
+        )
+        picked = pick_latin_transcript(en.text, hi.text)
+        if not picked:
+            self._logger.info(
+                "event=groq_transcribe_pick rejected en_chars=%s hi_chars=%s",
+                len(en.text or ""),
+                len(hi.text or ""),
+            )
+            return TranscriptResult("", None)
+        # Prefer language tag from the winning raw candidate when possible.
+        en_g = guard_transcription(en.text)
+        language = en.language if en_g == picked else hi.language
+        self._logger.info(
+            "event=groq_transcribe_pick chars=%s language=%s",
+            len(picked),
+            language or "unknown",
+        )
+        return TranscriptResult(picked, language)
 
     def cleanup(self, text: str, key: str, *, cancel: Event | None = None) -> CleanupResult:
         # Long transcripts + a large cleanup model is the usual "stuck" path.
