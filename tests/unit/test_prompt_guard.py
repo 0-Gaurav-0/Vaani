@@ -27,3 +27,15 @@ def test_guard_strips_edge_bleed():
     )
     assert guard_transcription("open chrome please Thank you") == "open chrome please"
     assert guard_transcription("Examples check basecamp") == "check basecamp"
+
+
+def test_guard_strips_eqamples_misspelling_mid_sentence():
+    raw = (
+        "Eqamples and Hinglish, Chuhnaan speaking, it seems like it was a few "
+        "seconds slow."
+    )
+    cleaned = guard_transcription(raw)
+    assert cleaned is not None
+    assert "eqamples" not in cleaned.casefold()
+    assert "hinglish" not in cleaned.casefold()
+    assert "seconds slow" in cleaned.casefold()

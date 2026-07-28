@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -31,30 +32,34 @@ CLEANUP_INSTRUCTION = (
     "Return only the edited transcript."
 )
 
-# Whisper auto-detect often labels Hindi as Urdu/Arabic. Force English language
-# code + this prompt so Hindi speech comes out as Latin-script Hinglish.
+# Whisper auto-detect often labels Hindi as Urdu/Arabic. Double STT (en+hi in
+# parallel) + this Latin prompt picks readable Hinglish without Urdu script.
 DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
 TRANSCRIPTION_PROMPT = (
     "English and Hinglish dictation in Latin letters only. "
-    "Examples: open Chrome, Chrome kholo, play Kesariya on YouTube, "
-    "YouTube pe gaana chalao, yeh kaam kar do."
+    "Write Hindi words in Latin script, never Arabic or Devanagari."
 )
 
 _PROMPT_BLEED_PATTERNS = (
     re.escape(TRANSCRIPTION_PROMPT),
     r"english and hinglish dictation in latin letters only\.?",
+    r"write hindi words in latin script(?:,? never arabic or devanagari)?\.?",
     r"in latin letters only\.?",
-    r"examples:\s*open chrome,\s*chrome kholo,\s*play kesariya on youtube,\s*"
-    r"youtube pe gaana chalao,\s*yeh kaam kar do\.?",
+    r"never arabic or devanagari\.?",
 )
 
 # Whisper silence / YouTube-trained hallucinations and prompt crumbs.
+# Include misspellings like "Eqamples" that Whisper invents from "Examples".
+_BLEED_CHUNK_RE = re.compile(
+    r"\b(?:e+[a-z]{0,3}amples?|english)\s+and\s+hinglish\b[,.]?\s*",
+    re.IGNORECASE,
+)
 _LEADING_BLEED_RE = re.compile(
     r"^(?:"
     r"english\s+and\s+hinglish\b[^.]*\.?\s*"
     r"|english\.?\s+"
     r"|hinglish\.?\s+"
-    r"|examples[,:]?\s+"
+    r"|e+[a-z]{0,3}amples?[,:]?\s+"
     r")+",
     re.IGNORECASE,
 )
@@ -64,9 +69,9 @@ _TRAILING_BLEED_RE = re.compile(
 )
 _JUNK_ONLY_RE = re.compile(
     r"^(?:"
-    r"thank\s+you|thanks\s+for\s+watching|english|hinglish|examples|"
+    r"thank\s+you|thanks\s+for\s+watching|english|hinglish|e+[a-z]{0,3}amples?|"
     r"so\s+much\s+for\s+you|you|the\s+end|subtitle[s]?\s+by\s+\w+"
-    r")(?:\s+(?:thank\s+you|thanks\s+for\s+watching|english|hinglish|examples))*"
+    r")(?:\s+(?:thank\s+you|thanks\s+for\s+watching|english|hinglish|e+[a-z]{0,3}amples?))*"
     r"\.?$",
     re.IGNORECASE,
 )
@@ -88,9 +93,11 @@ def guard_transcription(text: str, prompt: str | None = None) -> str | None:
     )
     for pattern in patterns:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = _BLEED_CHUNK_RE.sub(" ", cleaned)
     # Strip edge crumbs repeatedly (Whisper often stacks them).
-    for _ in range(3):
-        nxt = _LEADING_BLEED_RE.sub("", cleaned)
+    for _ in range(4):
+        nxt = _BLEED_CHUNK_RE.sub(" ", cleaned)
+        nxt = _LEADING_BLEED_RE.sub("", nxt)
         nxt = _TRAILING_BLEED_RE.sub("", nxt)
         nxt = " ".join(nxt.split()).strip(" ,.-;:")
         if nxt == cleaned:
@@ -402,38 +409,79 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """Double STT (en + hi); return the best Latin-Hinglish transcript."""
+        """Double STT (en + hi in parallel); return best Latin-Hinglish text.
+
+        Parallel cuts wall time ~in half vs sequential en-then-hi. Clean English
+        still finishes in roughly one Whisper round-trip.
+        """
         path = Path(audio)
-        en = self.transcribe(
-            path, key, cancel=cancel, delete_audio=False, language="en"
-        )
-        if cancel and cancel.is_set():
+        started = self._clock()
+
+        def _one(language: str) -> TranscriptResult:
+            return self.transcribe(
+                path, key, cancel=cancel, delete_audio=False, language=language
+            )
+
+        en: TranscriptResult | None = None
+        hi: TranscriptResult | None = None
+        errors: list[BaseException] = []
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {
+                    pool.submit(_one, "en"): "en",
+                    pool.submit(_one, "hi"): "hi",
+                }
+                for fut in as_completed(futures):
+                    if cancel and cancel.is_set():
+                        raise GroqError("cancelled", "request cancelled")
+                    label = futures[fut]
+                    try:
+                        result = fut.result()
+                    except BaseException as exc:  # noqa: BLE001 — collect both attempts
+                        errors.append(exc)
+                        self._logger.warning(
+                            "event=groq_transcribe_parallel_failed lang=%s detail=%s",
+                            label,
+                            type(exc).__name__,
+                        )
+                        continue
+                    if label == "en":
+                        en = result
+                    else:
+                        hi = result
+            if en is None and hi is None:
+                if errors:
+                    raise errors[0]
+                raise GroqError("malformed", "empty transcription")
+            candidates = [c.text for c in (en, hi) if c is not None]
+            picked = pick_latin_transcript(*candidates)
+            if not picked:
+                self._logger.info(
+                    "event=groq_transcribe_pick rejected en_chars=%s hi_chars=%s elapsed=%.2f",
+                    len(en.text) if en else 0,
+                    len(hi.text) if hi else 0,
+                    self._clock() - started,
+                )
+                return TranscriptResult("", None)
+            en_g = guard_transcription(en.text) if en else None
+            language = (
+                en.language
+                if en is not None and en_g == picked
+                else (hi.language if hi is not None else None)
+            )
+            self._logger.info(
+                "event=groq_transcribe_pick chars=%s language=%s elapsed=%.2f parallel=1",
+                len(picked),
+                language or "unknown",
+                self._clock() - started,
+            )
+            return TranscriptResult(picked, language)
+        finally:
             if delete_audio:
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
-            raise GroqError("cancelled", "request cancelled")
-        hi = self.transcribe(
-            path, key, cancel=cancel, delete_audio=delete_audio, language="hi"
-        )
-        picked = pick_latin_transcript(en.text, hi.text)
-        if not picked:
-            self._logger.info(
-                "event=groq_transcribe_pick rejected en_chars=%s hi_chars=%s",
-                len(en.text or ""),
-                len(hi.text or ""),
-            )
-            return TranscriptResult("", None)
-        # Prefer language tag from the winning raw candidate when possible.
-        en_g = guard_transcription(en.text)
-        language = en.language if en_g == picked else hi.language
-        self._logger.info(
-            "event=groq_transcribe_pick chars=%s language=%s",
-            len(picked),
-            language or "unknown",
-        )
-        return TranscriptResult(picked, language)
 
     def cleanup(self, text: str, key: str, *, cancel: Event | None = None) -> CleanupResult:
         # Long transcripts + a large cleanup model is the usual "stuck" path.
