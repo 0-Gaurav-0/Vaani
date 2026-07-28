@@ -33,22 +33,32 @@ CLEANUP_INSTRUCTION = (
     "Return only the edited transcript."
 )
 
-# Whisper `prompt` is prior-transcript style context — NOT system instructions.
-# Include rough/slang vocabulary so Whisper is less likely to blank swear words.
-# Keep this short; long instructional prompts cause bleed + English translation.
+# After Devanagari→Latin, polish mechanical transliteration into spoken Hinglish.
+ROMANIZE_POLISH_INSTRUCTION = (
+    "This text is a mechanical Latin transliteration of Hindi/Hinglish speech. "
+    "Rewrite it as natural spoken Hinglish in Latin letters only "
+    "(e.g. haala→haal, kyaa→kya, kertai→karta hai). "
+    "Do NOT translate into English. Keep every slang/swear word. "
+    "Keep English product words as-is (Chrome, email, workflow). "
+    "Return only the Hinglish line."
+)
+
+# Whisper `language` describes the AUDIO, not output script.
+# Latin style prompts + language=hi make Whisper emit broken roman phonetics.
+# Correct path: language=hi, no prompt → Devanagari → romanize → optional polish.
 DEFAULT_TRANSCRIPTION_LANGUAGE = "hi"
+# Kept for bleed guards / optional English-biased callers; hinglish path uses None.
 TRANSCRIPTION_PROMPT = (
     "kya haal hai. chrome kholo. yeh kaam kar do. "
-    "arey gaandu sun na. madarchod mat bol. chutiya kaam hai. "
-    "fuck this shit. bhenchod yaar."
+    "email verification check karo. workflow ka next step batao."
 )
 
 _PROMPT_BLEED_PATTERNS = (
     re.escape(TRANSCRIPTION_PROMPT),
     r"kya haal hai\.?\s*chrome kholo\.?\s*yeh kaam kar do\.?",
+    r"email verification check karo\.?\s*workflow ka next step batao\.?",
     r"arey gaandu sun na\.?\s*madarchod mat bol\.?\s*chutiya kaam hai\.?",
     r"fuck this shit\.?\s*bhenchod yaar\.?",
-    # Legacy instructional crumbs Whisper still invents.
     r"transcribe exactly what was spoken in latin letters only\.?",
     r"do not translate\.?",
     r"keep hindi/?hinglish words as spoken[^.]*\.?",
@@ -448,11 +458,11 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """Hinglish path: Whisper ``hi`` + Devanagari romanize (no en translate).
+        """Hindi/Hinglish: ``language=hi`` with NO Latin prompt → Devanagari → romanize.
 
-        ``language=en`` / instructional prompts make Whisper translate mix speech
-        into wrong English. Style-only prompt + ``hi`` keeps Hindi content; we
-        romanize Devanagari locally for Latin paste.
+        Latin prompts + ``hi`` made Whisper emit broken roman phonetics (confirmed
+        in raw-STT diagnostics). Empty prompt yields Devanagari; we romanize and
+        lightly polish to spoken Hinglish spelling.
         """
         path = Path(audio)
         started = self._clock()
@@ -463,12 +473,13 @@ class GroqClient:
                 cancel=cancel,
                 delete_audio=False,
                 language="hi",
-                prompt=TRANSCRIPTION_PROMPT,
+                prompt=None,
             )
-            raw = hi.text or ""
-            romanized = romanize_devanagari(raw) if has_devanagari(raw) else raw
-            picked = pick_latin_transcript(romanized, raw)
-            # If hi collapsed to junk, one auto fallback (still no language=en).
+            raw = (hi.text or "").strip()
+            used_romanize = has_devanagari(raw)
+            latin = romanize_devanagari(raw) if used_romanize else raw
+            picked = guard_transcription(latin) if latin else None
+            # If hi+empty-prompt somehow returns junk, try auto once (still no Latin prompt).
             if not picked:
                 auto = self.transcribe(
                     path,
@@ -476,24 +487,33 @@ class GroqClient:
                     cancel=cancel,
                     delete_audio=False,
                     language=None,
-                    prompt=TRANSCRIPTION_PROMPT,
+                    prompt=None,
                 )
-                auto_text = auto.text or ""
-                if has_devanagari(auto_text):
-                    auto_text = romanize_devanagari(auto_text)
-                picked = pick_latin_transcript(auto_text)
+                auto_raw = (auto.text or "").strip()
+                if has_devanagari(auto_raw):
+                    auto_raw = romanize_devanagari(auto_raw)
+                    used_romanize = True
+                picked = guard_transcription(auto_raw)
                 self._logger.info(
                     "event=groq_transcribe_fallback auto_chars=%s picked=%s elapsed=%.2f",
                     len(auto.text or ""),
                     len(picked or ""),
                     self._clock() - started,
                 )
-                return TranscriptResult(picked or "", auto.language)
+                if not picked:
+                    return TranscriptResult("", None)
+                if used_romanize:
+                    picked = self._polish_romanized(picked, key, cancel=cancel)
+                return TranscriptResult(picked, auto.language)
+
+            if used_romanize:
+                picked = self._polish_romanized(picked, key, cancel=cancel)
+
             self._logger.info(
                 "event=groq_transcribe_pick chars=%s language=hi romanize=%s "
                 "raw_chars=%s elapsed=%.2f preview=%r",
                 len(picked),
-                int(has_devanagari(raw)),
+                int(used_romanize),
                 len(raw),
                 self._clock() - started,
                 (picked[:80] + "…") if len(picked) > 80 else picked,
@@ -505,6 +525,63 @@ class GroqClient:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def _polish_romanized(
+        self, text: str, key: str, *, cancel: Event | None = None
+    ) -> str:
+        """Turn mechanical transliteration into natural Latin Hinglish spelling."""
+        local = light_local_cleanup(text) or text
+        if len(local.split()) <= 1:
+            return local
+        max_tokens = cleanup_max_tokens(local)
+        payload = {
+            "model": self.settings.cleanup_model,
+            "messages": [
+                {"role": "system", "content": ROMANIZE_POLISH_INSTRUCTION},
+                {"role": "user", "content": local},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0,
+        }
+        try:
+            self._logger.info(
+                "event=groq_romanize_polish_start chars=%s", len(local)
+            )
+            response = self._request(
+                "POST",
+                "/chat/completions",
+                key,
+                deadline=min(20.0, max(6.0, 4.0 + len(local) / 80.0)),
+                cancel=cancel,
+                json=payload,
+            )
+            if response.status_code >= 400:
+                return local
+            value = response.json()["choices"][0]["message"]["content"]
+            if not isinstance(value, str):
+                return local
+            cleaned = value.strip()
+            if cleaned.startswith("```") and cleaned.endswith("```"):
+                cleaned = cleaned.strip("`")
+                if "\n" in cleaned:
+                    cleaned = cleaned.split("\n", 1)[-1].strip()
+            cleaned = cleaned.strip().strip("\"'")
+            if not cleaned or has_devanagari(cleaned):
+                return local
+            # Reject English translation of the whole line.
+            if (
+                len(cleaned.split()) >= 4
+                and not _HINGLISH_TOKEN_RE.search(cleaned)
+                and _HINGLISH_TOKEN_RE.search(local)
+            ):
+                self._logger.info("event=groq_romanize_polish_rejected reason=english_drift")
+                return local
+            guarded = guard_transcription(cleaned)
+            return guarded or local
+        except (GroqError, ValueError, KeyError, IndexError, TypeError) as exc:
+            if isinstance(exc, GroqError) and exc.category == "cancelled":
+                raise
+            return local
 
     def cleanup(self, text: str, key: str, *, cancel: Event | None = None) -> CleanupResult:
         # Long transcripts + a large cleanup model is the usual "stuck" path.
