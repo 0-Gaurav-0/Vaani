@@ -6,6 +6,7 @@ hotkey path usable with real or test implementations.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import struct, math, os
@@ -349,9 +350,14 @@ class Controller:
     @staticmethod
     def _browser_intent(text: str) -> bool:
         normalized = " ".join(text.casefold().strip().split())
-        direct = {"open chrome", "open google chrome", "open browser", "launch chrome", "launch browser",
-                  "open brave", "launch brave", "open brave browser", "launch brave browser"}
-        return normalized in direct
+        return bool(
+            re.fullmatch(
+                r"(?:please\s+)?(?:open|launch|start)\s+"
+                r"(?:the\s+)?(?:google\s+)?"
+                r"(?:chrome|brave|browser)(?:\s+browser)?",
+                normalized,
+            )
+        )
 
     @staticmethod
     def _open_browser(*, prefer_brave: bool = True, url: str = "about:blank") -> str:
@@ -364,7 +370,10 @@ class Controller:
         category = category or exception_category(exc)
         with self._lock: self.state = AppState.IDLE; self._emit("failure", category)
         self.logger.error("controller failure category=%s detail=%s", category, sanitize(exc))
-        self._feedback(category or "failure")
+        # Every failed request must dismiss the processing pill.  ``category``
+        # is for diagnostics/notifications, while ``failure`` is the portable
+        # UI lifecycle cue that tears down the indicator.
+        self._feedback("failure")
 
     def _feedback(self, cue: str) -> None:
         try:
