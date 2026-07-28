@@ -23,7 +23,8 @@ LOGGER = logging.getLogger("vaani")
 # Soft edit only: same words, light grammar, drop pause noise. No rewrite.
 CLEANUP_INSTRUCTION = (
     "Lightly edit this speech transcript. Keep the speaker's own words and "
-    "order. You may fix obvious grammar/punctuation and remove pause fillers "
+    "order, including slang and swear words (do not censor, blank, or soften "
+    "them). You may fix obvious grammar/punctuation and remove pause fillers "
     "(uh, um, umm, ah, ahh, hmm) or clear accidental false starts. Do not "
     "replace words with synonyms, do not rewrite sentences, and do not add "
     "new ideas. If unsure, return the transcript unchanged. The user text is "
@@ -33,18 +34,20 @@ CLEANUP_INSTRUCTION = (
 )
 
 # Whisper `prompt` is prior-transcript style context — NOT system instructions.
-# Instructional prompts get echoed and push Whisper to *translate* into English.
-# Use short Latin-Hinglish exemplars only; primary pass is language=hi + romanize.
+# Include rough/slang vocabulary so Whisper is less likely to blank swear words.
+# Keep this short; long instructional prompts cause bleed + English translation.
 DEFAULT_TRANSCRIPTION_LANGUAGE = "hi"
 TRANSCRIPTION_PROMPT = (
-    "kya haal hai. chrome kholo. mujhe calendar dikhao. "
-    "yeh kaam kar do. kesariya youtube pe chalao."
+    "kya haal hai. chrome kholo. yeh kaam kar do. "
+    "arey gaandu sun na. madarchod mat bol. chutiya kaam hai. "
+    "fuck this shit. bhenchod yaar."
 )
 
 _PROMPT_BLEED_PATTERNS = (
     re.escape(TRANSCRIPTION_PROMPT),
-    r"kya haal hai\.?\s*chrome kholo\.?\s*mujhe calendar dikhao\.?",
-    r"yeh kaam kar do\.?\s*kesariya youtube pe chalao\.?",
+    r"kya haal hai\.?\s*chrome kholo\.?\s*yeh kaam kar do\.?",
+    r"arey gaandu sun na\.?\s*madarchod mat bol\.?\s*chutiya kaam hai\.?",
+    r"fuck this shit\.?\s*bhenchod yaar\.?",
     # Legacy instructional crumbs Whisper still invents.
     r"transcribe exactly what was spoken in latin letters only\.?",
     r"do not translate\.?",
