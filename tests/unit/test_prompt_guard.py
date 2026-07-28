@@ -30,6 +30,12 @@ def test_guard_strips_edge_bleed():
     assert guard_transcription("Examples check basecamp") == "check basecamp"
 
 
+def test_guard_does_not_censor_slang():
+    assert guard_transcription("gaandu") == "gaandu"
+    assert guard_transcription("tu gaandu hai yaar") == "tu gaandu hai yaar"
+    assert guard_transcription("fuck this shit bhai") == "fuck this shit bhai"
+
+
 def test_guard_strips_eqamples_misspelling_mid_sentence():
     raw = (
         "Eqamples and Hinglish, Chuhnaan speaking, it seems like it was a few "
