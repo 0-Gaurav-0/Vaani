@@ -338,7 +338,7 @@ class Controller:
                     key,
                     cancel=self._cancel,
                     delete_audio=True,
-                    language="hi",
+                    language=None,
                     prompt=None,
                 )
                 if self._cancel.is_set() or token != self._token:

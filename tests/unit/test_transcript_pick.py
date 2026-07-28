@@ -1,4 +1,4 @@
-from vaani.groq import pick_latin_transcript
+from vaani.groq import looks_like_english_prose, pick_latin_transcript
 
 
 def test_pick_prefers_latin_over_arabic():
@@ -36,3 +36,16 @@ def test_pick_prefers_hinglish_over_english_translation():
     assert out is not None
     assert "kholo" in out.casefold()
     assert "please open chrome for me" not in out.casefold()
+
+
+def test_english_prose_not_confused_with_garbled_romanize():
+    english = (
+        "What the fuck is this man? I mean, when I am talking in English, "
+        "it is saying in Hindi and even that is not correct."
+    )
+    garbage = (
+        "yeh paasa ekishiyalee hiyaa banaa rahee hai ki vaha uthaakshaana "
+        "kisa nanbara ke lie preetee hain"
+    )
+    assert looks_like_english_prose(english)
+    assert not looks_like_english_prose(garbage)

@@ -20,9 +20,8 @@ def test_models_and_transcription_multipart(tmp_path):
             )
         body=req.read()
         assert b'whisper-large-v3' in body and b'response_format' in body
-        assert b'language' in body
-        # Default hinglish path uses language=hi with no prompt (Devanagari → romanize).
-        return httpx.Response(200,json={'text':' hello ','language':'hi'})
+        # Default path uses auto language (no forced language=hi).
+        return httpx.Response(200,json={'text':' hello ','language':'en'})
     p=tmp_path/'x.wav'; p.write_bytes(b'RIFF')
     c=client(h); assert c.models('secret')[1] is True; assert c.transcribe(p,'secret').text=='hello'; assert len(seen)==2
 
