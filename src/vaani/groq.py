@@ -44,10 +44,11 @@ ROMANIZE_POLISH_INSTRUCTION = (
 )
 
 # Whisper `language` describes the AUDIO, not output script.
-# Latin style prompts + language=hi make Whisper emit broken roman phonetics.
-# Correct path: language=hi, no prompt → Devanagari → romanize → optional polish.
-DEFAULT_TRANSCRIPTION_LANGUAGE = "hi"
-# Kept for bleed guards / optional English-biased callers; hinglish path uses None.
+# Never force language=hi on English speech — that invents Devanagari phonetics
+# of English words, which romanize into gibberish.
+# Default: auto-detect. Hindi Devanagari → romanize; English stays English.
+DEFAULT_TRANSCRIPTION_LANGUAGE: str | None = None
+# Kept for bleed guards / optional callers; hinglish path uses prompt=None.
 TRANSCRIPTION_PROMPT = (
     "kya haal hai. chrome kholo. yeh kaam kar do. "
     "email verification check karo. workflow ka next step batao."
@@ -242,6 +243,62 @@ _HINGLISH_TOKEN_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+_EN_FUNCTION_RE = re.compile(
+    r"\b("
+    r"the|a|an|is|are|was|were|be|been|being|have|has|had|do|does|did|"
+    r"will|would|can|could|should|i|you|we|they|he|she|it|this|that|"
+    r"these|those|when|what|where|which|who|why|how|because|if|or|and|"
+    r"but|not|no|with|from|for|to|of|in|on|at|by|about|into|over|"
+    r"after|before|just|only|also|very|really|actually|exactly|"
+    r"something|anything|everything|nothing|my|your|our|their|me|"
+    r"him|her|us|them|am|talking|saying|working|mean|fuck|please|"
+    r"open|because|possible|status|relation|encoded|cursor|code"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _word_count(text: str) -> int:
+    return max(1, len((text or "").split()))
+
+
+def _hinglish_density(text: str) -> float:
+    return len(_HINGLISH_TOKEN_RE.findall(text or "")) / _word_count(text)
+
+
+def _english_density(text: str) -> float:
+    return len(_EN_FUNCTION_RE.findall(text or "")) / _word_count(text)
+
+
+def looks_like_english_prose(text: str) -> bool:
+    """True for fluent English; false for Latin Hinglish or romanized garbage."""
+    raw = (text or "").strip()
+    if not raw or has_devanagari(raw):
+        return False
+    words = raw.split()
+    en = _english_density(raw)
+    hi = _hinglish_density(raw)
+    if len(words) <= 3:
+        return hi < 0.34 and bool(_LATIN_CHAR_RE.search(raw))
+    return en >= 0.16 and hi < 0.12
+
+
+def _normalize_lang(language: str | None) -> str:
+    lang = (language or "").strip().lower()
+    if lang.startswith("en"):
+        return "en"
+    if lang.startswith(("hi", "hin")) or lang == "hindi":
+        return "hi"
+    return lang
+
+
+def _to_latin(text: str) -> tuple[str, bool]:
+    raw = (text or "").strip()
+    if has_devanagari(raw):
+        return romanize_devanagari(raw), True
+    return raw, False
 
 
 def _candidate_score(text: str) -> float:
@@ -458,30 +515,20 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """Hindi/Hinglish: ``language=hi`` with NO Latin prompt → Devanagari → romanize.
+        """Auto-detect language; romanize Hindi; never force English→fake Hindi.
 
-        Latin prompts + ``hi`` made Whisper emit broken roman phonetics (confirmed
-        in raw-STT diagnostics). Empty prompt yields Devanagari; we romanize and
-        lightly polish to spoken Hinglish spelling.
+        Parallel ``auto`` + ``hi`` (no Latin prompts). English audio keeps the
+        auto transcript. Hindi Devanagari is romanized + lightly polished.
+        Forced ``hi`` alone on English speech was producing gibberish.
         """
+        from concurrent.futures import ThreadPoolExecutor
+
         path = Path(audio)
         started = self._clock()
         try:
-            hi = self.transcribe(
-                path,
-                key,
-                cancel=cancel,
-                delete_audio=False,
-                language="hi",
-                prompt=None,
-            )
-            raw = (hi.text or "").strip()
-            used_romanize = has_devanagari(raw)
-            latin = romanize_devanagari(raw) if used_romanize else raw
-            picked = guard_transcription(latin) if latin else None
-            # If hi+empty-prompt somehow returns junk, try auto once (still no Latin prompt).
-            if not picked:
-                auto = self.transcribe(
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_auto = pool.submit(
+                    self.transcribe,
                     path,
                     key,
                     cancel=cancel,
@@ -489,36 +536,73 @@ class GroqClient:
                     language=None,
                     prompt=None,
                 )
-                auto_raw = (auto.text or "").strip()
-                if has_devanagari(auto_raw):
-                    auto_raw = romanize_devanagari(auto_raw)
-                    used_romanize = True
-                picked = guard_transcription(auto_raw)
-                self._logger.info(
-                    "event=groq_transcribe_fallback auto_chars=%s picked=%s elapsed=%.2f",
-                    len(auto.text or ""),
-                    len(picked or ""),
-                    self._clock() - started,
+                fut_hi = pool.submit(
+                    self.transcribe,
+                    path,
+                    key,
+                    cancel=cancel,
+                    delete_audio=False,
+                    language="hi",
+                    prompt=None,
                 )
-                if not picked:
-                    return TranscriptResult("", None)
-                if used_romanize:
-                    picked = self._polish_romanized(picked, key, cancel=cancel)
-                return TranscriptResult(picked, auto.language)
+                auto = fut_auto.result()
+                hi = fut_hi.result()
 
-            if used_romanize:
+            auto_latin, auto_deva = _to_latin(auto.text or "")
+            hi_latin, hi_deva = _to_latin(hi.text or "")
+            auto_g = guard_transcription(auto_latin) if auto_latin else None
+            hi_g = guard_transcription(hi_latin) if hi_latin else None
+            detected = _normalize_lang(auto.language)
+
+            polish = False
+            picked: str | None = None
+            lang_out: str | None = auto.language
+
+            # Hard rule: Whisper says English → keep English. Forced-hi Devanagari
+            # of English speech romanizes into nonsense; never prefer it.
+            if detected == "en" and auto_g:
+                # Only override when hi is clearly spoken Hinglish and auto looks
+                # like a translation (shorter hinglish, high density).
+                if (
+                    hi_deva
+                    and hi_g
+                    and _hinglish_density(hi_g) >= 0.22
+                    and looks_like_english_prose(auto_g)
+                    and len(hi_g.split()) <= max(4, int(len(auto_g.split()) * 0.75))
+                ):
+                    picked, polish, lang_out = hi_g, True, "hi"
+                else:
+                    picked, polish, lang_out = auto_g, False, auto.language or "en"
+            elif auto_deva and auto_g:
+                picked, polish, lang_out = auto_g, True, auto.language or "hi"
+            elif detected == "hi" and hi_deva and hi_g:
+                picked, polish, lang_out = hi_g, True, "hi"
+            elif looks_like_english_prose(auto_g or "") and _hinglish_density(auto_g or "") < 0.08:
+                picked, polish, lang_out = auto_g, False, auto.language or "en"
+            elif hi_deva and hi_g and _hinglish_density(hi_g) >= _hinglish_density(auto_g or ""):
+                picked, polish, lang_out = hi_g, True, "hi"
+            else:
+                picked = pick_latin_transcript(auto_g or "", hi_g or "")
+                polish = bool(picked and (auto_deva or hi_deva) and picked in {auto_g, hi_g})
+                lang_out = auto.language or (hi.language if hi_g else None)
+
+            if not picked:
+                return TranscriptResult("", None)
+            if polish:
                 picked = self._polish_romanized(picked, key, cancel=cancel)
 
             self._logger.info(
-                "event=groq_transcribe_pick chars=%s language=hi romanize=%s "
-                "raw_chars=%s elapsed=%.2f preview=%r",
+                "event=groq_transcribe_pick chars=%s detected=%s romanize=%s "
+                "auto_chars=%s hi_chars=%s elapsed=%.2f preview=%r",
                 len(picked),
-                int(used_romanize),
-                len(raw),
+                detected or "unknown",
+                int(polish),
+                len(auto.text or ""),
+                len(hi.text or ""),
                 self._clock() - started,
                 (picked[:80] + "…") if len(picked) > 80 else picked,
             )
-            return TranscriptResult(picked, hi.language or "hi")
+            return TranscriptResult(picked, lang_out)
         finally:
             if delete_audio:
                 try:
