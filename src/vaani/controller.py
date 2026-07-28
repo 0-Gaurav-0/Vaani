@@ -19,6 +19,7 @@ from .observability import exception_category, sanitize
 from .groq import GroqError, guard_transcription
 from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
+from .folders import launch_folder, resolve_folder, resolve_folder_name
 from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
 from .assistant_intent import classify_assistant_intent
@@ -405,6 +406,8 @@ class Controller:
         # Fast path: deterministic resolvers (no LLM).
         if self._assistant_try_app(token, audio, raw):
             return
+        if self._assistant_try_folder(token, audio, raw):
+            return
         if self._assistant_try_browser(token, audio, raw):
             return
         if self._assistant_try_skill(token, audio, raw):
@@ -583,6 +586,11 @@ class Controller:
                     open_text = f"open {app.name}"
                     if self._assistant_try_app(token, audio, open_text):
                         return
+                folder = resolve_folder_name(query)
+                if folder is not None:
+                    open_text = f"open {folder.name}"
+                    if self._assistant_try_folder(token, audio, open_text):
+                        return
             if want in {"", "site", "web", "browser"}:
                 site = resolve_browse_query(query, browser=browser)
                 if site and self._assistant_open_site(token, audio, raw, site):
@@ -590,6 +598,8 @@ class Controller:
             # Last resort: synthesize classic open phrases for resolvers.
             open_text = f"open {query}".strip()
             if self._assistant_try_app(token, audio, open_text):
+                return
+            if self._assistant_try_folder(token, audio, open_text):
                 return
             if self._assistant_try_browser(token, audio, open_text):
                 return
@@ -753,6 +763,30 @@ class Controller:
                 mode="assistant",
                 delivery_status="displayed",
                 cleanup_status="app_action",
+                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+            )
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
+            self._feedback("success")
+        return True
+
+    def _assistant_try_folder(self, token: int, audio: Any, raw: str) -> bool:
+        folder = resolve_folder(raw)
+        if folder is None:
+            return False
+        self.logger.info("event=assistant_route kind=folder name=%s", folder.name)
+        answer = launch_folder(folder)
+        if self.result_window is not None and hasattr(self.result_window, "show_text"):
+            self.result_window.show_text(answer)
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return True
+            self.history.insert(
+                raw_text=raw,
+                final_text=answer,
+                mode="assistant",
+                delivery_status="displayed",
+                cleanup_status="folder_action",
                 duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
             )
             self.state = AppState.IDLE
