@@ -25,3 +25,14 @@ def test_pick_strips_bleed_then_keeps_speech():
     assert out is not None
     assert "open chrome" in out.casefold()
     assert not out.casefold().startswith("english")
+
+
+def test_pick_prefers_hinglish_over_english_translation():
+    # Whisper-en often translates; hi/auto may keep spoken words.
+    out = pick_latin_transcript(
+        "Please open Chrome for me I am in a hurry right now",
+        "bhai chrome kholo jaldi",
+    )
+    assert out is not None
+    assert "kholo" in out.casefold()
+    assert "please open chrome for me" not in out.casefold()
