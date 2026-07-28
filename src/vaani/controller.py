@@ -36,6 +36,15 @@ from .indicator_protocol import clear_command, read_command
 from .delivery import DeliveryStatus
 from .memory import append_turn, load_context
 
+# Temporary diagnostic: set VAANI_RAW_STT=1 to paste Whisper output with zero
+# transcript post-processing (no guard, romanize/pick, cleanup, or answer-prefix).
+RAW_STT_NO_POSTPROCESS = os.environ.get("VAANI_RAW_STT", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     import re
     m = re.match(r"^\s*(Answer this|Only answer|Question)\b\s*[:,\-]?\s*(.*)$", text, re.I | re.S)
@@ -321,6 +330,47 @@ class Controller:
                     self.state = AppState.IDLE
                     self._emit("cancelled")
                 self._feedback("busy")
+                return
+            if RAW_STT_NO_POSTPROCESS:
+                # One Whisper call only — paste exactly what the model returned.
+                from .groq import TRANSCRIPTION_PROMPT
+
+                result = self.groq.transcribe(
+                    audio.path,
+                    key,
+                    cancel=self._cancel,
+                    delete_audio=True,
+                    language="hi",
+                    prompt=TRANSCRIPTION_PROMPT,
+                )
+                if self._cancel.is_set() or token != self._token:
+                    return
+                raw = (result.text or "").strip()
+                self.logger.info(
+                    "event=raw_stt_no_postprocess chars=%s preview=%r",
+                    len(raw),
+                    (raw[:120] + "…") if len(raw) > 120 else raw,
+                )
+                if not raw:
+                    with self._lock:
+                        if self._cancel.is_set() or token != self._token:
+                            return
+                        self.state = AppState.IDLE
+                        self._emit("cancelled")
+                    self._feedback("busy")
+                    return
+                if self.mode == "assistant":
+                    self._process_assistant(token, audio, key, raw, result)
+                    return
+                self._deliver_text(
+                    token,
+                    audio,
+                    raw=raw,
+                    final=raw,
+                    history_mode=self.mode or "literal",
+                    cleanup_status="raw_no_postprocess",
+                    language=getattr(result, "language", None),
+                )
                 return
             # Double STT (en+hi) → Latin Hinglish; avoid forced-en Hindi garble.
             transcribe_h = getattr(self.groq, "transcribe_hinglish", None)
