@@ -333,15 +333,13 @@ class Controller:
                 return
             if RAW_STT_NO_POSTPROCESS:
                 # One Whisper call only — paste exactly what the model returned.
-                from .groq import TRANSCRIPTION_PROMPT
-
                 result = self.groq.transcribe(
                     audio.path,
                     key,
                     cancel=self._cancel,
                     delete_audio=True,
                     language="hi",
-                    prompt=TRANSCRIPTION_PROMPT,
+                    prompt=None,
                 )
                 if self._cancel.is_set() or token != self._token:
                     return
