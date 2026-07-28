@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -16,6 +15,7 @@ from .config import (CLEANUP_DEADLINE, CLEANUP_READ_TIMEOUT, CONNECT_TIMEOUT,
                      TRANSCRIPTION_DEADLINE, TRANSCRIPTION_READ_TIMEOUT,
                      UPLOAD_TIMEOUT, POOL_ACQUISITION_TIMEOUT)
 from .config import MAX_AUDIO_BYTES
+from .romanize import has_devanagari, romanize_devanagari
 from .types import GroqModelSettings
 
 LOGGER = logging.getLogger("vaani")
@@ -32,22 +32,25 @@ CLEANUP_INSTRUCTION = (
     "Return only the edited transcript."
 )
 
-# Double STT: auto + hi in parallel (NOT language=en — that translates Hindi→English).
-# Prompt forces Latin Hinglish transcription without translation.
-DEFAULT_TRANSCRIPTION_LANGUAGE = "en"
+# Whisper `prompt` is prior-transcript style context — NOT system instructions.
+# Instructional prompts get echoed and push Whisper to *translate* into English.
+# Use short Latin-Hinglish exemplars only; primary pass is language=hi + romanize.
+DEFAULT_TRANSCRIPTION_LANGUAGE = "hi"
 TRANSCRIPTION_PROMPT = (
-    "Transcribe exactly what was spoken in Latin letters only. "
-    "Do not translate. Keep Hindi/Hinglish words as spoken "
-    "(kya, hai, kholo, chahiye). Never use Arabic or Devanagari."
+    "kya haal hai. chrome kholo. mujhe calendar dikhao. "
+    "yeh kaam kar do. kesariya youtube pe chalao."
 )
 
 _PROMPT_BLEED_PATTERNS = (
     re.escape(TRANSCRIPTION_PROMPT),
+    r"kya haal hai\.?\s*chrome kholo\.?\s*mujhe calendar dikhao\.?",
+    r"yeh kaam kar do\.?\s*kesariya youtube pe chalao\.?",
+    # Legacy instructional crumbs Whisper still invents.
     r"transcribe exactly what was spoken in latin letters only\.?",
     r"do not translate\.?",
     r"keep hindi/?hinglish words as spoken[^.]*\.?",
     r"never use arabic or devanagari\.?",
-    # Legacy prompt crumbs still emitted by Whisper from older sessions/models.
+    r"write hindi words in latin(?:\s+script)?[^.]*\.?",
     r"english and hinglish dictation in latin letters only\.?",
     r"dictation in latin letters only\.?",
     r"in latin letters only\.?",
@@ -442,77 +445,57 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """Parallel auto+hi STT; pick Latin Hinglish (never English translation).
+        """Hinglish path: Whisper ``hi`` + Devanagari romanize (no en translate).
 
-        ``language=en`` is intentionally avoided — Whisper then *translates*
-        Hindi/mix into wrong English. Auto + hi keep spoken words; the picker
-        prefers Hinglish particles over longer English paraphrases.
+        ``language=en`` / instructional prompts make Whisper translate mix speech
+        into wrong English. Style-only prompt + ``hi`` keeps Hindi content; we
+        romanize Devanagari locally for Latin paste.
         """
         path = Path(audio)
         started = self._clock()
-
-        def _one(language: str | None) -> TranscriptResult:
-            return self.transcribe(
-                path, key, cancel=cancel, delete_audio=False, language=language
-            )
-
-        auto: TranscriptResult | None = None
-        hi: TranscriptResult | None = None
-        errors: list[BaseException] = []
         try:
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                futures = {
-                    pool.submit(_one, None): "auto",
-                    pool.submit(_one, "hi"): "hi",
-                }
-                for fut in as_completed(futures):
-                    if cancel and cancel.is_set():
-                        raise GroqError("cancelled", "request cancelled")
-                    label = futures[fut]
-                    try:
-                        result = fut.result()
-                    except BaseException as exc:  # noqa: BLE001 — collect both attempts
-                        errors.append(exc)
-                        self._logger.warning(
-                            "event=groq_transcribe_parallel_failed lang=%s detail=%s",
-                            label,
-                            type(exc).__name__,
-                        )
-                        continue
-                    if label == "auto":
-                        auto = result
-                    else:
-                        hi = result
-            if auto is None and hi is None:
-                if errors:
-                    raise errors[0]
-                raise GroqError("malformed", "empty transcription")
-            candidates = [c.text for c in (auto, hi) if c is not None]
-            picked = pick_latin_transcript(*candidates)
+            hi = self.transcribe(
+                path,
+                key,
+                cancel=cancel,
+                delete_audio=False,
+                language="hi",
+                prompt=TRANSCRIPTION_PROMPT,
+            )
+            raw = hi.text or ""
+            romanized = romanize_devanagari(raw) if has_devanagari(raw) else raw
+            picked = pick_latin_transcript(romanized, raw)
+            # If hi collapsed to junk, one auto fallback (still no language=en).
             if not picked:
+                auto = self.transcribe(
+                    path,
+                    key,
+                    cancel=cancel,
+                    delete_audio=False,
+                    language=None,
+                    prompt=TRANSCRIPTION_PROMPT,
+                )
+                auto_text = auto.text or ""
+                if has_devanagari(auto_text):
+                    auto_text = romanize_devanagari(auto_text)
+                picked = pick_latin_transcript(auto_text)
                 self._logger.info(
-                    "event=groq_transcribe_pick rejected auto_chars=%s hi_chars=%s elapsed=%.2f",
-                    len(auto.text) if auto else 0,
-                    len(hi.text) if hi else 0,
+                    "event=groq_transcribe_fallback auto_chars=%s picked=%s elapsed=%.2f",
+                    len(auto.text or ""),
+                    len(picked or ""),
                     self._clock() - started,
                 )
-                return TranscriptResult("", None)
-            auto_g = guard_transcription(auto.text) if auto else None
-            language = (
-                auto.language
-                if auto is not None and auto_g == picked
-                else (hi.language if hi is not None else None)
-            )
+                return TranscriptResult(picked or "", auto.language)
             self._logger.info(
-                "event=groq_transcribe_pick chars=%s language=%s elapsed=%.2f parallel=1 "
-                "auto_chars=%s hi_chars=%s",
+                "event=groq_transcribe_pick chars=%s language=hi romanize=%s "
+                "raw_chars=%s elapsed=%.2f preview=%r",
                 len(picked),
-                language or "unknown",
+                int(has_devanagari(raw)),
+                len(raw),
                 self._clock() - started,
-                len(auto.text) if auto else 0,
-                len(hi.text) if hi else 0,
+                (picked[:80] + "…") if len(picked) > 80 else picked,
             )
-            return TranscriptResult(picked, language)
+            return TranscriptResult(picked, hi.language or "hi")
         finally:
             if delete_audio:
                 try:

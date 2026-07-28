@@ -5,6 +5,7 @@ def test_guard_rejects_prompt_bleed():
     assert guard_transcription(TRANSCRIPTION_PROMPT) is None
     assert guard_transcription("English and Hinglish dictation in Latin letters only.") is None
     assert guard_transcription("hello world") == "hello world"
+    assert guard_transcription("Write Hindi words in Latin") is None
     cleaned = guard_transcription(
         "English and Hinglish dictation in Latin letters only. open chrome please"
     )
