@@ -125,12 +125,26 @@ def test_assistant_uses_runner_displays_and_persists():
         def show(self, result): self.results.append(result.stdout)
     class CodingGroq(Groq):
         def transcribe(self, *a, **k): return SimpleNamespace(text='fix the flaky test', language='en')
-    h=History(); w=Window()
+        def route(self, text, *a, **k):
+            from vaani.assistant_route import RouteDecision
+            return RouteDecision(intent='codex', query=text, confidence=0.9)
+    class FB:
+        def __init__(self):
+            self.clarify = None
+        def play(self, cue):
+            return True
+        def show_clarify(self, question, options):
+            self.clarify = (question, list(options))
+    h=History(); w=Window(); fb=FB()
     c=Controller(recorder=Rec(), groq=CodingGroq(), delivery=Delivery(), history=h,
-                 codex=Runner(), result_window=w, key_provider=lambda:'key')
+                 feedback=fb, codex=Runner(), result_window=w, key_provider=lambda:'key')
     assert c.trigger_assistant(); assert c.stop(); c._worker.join(1)
+    # Codex is confirm-gated: first stop only shows Confirm/Cancel.
+    assert w.results == []
+    assert fb.clarify is not None
+    c._apply_clarify_index(0)
     assert w.results == ['answer']
-    assert h.rows[0]['mode'] == 'assistant' and h.rows[0]['final_text'] == 'answer'
+    assert h.rows[-1]['mode'] == 'assistant' and h.rows[-1]['final_text'] == 'answer'
     assert c.state is AppState.IDLE
 
 
