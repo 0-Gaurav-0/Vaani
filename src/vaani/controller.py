@@ -563,6 +563,22 @@ class Controller:
     ) -> None:
         intent = decision.intent
         query = decision.query or raw
+        if (decision.target or "").casefold() == "cancel":
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return
+                self.history.insert(
+                    raw_text=raw,
+                    final_text="Cancelled.",
+                    mode="assistant",
+                    delivery_status="displayed",
+                    cleanup_status="confirm_cancel",
+                    duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+                )
+                self.state = AppState.IDLE
+                self._emit("assistant_complete")
+            self._feedback("busy")
+            return
 
         if intent == "play":
             site = resolve_play_target(query, decision.target or "youtube")
@@ -618,7 +634,10 @@ class Controller:
             return
 
         if intent == "codex":
-            self._assistant_codex(token, audio, query or raw)
+            confirmed = (decision.target or "").casefold() in {"confirm", "confirmed"}
+            self._assistant_codex(
+                token, audio, query or raw, confirmed=confirmed
+            )
             return
 
         if intent == "skill":
@@ -681,9 +700,22 @@ class Controller:
             self.state = AppState.IDLE
             self._emit("assistant_complete")
 
-    def _assistant_codex(self, token: int, audio: Any, raw: str) -> None:
+    def _assistant_codex(
+        self, token: int, audio: Any, raw: str, *, confirmed: bool = False
+    ) -> None:
         if self.codex is None:
             raise RuntimeError("assistant runner unavailable")
+        if not confirmed:
+            preview = " ".join((raw or "").split())
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            options = (
+                RouteOption(f"Confirm — run Codex: {preview}", "codex", raw, "confirm"),
+                RouteOption("Cancel", "paste", "", "cancel"),
+            )
+            self.logger.info("event=assistant_codex_confirm_prompt chars=%s", len(raw))
+            self._begin_clarify(token, audio, raw, options)
+            return
         self.logger.info("event=assistant_route kind=codex chars=%s", len(raw))
         self._feedback("processing")
         answer = self.codex.run(raw)
