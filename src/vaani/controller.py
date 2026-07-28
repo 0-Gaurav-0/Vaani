@@ -20,6 +20,7 @@ from .groq import GroqError, guard_transcription
 from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
 from .folders import launch_folder, resolve_folder, resolve_folder_name
+from .volume import resolve_volume_action, run_volume_action
 from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
 from .assistant_intent import classify_assistant_intent
@@ -404,6 +405,8 @@ class Controller:
             self.logger.info("event=assistant_clarify_abandoned")
 
         # Fast path: deterministic resolvers (no LLM).
+        if self._assistant_try_volume(token, audio, raw):
+            return
         if self._assistant_try_app(token, audio, raw):
             return
         if self._assistant_try_folder(token, audio, raw):
@@ -731,6 +734,30 @@ class Controller:
                 mode="assistant",
                 delivery_status="displayed",
                 cleanup_status="browser_action",
+                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+            )
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
+            self._feedback("success")
+        return True
+
+    def _assistant_try_volume(self, token: int, audio: Any, raw: str) -> bool:
+        action = resolve_volume_action(raw)
+        if action is None:
+            return False
+        self.logger.info("event=assistant_route kind=volume name=%s", action.name)
+        answer = run_volume_action(action)
+        if self.result_window is not None and hasattr(self.result_window, "show_text"):
+            self.result_window.show_text(answer)
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return True
+            self.history.insert(
+                raw_text=raw,
+                final_text=answer,
+                mode="assistant",
+                delivery_status="displayed",
+                cleanup_status="volume_action",
                 duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
             )
             self.state = AppState.IDLE
