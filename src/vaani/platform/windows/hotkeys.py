@@ -121,6 +121,11 @@ class WindowsHotkeyService:
                         service.logger.exception("event=hotkey_cancel_error")
                 return
             service._pressed.add(token)
+            # Start only when Space is the key that completes the chord.
+            # This prevents a stale/missed Space-release event from making a
+            # later Ctrl press look like a new dictation request.
+            if token != "space":
+                return
             action = service._match_action()
             if action is None or service._held_action is not None:
                 return

@@ -143,6 +143,8 @@ def test_assistant_launches_resolved_desktop_app(monkeypatch):
 
 def test_browser_intent_safe_action(monkeypatch):
     assert Controller._browser_intent("  Open   Chrome ")
+    assert Controller._browser_intent("open the Chrome browser")
+    assert Controller._browser_intent("please launch Google Chrome")
     assert not Controller._browser_intent("open chrome and run ls")
     monkeypatch.setattr("vaani.platform.linux.browser.shutil.which", lambda name: None)
     monkeypatch.setattr(

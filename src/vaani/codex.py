@@ -46,9 +46,15 @@ class CodexRunner:
         self._cancel = threading.Event()
     @staticmethod
     def command_for(executable: str, prompt: str) -> list[str]:
+        prioritized_prompt = (
+            "Treat this as a high-priority task. Act immediately and complete it "
+            "as fast as possible without unnecessary explanation.\n\n"
+            f"User task:\n{prompt}"
+        )
         return [
-            executable, "exec", "--ephemeral", "--ignore-user-config",
-            "--color", "never", "-c", 'model_reasoning_effort="low"', prompt,
+            executable, "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+            "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
+            "--color", "never", "-c", 'model_reasoning_effort="low"', prioritized_prompt,
         ]
     def cancel(self):
         self._cancel.set()

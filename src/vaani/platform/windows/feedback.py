@@ -164,6 +164,21 @@ class WindowsFeedback:
             return
         proc = self.indicator
         self.indicator = None
+        # On Windows the launcher can create a second Python child through the
+        # environment shim. Terminating only the parent leaves the visible Tk
+        # pill orphaned, so terminate the whole process tree by PID.
+        if os.name == "nt" and getattr(proc, "pid", None):
+            try:
+                subprocess.run(
+                    ["taskkill.exe", "/PID", str(proc.pid), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                )
+                return
+            except Exception:
+                pass
         try:
             proc.terminate()
         except Exception:
@@ -213,7 +228,6 @@ class WindowsFeedback:
                 write_phase(self.phase_path, "processing")
             except Exception:
                 pass
-            self.notify("paste", "Transcribing…")
         elif cue in _DISMISS_CUES:
             self._stop_indicator()
         sounded = self._play_sound(cue)

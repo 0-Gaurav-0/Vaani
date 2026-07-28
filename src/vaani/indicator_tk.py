@@ -77,7 +77,15 @@ def run_pill(
         root.attributes("-topmost", True)
     except tk.TclError:
         pass
-    root.configure(bg="#000000")
+    root.configure(bg="#ff00ff")
+    if sys.platform.startswith("win"):
+        # Tk still owns a rectangular window, but Windows can treat one color
+        # as transparent. The pill's black stadium remains visible while the
+        # four unused corner regions disappear completely.
+        try:
+            root.attributes("-transparentcolor", "#ff00ff")
+        except tk.TclError:
+            pass
 
     screen_w = root.winfo_screenwidth()
     screen_h = root.winfo_screenheight()
@@ -92,7 +100,7 @@ def run_pill(
         width=WIDTH,
         height=HEIGHT,
         highlightthickness=0,
-        bg="#000000",
+        bg="#ff00ff",
         bd=0,
     )
     canvas.pack()

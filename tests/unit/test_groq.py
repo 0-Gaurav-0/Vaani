@@ -15,9 +15,31 @@ def test_models_and_transcription_multipart(tmp_path):
         seen.append(req)
         if req.url.path.endswith('/models'): return httpx.Response(200,json={'data':[{'id':'whisper-large-v3-turbo'}]})
         body=req.read(); assert b'whisper-large-v3-turbo' in body and b'response_format' in body
+        assert b'Latin-script Hinglish' in body
         return httpx.Response(200,json={'text':' hello ','language':'en'})
     p=tmp_path/'x.wav'; p.write_bytes(b'RIFF')
     c=client(h); assert c.models('secret')[1] is False; assert c.transcribe(p,'secret').text=='hello'; assert len(seen)==2
+
+
+def test_hindi_cleanup_requests_latin_hinglish_and_allows_transliteration():
+    seen = []
+    def h(req):
+        seen.append(json.loads(req.read()))
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'namaste duniya'}, 'finish_reason': 'stop'}]})
+
+    result = client(h).cleanup('नमस्ते दुनिया', 'k')
+    assert result.text == 'namaste duniya'
+    assert not result.used_fallback
+    assert 'Latin-script Hinglish' in seen[0]['messages'][0]['content']
+
+
+def test_english_cleanup_keeps_strict_divergence_guard():
+    def h(req):
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'namaste duniya'}, 'finish_reason': 'stop'}]})
+
+    result = client(h).cleanup('Hello world', 'k')
+    assert result.used_fallback
+    assert result.text == 'Hello world'
 
 def test_fixture_files_exist():
     root=Path(__file__).parents[1]/'fixtures'/'groq'
