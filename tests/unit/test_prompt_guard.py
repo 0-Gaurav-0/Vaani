@@ -9,3 +9,21 @@ def test_guard_rejects_prompt_bleed():
         "English and Hinglish dictation in Latin letters only. open chrome please"
     )
     assert cleaned is None or "open chrome" in cleaned.casefold()
+
+
+def test_guard_rejects_junk_only():
+    assert guard_transcription("Thank you") is None
+    assert guard_transcription("Thanks for watching.") is None
+    assert guard_transcription("English") is None
+    assert guard_transcription("Examples") is None
+    assert guard_transcription("English Hinglish Thank you") is None
+    assert guard_transcription("So much for you") is None
+
+
+def test_guard_strips_edge_bleed():
+    assert (
+        guard_transcription("English. What's the weather in Gujarat")
+        == "What's the weather in Gujarat"
+    )
+    assert guard_transcription("open chrome please Thank you") == "open chrome please"
+    assert guard_transcription("Examples check basecamp") == "check basecamp"

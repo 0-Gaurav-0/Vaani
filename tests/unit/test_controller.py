@@ -39,9 +39,18 @@ def test_cancel_returns_idle_without_history():
 
 def test_indicator_control_file_stop(tmp_path):
     from vaani.indicator_protocol import write_command
+    import struct
+    import wave
 
     wav = tmp_path / "a.wav"
-    wav.write_bytes(b"RIFF" + b"\x00" * 40 + b"\x00\x00")
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        frames = b"".join(
+            struct.pack("<h", 8000 if (i // 40) % 2 == 0 else -8000) for i in range(8000)
+        )
+        w.writeframes(frames)
     control = tmp_path / "indicator_control.json"
     amp = tmp_path / "amplitude"
 

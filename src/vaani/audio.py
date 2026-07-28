@@ -20,6 +20,9 @@ from .types import AudioResult
 PAREC_ARGV = ("parec", "--device=@DEFAULT_SOURCE@", "--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav")
 PAREC_CMDLINE = " ".join(PAREC_ARGV)
 
+# Peak window RMS below this ⇒ treat as muted / no speech (matches waveform idle floor).
+SILENCE_PEAK_RMS = 0.012
+
 
 class AudioError(RuntimeError):
     pass
@@ -340,6 +343,36 @@ class AudioRecorderImpl:
             self._path = None
         # Belt-and-suspenders: never leave a Vaani parec behind after cleanup.
         reap_orphan_parec()
+
+
+def wav_peak_rms(path: Path, *, window_bytes: int = 3200) -> float:
+    """Max PCM16 RMS over short windows (0..1). Header is skipped."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(44)
+            data = fh.read()
+    except OSError:
+        return 0.0
+    if len(data) < 2:
+        return 0.0
+    step = max(2, window_bytes - (window_bytes % 2))
+    peak = 0.0
+    for i in range(0, len(data) - 1, step):
+        chunk = data[i : i + step]
+        if len(chunk) >= 2:
+            peak = max(peak, _pcm16_rms(chunk))
+    return peak
+
+
+def is_silent_wav(path: Path, *, floor: float = SILENCE_PEAK_RMS) -> bool:
+    """True when the recording looks like a muted mic / no speech."""
+    target = Path(path)
+    try:
+        if not target.is_file():
+            return False
+    except OSError:
+        return False
+    return wav_peak_rms(target) < floor
 
 
 def validate_wav(path: Path, *, duration_seconds: float | None = None) -> AudioResult:
