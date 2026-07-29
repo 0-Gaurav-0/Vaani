@@ -1,49 +1,72 @@
 # X11 Gesture Corrections
 
 **Date:** 2026-07-29
-**Scope:** Vaani middle-button input routing and the current X11 Touchégg configuration
+**Scope:** Vaani middle-button routing, state-aware GNOME actions, and the current
+X11 Touchégg configuration
 
 ## Goal
 
 Make the existing gestures behave reliably without changing the X11 session:
 
-- Three-finger touchpad tap toggles global media play/pause and never starts Vaani.
+- Three-finger touchpad tap toggles global media play/pause and never starts
+  Vaani.
 - Physical TrackPoint middle-button hold/release continues to control Vaani.
-- A single three-finger horizontal swipe can traverse multiple Alt+Tab entries.
-- Four-finger up toggles GNOME Activities Overview.
-- Four-finger down shows the current workspace desktop without closing windows; repeating it restores them.
-- Existing pinch zoom, volume, and four-finger workspace switching remain intact.
+- Three-finger horizontal swipes traverse the application switcher in the
+  direction the fingers move.
+- Four-finger up and down are reciprocal across normal, Overview, and
+  show-desktop states.
+- Existing pinch zoom, volume, and four-finger workspace switching remain
+  intact.
 
-## Input Architecture
+## Constraints
 
-The current manager receives source-blind core button-2 events and infers their
-origin by querying device state afterward. That introduces a race for short
-touchpad taps. Replace that inference with XInput2 device-specific passive grabs.
+- Keep X11, Touchégg, and the currently working Vaani core middle-button grab.
+- Do not retry the XInput2 passive-grab implementation that disabled the live
+  TrackPoint hotkey.
+- Do not change Time Doctor, Sprinto, Tailscale, touchpad tapping configuration,
+  or the disabled GNOME X11 Gestures extension.
+- Treat the live device topology as one enabled `Elan Touchpad`, one enabled
+  `Elan TrackPoint`, and XTEST virtual devices. If that physical topology
+  changes, media routing must fail closed rather than treating an unknown
+  pointer as the touchpad.
+
+## Middle-Button Routing
+
+Retain the existing Vaani manager's proven global core button-2 grab, TrackPoint
+resolution, button-scrolling lifecycle, hold/double-press state machine, and Esc
+handling.
 
 At registration:
 
-1. Query XInput2 devices and resolve exactly one enabled `Elan Touchpad` slave
-   pointer and one enabled TrackPoint slave pointer by exact known name.
-2. Require distinct device IDs. Missing, ambiguous, disabled, or reused IDs fail
-   closed.
-3. Install button-2 passive grabs separately for the touchpad and TrackPoint,
-   using asynchronous modes, any modifier, and button press/release events.
-4. Keep the existing TrackPoint button-scrolling disable/restore lifecycle.
+1. Resolve the physical TrackPoint by its exact known name as today.
+2. Verify that the enabled physical slave-pointer topology contains exactly the
+   expected Elan touchpad and TrackPoint. Ignore XTEST virtual devices.
+3. Enable touchpad-media routing only while that topology is verified.
 
-Route events by the XInput2 source device ID:
+For each grabbed button-2 press:
 
-- TrackPoint press/release enters only the existing `MiddleButtonGesture`
-  hold/double-press state machine.
-- A matched touchpad press/release invokes the media callback exactly once on
-  release and never touches Vaani gesture state.
-- Unknown sources and unmatched releases do nothing.
-- Touchpad input during a TrackPoint hold cannot stop Vaani.
-- TrackPoint input cannot toggle media.
+1. If an earlier press is still latched, ignore the duplicate.
+2. Query the resolved physical TrackPoint's button-2 state.
+3. If the state is down, latch the press as TrackPoint and enter only the
+   existing `MiddleButtonGesture`.
+4. If the state is up, reverify the physical pointer topology. If it still
+   matches, latch the press as a touchpad media tap. Do not touch Vaani gesture
+   or session state.
+5. If state or topology cannot be verified, latch nothing and perform no
+   action.
 
-If device identity or grab setup becomes invalid, release any active Vaani
-session safely, remove stale grabs, re-resolve the exact devices, and reinstall
-grabs only after successful verification. Do not fall back to a core global grab,
-an arbitrary pointer, a hard-coded device ID, or state polling.
+For release:
+
+- A latched TrackPoint release follows the existing Vaani release path.
+- A latched touchpad release invokes the media callback exactly once.
+- An unknown or unmatched release does nothing except clear stale safety
+  latches.
+- Touchpad routing never calls Vaani trigger, release, or cancel callbacks.
+- Esc cancellation continues to ignore a held TrackPoint until its release, but
+  Esc while idle does not disable later presses.
+
+This design deliberately extends the currently working manager rather than
+changing its grab architecture.
 
 ## Media Key Delivery
 
@@ -53,79 +76,104 @@ keycode; do not hard-code keycode 172 or use string lookup.
 
 Emit one key press and release, attempting release in `finally`, then synchronize
 the display. A delivery failure is logged and remains isolated from Vaani.
-Remove the Touchégg `TAP` entry because Touchégg tap gestures are touchscreen-only.
+Touchégg has no three-finger `TAP` entry because its tap gesture applies to
+touchscreens, not this touchpad.
 
-## Touchégg Configuration
+## Three-Finger Horizontal Swipes
 
-Keep two-finger pinch, three-finger volume, and four-finger left/right workspace
-actions unchanged.
+Keep repeated key delivery with ten progress steps and preserve reversal within
+one gesture, but swap the forward/backward actions:
 
-For three-finger horizontal swipes, preserve the current direction behavior but
-use repeated key delivery with ten progress steps:
+- Left: hold Alt, repeat Shift+Tab, use Tab when reversing.
+- Right: hold Alt, repeat Tab, use Shift+Tab when reversing.
 
-- Left: hold Alt, repeat Tab, use Shift+Tab when reversing.
-- Right: hold Alt, repeat Shift+Tab, use Tab when reversing.
+Touchégg presses Alt at gesture start, emits a switcher step as progress
+increases, and releases Alt when the gesture ends.
 
-Touchégg presses Alt at gesture start, emits a Tab action at each progress step,
-and releases Alt when the gesture ends.
+## State-Aware Four-Finger Up and Down
 
-Add:
+Replace the independent static up/down actions with non-repeating Touchégg
+`RUN_COMMAND` actions executed at gesture end. Both call a small Linux/X11
+helper in `src/vaani/platform/linux/desktop_gestures.py` with an `up` or `down`
+argument. The active Touchégg config invokes that module through the live Vaani
+checkout's virtual-environment Python.
 
-- Four-finger up: non-repeating bare `Super_L`, executed at gesture end.
-- Four-finger down: native animated `SHOW_DESKTOP`.
+The helper reads live state rather than maintaining a state file:
 
-`SHOW_DESKTOP` uses `_NET_SHOWING_DESKTOP`. On GNOME 42 it applies to the current
-workspace and is reversible; it does not close windows or permanently minimize
-windows across every virtual workspace.
+- GNOME Overview: `org.gnome.Shell.OverviewActive` over the session D-Bus.
+- Desktop visibility: root-window `_NET_SHOWING_DESKTOP`.
 
-Leave the installed X11 Gestures GNOME extension disabled. Enabling it with its
-stored three-finger setting would compete with the custom three-finger actions.
+The transition table is:
+
+| Current state | Four-finger up | Four-finger down |
+| --- | --- | --- |
+| Normal application view | Open Overview | Show desktop |
+| Overview open | Close Overview | Close Overview |
+| Desktop showing | Restore windows | Restore windows |
+
+Up therefore remains a true Super-style Overview toggle except that restoring a
+shown desktop takes priority. Down always returns toward the application view
+when Overview is open, and otherwise toggles show-desktop.
+
+GNOME normally keeps Overview and show-desktop mutually exclusive. If both flags
+are unexpectedly true, up restores the desktop first and down closes Overview
+first; the other flag is left unchanged.
+
+The helper sets `OverviewActive` through D-Bus and sends the standard
+`_NET_SHOWING_DESKTOP` X11 client message. It does not minimize or close windows
+individually, so GNOME retains their workspace, stacking, and layout.
+
+Four-finger left/right remain the existing animated `CHANGE_DESKTOP` actions.
 
 ## Failure Handling
 
-- XInput2 unavailable or device resolution/grab failure: neither Vaani nor media
-  is triggered from an unverified source.
-- Media keysym unavailable or XTEST failure: log the error, attempt key release,
-  and do not fall through to Vaani.
-- Device removal or ID reuse: invalidate both latches and grabs before
-  re-resolution.
-- Shutdown or partial setup failure: remove installed grabs and restore the
-  TrackPoint scrolling property.
+- TrackPoint state unknown: do not start Vaani or toggle media.
+- Unexpected physical pointer topology: keep TrackPoint behavior available but
+  disable touchpad-media classification.
+- Media keysym or XTEST failure: log the error, attempt key release, and do not
+  fall through to Vaani.
+- Overview-state query or D-Bus mutation failure: log and leave desktop state
+  unchanged.
+- `_NET_SHOWING_DESKTOP` query or message failure: log and leave windows
+  unchanged.
+- Helper failure must not affect Vaani, Touchégg's other gestures, or window
+  contents.
+- Shutdown restores the TrackPoint scrolling property and clears all routing
+  latches.
 
 ## Tests
 
 Add focused unit coverage for:
 
 - Touchpad press/release toggles media once and never triggers Vaani.
-- TrackPoint hold/release and double-press behavior remain unchanged.
-- Touchpad input during a TrackPoint hold cannot release Vaani.
-- Cross-device and unmatched releases do nothing.
-- Unknown, missing, ambiguous, disabled, or reused devices fail closed.
-- Partial passive-grab failure cleans up completed setup.
-- Unregister restores button scrolling and clears latches.
+- TrackPoint hold/release, double-press, and Esc behavior remain unchanged.
+- Unknown state and unexpected physical pointer topology fail closed for media.
+- Duplicate and unmatched events do not cross the Vaani/media paths.
+- Unregister restores button scrolling and clears routing latches.
 - The XTEST media sender resolves the XF86 constant and attempts key release
   after failure.
-
-Validate the XML structure and exact gesture semantics after editing.
+- Every state/direction pair in the four-finger transition table.
+- D-Bus and EWMH failures cause no fallback transition.
+- Exact Touchégg XML direction, repeat, reversal, command, and preserved-gesture
+  semantics.
 
 ## Live Validation
 
-1. Run focused hotkey tests and the relevant Vaani unit suite.
-2. Confirm Vaani is idle from a terminal lifecycle event and no capture process
-   or indicator is active.
-3. Allow Touchégg to reload its configuration; confirm successful parsing.
-4. Restart only Vaani and confirm exact device IDs/grabs in the log.
-5. With a read-only XInput/log monitor active, perform real gestures:
-   - Three-finger tap toggles background/minimized media exactly once, produces
-     no Vaani recording event, and sends no middle click to the focused app.
-   - TrackPoint middle hold/release starts/stops Vaani without toggling media.
-   - One long horizontal swipe traverses at least five switcher entries; reversing
-     before lift moves backward; Alt is released after lift.
-   - Four-finger up toggles Overview.
-   - Four-finger down shows the current workspace desktop and repeating it restores
-     the windows.
-   - Existing volume, workspace, and pinch gestures still work.
-6. Do not declare completion until the real hardware behavior is observed.
-
-Do not change X11 configuration, Time Doctor, Sprinto, Tailscale, unrelated
-files, or the disabled GNOME X11 Gestures extension.
+1. Run focused hotkey, desktop-helper, XML, and relevant Vaani unit tests.
+2. Confirm Vaani is idle from its latest lifecycle event and that no recorder or
+   indicator is active.
+3. Let Touchégg reload the configuration and confirm successful parsing.
+4. Restart only Vaani.
+5. Verify physical TrackPoint middle hold/release starts and stops Vaani before
+   testing touchpad media.
+6. With a live log monitor, confirm a three-finger touchpad tap toggles
+   background or minimized media exactly once and creates no Vaani recording
+   event.
+7. Confirm left moves backward with Alt+Shift+Tab, right moves forward with
+   Alt+Tab, a long swipe crosses at least five entries, reversal works, and Alt
+   is released after lift.
+8. Exercise every row of the four-finger transition table and confirm windows
+   return with the same layout.
+9. Confirm volume, workspace, and pinch gestures still work.
+10. Do not declare completion until TrackPoint and touchpad behavior are both
+    observed on the real hardware.
