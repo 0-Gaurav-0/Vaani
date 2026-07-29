@@ -292,15 +292,18 @@ def _extract_play_query(normalized: str) -> tuple[str, str] | None:
     if match is not None:
         return "play", match.group(1)
 
-    # Bare play/watch/chalao — YouTube by default unless an OTT was named.
+    # Bare play/watch/chalao/bajao — YouTube by default unless an OTT was named.
     # Allow polite wrappers: "can you play…", "could you please play…".
+    # Also "ple …" (Whisper clipping "play") and trailing "… bajao/play karo".
     match = re.search(
         r"^(?:(?:please|can you|could you|would you|will you)(?:\s+please)?\s+)*"
-        r"(play|watch|chalao|suno)\s+(.+)$",
+        r"(play|watch|chalao|suno|bajao|ple)\s+(.+)$",
         normalized,
     )
     if match is not None:
         action, query = match.group(1), match.group(2)
+        if action == "ple":
+            action = "play"
         query = query.rstrip(" .,!?\"'")
         query = re.sub(r"\s+on\s+.+$", "", query).strip()
         query = re.sub(
@@ -310,6 +313,16 @@ def _extract_play_query(normalized: str) -> tuple[str, str] | None:
             query,
         ).strip()
         return action, query
+
+    match = re.search(
+        r"^(.+?)\s+(?:bajao|baja\s*do|play\s*karo|chalao|chala\s*do|suno)\s*$",
+        normalized,
+    )
+    if match is not None:
+        query = match.group(1).strip()
+        query = re.sub(r"^(yeh|woh|the|a|an)\s+", "", query).strip()
+        if query:
+            return "play", query
 
     return None
 
