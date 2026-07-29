@@ -453,14 +453,9 @@ class MiddleButtonHotkeyManager:
                     break
                 except Exception:
                     continue
-        if pointer is None:
-            for line in listing.splitlines():
-                if "slave" in line and "pointer" in line and "XTEST" not in line:
-                    m = re.search(r"id=(\d+)", line)
-                    if m:
-                        pointer = m.group(1)
-                        break
-        self._pointer_id = pointer or "10"
+        # Do not fall back to an arbitrary pointer: that could resolve the
+        # touchpad and turn its synthetic middle clicks into Vaani triggers.
+        self._pointer_id = pointer
         try:
             self._keyboard_id = self._xinput(
                 "list", "--id-only", "AT Translated Set 2 keyboard"
@@ -477,6 +472,19 @@ class MiddleButtonHotkeyManager:
             dpy.close()
         except Exception:
             self._escape = 9
+
+    def _trackpoint_middle_state(self) -> bool | None:
+        """Return button-2 state for the resolved TrackPoint, or None if unknown."""
+        if not self._pointer_id:
+            return None
+        try:
+            state = self._xinput("query-state", self._pointer_id)
+        except Exception:
+            return None
+        match = re.search(r"button\[2\]=(down|up)", state)
+        if match is None:
+            return None
+        return match.group(1) == "down"
 
     def _disable_button_scroll(self) -> None:
         pid = self._pointer_id
@@ -534,7 +542,7 @@ class MiddleButtonHotkeyManager:
         return bool(re.search(rf"key\[{self._escape}\]=down", out))
 
     def _cancel_now(self) -> None:
-        """Esc (or equivalent): abort session and ignore middle-button until release."""
+        """Esc (or equivalent): abort session; only ignore middle-button if it is down."""
         if self.on_cancel:
             try:
                 self.on_cancel()
@@ -542,7 +550,11 @@ class MiddleButtonHotkeyManager:
                 pass
         self._session_active = False
         self._held_mode = None
-        self._ignore_until_up = True
+        # Only arm ignore-until-up when button 2 is physically held. Esc while
+        # Idle used to set this forever: press was ignored (gesture.down stayed
+        # False) so the matching release never cleared the flag → dead hotkey
+        # until restart.
+        self._ignore_until_up = self._trackpoint_middle_state() is True
         self._gesture.active = False
         self._gesture.mode = None
         self._gesture.armed_until = -1.0
@@ -574,6 +586,36 @@ class MiddleButtonHotkeyManager:
                 self.on_release(held)
             except Exception:
                 pass
+
+    def _handle_button_event(self, event_type: int) -> bool:
+        """Handle button 2 only when it belongs to the physical TrackPoint."""
+        press_type = getattr(X, "ButtonPress", 4)
+        release_type = getattr(X, "ButtonRelease", 5)
+        if event_type == press_type:
+            if self._ignore_until_up or self._trackpoint_middle_state() is not True:
+                return False
+            mode = self._gesture.on_down()
+            if mode:
+                self._start_mode(mode)
+            return True
+        if event_type != release_type:
+            return False
+        # Always clear Esc-armed ignore on a real button-2 release, even when
+        # the press was ignored (gesture.down False) — otherwise the hotkey dies.
+        self._ignore_until_up = False
+        if not self._gesture.down:
+            return False
+        if self._trackpoint_middle_state() is True:
+            # A touchpad middle-click can arrive while TrackPoint button 2 is
+            # held. Do not let that unrelated release stop hold-to-talk.
+            return False
+        # Unknown state is safe to release: it can stop an accepted physical
+        # press, but can never start a session or leave the microphone stuck.
+        if self._gesture.on_up():
+            self._stop_mode()
+        else:
+            self._gesture.down = False
+        return True
 
     def _run(self) -> None:
         if X is None:
@@ -639,19 +681,7 @@ class MiddleButtonHotkeyManager:
                         detail = getattr(ev, "detail", None)
                         if detail != 2:
                             continue
-                        if ev.type == Xconst.ButtonPress:
-                            if self._ignore_until_up:
-                                continue
-                            mode = self._gesture.on_down()
-                            if mode:
-                                self._start_mode(mode)
-                        elif ev.type == Xconst.ButtonRelease:
-                            self._ignore_until_up = False
-                            if self._gesture.on_up():
-                                self._stop_mode()
-                            else:
-                                # Clear latch even if no session was active.
-                                self._gesture.down = False
+                        self._handle_button_event(ev.type)
                 except Exception:
                     if self._stop.wait(0.05):
                         break
