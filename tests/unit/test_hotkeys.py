@@ -228,3 +228,89 @@ def test_middle_button_short_click_expires_without_second_press():
     assert g.on_down() is None
     t["now"] = 0.70
     assert g.tick() == SMART
+
+
+def test_middle_button_manager_rejects_touchpad_button_2(monkeypatch):
+    from vaani.hotkeys import MiddleButtonHotkeyManager
+
+    presses = []
+    releases = []
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: presses.append(mode) or True,
+        on_release=releases.append,
+        hold_ms=0,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
+
+    assert manager._handle_button_event(X.ButtonPress) is False
+    assert manager._handle_button_event(X.ButtonRelease) is False
+    assert manager._gesture.down is False
+    assert presses == []
+    assert releases == []
+
+
+def test_middle_button_manager_accepts_trackpoint_press_and_release(monkeypatch):
+    from vaani.hotkeys import MiddleButtonHotkeyManager, SMART
+
+    presses = []
+    releases = []
+    states = iter((True, False))
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: presses.append(mode) or True,
+        on_release=releases.append,
+        hold_ms=0,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: next(states))
+
+    assert manager._handle_button_event(X.ButtonPress) is True
+    mode = manager._gesture.tick()
+    assert mode == SMART
+    manager._start_mode(mode)
+    assert manager._handle_button_event(X.ButtonRelease) is True
+    assert presses == [SMART]
+    assert releases == [SMART]
+
+
+def test_middle_button_manager_fails_closed_when_trackpoint_state_is_unknown(monkeypatch):
+    from vaani.hotkeys import MiddleButtonHotkeyManager
+
+    manager = MiddleButtonHotkeyManager(lambda _mode: True)
+    manager._pointer_id = "10"
+    monkeypatch.setattr(
+        manager,
+        "_xinput",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("xinput unavailable")),
+    )
+
+    assert manager._trackpoint_middle_state() is None
+    assert manager._handle_button_event(X.ButtonPress) is False
+    assert manager._gesture.down is False
+
+
+def test_esc_while_idle_does_not_permanently_kill_middle_button(monkeypatch):
+    """Esc in Idle used to set ignore_until_up forever (no matching release)."""
+    from vaani.hotkeys import MiddleButtonHotkeyManager, SMART
+
+    presses = []
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: presses.append(mode) or True,
+        hold_ms=0,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
+    manager._cancel_now()
+    assert manager._ignore_until_up is False
+
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: True)
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._gesture.tick() == SMART
+
+
+def test_button2_release_clears_ignore_even_when_press_was_ignored(monkeypatch):
+    from vaani.hotkeys import MiddleButtonHotkeyManager
+
+    manager = MiddleButtonHotkeyManager(lambda _mode: True, hold_ms=0)
+    manager._ignore_until_up = True
+    manager._gesture.down = False
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
+    assert manager._handle_button_event(X.ButtonRelease) is False
+    assert manager._ignore_until_up is False
