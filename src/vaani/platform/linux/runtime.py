@@ -14,9 +14,10 @@ from ...controller import Controller
 from ...delivery import ClipboardDelivery
 from ...groq import GroqClient
 from ...history import HistoryStore
-from ...hotkeys import MiddleButtonHotkeyManager
+from ...hotkeys import MiddleButtonHotkeyManager, XTestMediaKeySender
 from ...observability import configure_logging
 from ...secrets import SecretServiceKeyStore, effective_key
+from ...gemini_stt import gemini_api_key
 from ...x11 import X11Probe
 from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
@@ -216,9 +217,23 @@ def _run_x11(settings: Settings) -> int:
     def assistant_trigger(_signum=None, _frame=None):
         on_hotkey_press("assistant")
 
+    media_keys = XTestMediaKeySender()
+
+    def on_touchpad_middle() -> None:
+        try:
+            media_keys.play_pause()
+            logger.info("event=media_play_pause source=touchpad_middle")
+        except Exception as exc:
+            logger.error(
+                "event=media_play_pause_failed detail=%s", type(exc).__name__
+            )
+
     # Middle button owns hold-to-talk on ThinkPads; Ctrl+Space stays with the desktop.
     hotkeys = MiddleButtonHotkeyManager(
-        on_hotkey_press, on_release=on_hotkey_release, on_cancel=controller.cancel
+        on_hotkey_press,
+        on_release=on_hotkey_release,
+        on_cancel=controller.cancel,
+        on_touchpad_middle=on_touchpad_middle,
     )
     controller.hotkeys = hotkeys
     try:
@@ -234,10 +249,11 @@ def _run_x11(settings: Settings) -> int:
             flush=True,
         )
         logger.info(
-            "event=startup_linux log=%s debug=%s session=%s backend=middle-button",
+            "event=startup_linux log=%s debug=%s session=%s backend=middle-button gemini_stt=%s",
             log_path,
             settings.debug,
             session_type,
+            "on" if __import__("os").environ.get("GEMINI_API_KEY", "").strip() else "off",
         )
         hotkeys.register()
         logger.info(

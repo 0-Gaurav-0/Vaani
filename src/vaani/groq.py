@@ -515,15 +515,46 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """English→English, Hindi→Latin, mix→mix. One Whisper call when possible.
+        """English→English, Hindi→Latin, mix→mix.
 
-        Auto-detect first (no prompt). If Whisper mis-labels English as Hindi and
-        returns Devanagari, cross-check with ``language=en`` and keep English.
-        A second ``hi`` pass runs only when Hindi may have been translated to English.
+        Prefer Gemini when ``GEMINI_API_KEY`` is set (steerable Latin Hinglish).
+        Otherwise Groq Whisper auto-detect with English cross-check on Hindi LID.
         """
         path = Path(audio)
         started = self._clock()
         try:
+            from .gemini_stt import gemini_api_key, transcribe_with_gemini
+
+            gkey = gemini_api_key()
+            if gkey:
+                try:
+                    gem = transcribe_with_gemini(
+                        path,
+                        gkey,
+                        cancel=cancel,
+                        clock=self._clock,
+                        logger=self._logger,
+                    )
+                    if gem.text:
+                        self._logger.info(
+                            "event=groq_transcribe_pick provider=gemini chars=%s "
+                            "elapsed=%.2f preview=%r",
+                            len(gem.text),
+                            self._clock() - started,
+                            (gem.text[:80] + "…") if len(gem.text) > 80 else gem.text,
+                        )
+                        return gem
+                except GroqError as exc:
+                    if exc.category == "cancelled":
+                        raise
+                    self._logger.warning(
+                        "event=gemini_transcribe_fallback detail=%s", exc.category
+                    )
+                except Exception as exc:
+                    self._logger.warning(
+                        "event=gemini_transcribe_fallback detail=%s", type(exc).__name__
+                    )
+
             auto = self.transcribe(
                 path,
                 key,
