@@ -517,9 +517,9 @@ class GroqClient:
     ) -> TranscriptResult:
         """English→English, Hindi→Latin, mix→mix. One Whisper call when possible.
 
-        Auto-detect first (no prompt). Only run a second ``hi`` pass when the
-        auto result looks like a Hindi→English translation. Parallel auto+hi
-        was making long English clips wait on a slow useless Hindi call.
+        Auto-detect first (no prompt). If Whisper mis-labels English as Hindi and
+        returns Devanagari, cross-check with ``language=en`` and keep English.
+        A second ``hi`` pass runs only when Hindi may have been translated to English.
         """
         path = Path(audio)
         started = self._clock()
@@ -540,38 +540,66 @@ class GroqClient:
             picked: str | None = None
             lang_out: str | None = auto.language
             hi_chars = 0
+            en_chars = 0
 
-            # Clear English (or Latin Hinglish that auto already got right).
+            def _english_cross_check() -> str | None:
+                nonlocal en_chars
+                en = self.transcribe(
+                    path,
+                    key,
+                    cancel=cancel,
+                    delete_audio=False,
+                    language="en",
+                    prompt=None,
+                )
+                en_chars = len(en.text or "")
+                en_g = guard_transcription(en.text or "")
+                if en_g and looks_like_english_prose(en_g) and _hinglish_density(en_g) < 0.12:
+                    return en_g
+                return None
+
+            # Auto returned Devanagari (often "Hindi") — may be real Hindi OR
+            # English mis-detected as Hindi. Cross-check English before romanize.
             if auto_deva and auto_g:
-                picked, polish, lang_out = auto_g, True, auto.language or "hi"
+                en_g = _english_cross_check()
+                if en_g:
+                    picked, polish, lang_out = en_g, False, "en"
+                else:
+                    picked, polish, lang_out = auto_g, True, auto.language or "hi"
             elif detected == "en" and auto_g:
                 picked, polish, lang_out = auto_g, False, auto.language or "en"
-            elif auto_g and looks_like_english_prose(auto_g) and _hinglish_density(auto_g) < 0.08:
-                # Auto may mis-label Hindi speech as English and translate it.
-                # Second hi pass only in that suspicious case.
-                need_hi = detected == "hi" or (
-                    detected not in ("en",) and len(auto_g.split()) >= 6
-                )
-                if need_hi and detected == "hi":
-                    hi = self.transcribe(
-                        path,
-                        key,
-                        cancel=cancel,
-                        delete_audio=False,
-                        language="hi",
-                        prompt=None,
-                    )
-                    hi_chars = len(hi.text or "")
-                    hi_latin, hi_deva = _to_latin(hi.text or "")
-                    hi_g = guard_transcription(hi_latin) if hi_latin else None
-                    if hi_deva and hi_g and _hinglish_density(hi_g) >= 0.15:
-                        picked, polish, lang_out = hi_g, True, "hi"
-                    else:
-                        picked, polish, lang_out = auto_g, False, auto.language or "en"
+            elif detected not in ("en", "hi", "") and auto_g:
+                # Weird LID (korean/malayalam/…) on short English — prefer en.
+                en_g = _english_cross_check()
+                if en_g:
+                    picked, polish, lang_out = en_g, False, "en"
                 else:
-                    picked, polish, lang_out = auto_g, False, auto.language or "en"
+                    picked, polish, lang_out = auto_g, False, auto.language
+            elif detected == "hi" and auto_g and looks_like_english_prose(auto_g) and _hinglish_density(auto_g) < 0.12:
+                # Hindi audio wrongly translated to English → dedicated hi pass.
+                hi = self.transcribe(
+                    path,
+                    key,
+                    cancel=cancel,
+                    delete_audio=False,
+                    language="hi",
+                    prompt=None,
+                )
+                hi_chars = len(hi.text or "")
+                hi_latin, hi_deva = _to_latin(hi.text or "")
+                hi_g = guard_transcription(hi_latin) if hi_latin else None
+                if hi_deva and hi_g:
+                    # Still verify it isn't English forced into Devanagari.
+                    en_g = _english_cross_check()
+                    if en_g and _hinglish_density(hi_g) < 0.15:
+                        picked, polish, lang_out = en_g, False, "en"
+                    else:
+                        picked, polish, lang_out = hi_g, True, "hi"
+                else:
+                    picked = pick_latin_transcript(auto_g, hi_g or "") or auto_g
+                    polish = False
+                    lang_out = "hi"
             elif detected == "hi" and auto_g and not auto_deva:
-                # Hindi audio, Latin text — may already be Hinglish, or a translation.
                 if _hinglish_density(auto_g) >= 0.12 or not looks_like_english_prose(auto_g):
                     picked, polish, lang_out = auto_g, False, "hi"
                 else:
@@ -587,14 +615,17 @@ class GroqClient:
                     hi_latin, hi_deva = _to_latin(hi.text or "")
                     hi_g = guard_transcription(hi_latin) if hi_latin else None
                     if hi_deva and hi_g:
-                        picked, polish, lang_out = hi_g, True, "hi"
+                        en_g = _english_cross_check()
+                        if en_g and _hinglish_density(hi_g) < 0.15:
+                            picked, polish, lang_out = en_g, False, "en"
+                        else:
+                            picked, polish, lang_out = hi_g, True, "hi"
                     else:
                         picked = pick_latin_transcript(auto_g, hi_g or "")
                         lang_out = "hi"
             elif auto_g:
                 picked, polish, lang_out = auto_g, False, auto.language
             else:
-                # Auto empty/junk — last resort hi pass.
                 hi = self.transcribe(
                     path,
                     key,
@@ -616,12 +647,13 @@ class GroqClient:
 
             self._logger.info(
                 "event=groq_transcribe_pick chars=%s detected=%s romanize=%s "
-                "auto_chars=%s hi_chars=%s elapsed=%.2f preview=%r",
+                "auto_chars=%s hi_chars=%s en_chars=%s elapsed=%.2f preview=%r",
                 len(picked),
                 detected or "unknown",
                 int(polish),
                 len(auto.text or ""),
                 hi_chars,
+                en_chars,
                 self._clock() - started,
                 (picked[:80] + "…") if len(picked) > 80 else picked,
             )
