@@ -23,7 +23,7 @@ from .folders import launch_folder, resolve_folder, resolve_folder_name
 from .volume import resolve_volume_action, run_volume_action
 from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
-from .assistant_intent import classify_assistant_intent
+from .assistant_intent import classify_assistant_intent, looks_like_action
 from .assistant_route import (
     RouteDecision,
     RouteOption,
@@ -437,8 +437,22 @@ class Controller:
             pending = self._pending_clarify
         if pending:
             picked = match_clarify_choice(raw, pending)
-            self._clear_clarify()
-            if picked is not None:
+            # New action command while clarify is open → don't treat it as picking
+            # a Q&A option (e.g. garbled "play …" matching label "Kya haal hai?").
+            if (
+                picked is not None
+                and looks_like_action(raw)
+                and picked.intent in {"qa", "paste", "clarify"}
+            ):
+                self.logger.info(
+                    "event=assistant_clarify_abandoned reason=new_action label=%s",
+                    picked.label,
+                )
+                self._clear_clarify()
+                pending = None
+                picked = None
+            elif picked is not None:
+                self._clear_clarify()
                 self.logger.info(
                     "event=assistant_clarify_pick via=speech label=%s", picked.label
                 )
@@ -450,7 +464,10 @@ class Controller:
                 )
                 self._execute_route_decision(token, audio, key, raw, result, decision)
                 return
-            self.logger.info("event=assistant_clarify_abandoned")
+            else:
+                self._clear_clarify()
+                self.logger.info("event=assistant_clarify_abandoned")
+                pending = None
 
         # Fast path: deterministic resolvers (no LLM).
         if self._assistant_try_volume(token, audio, raw):

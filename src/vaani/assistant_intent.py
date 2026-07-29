@@ -5,9 +5,12 @@ import re
 
 _ACTION_PATTERNS = (
     r"\b(open|launch|start|play|watch|search|run|visit|browse|surf|navigate)\b",
-    r"\b(kholo|khol|chalao|chalu|shuru|dikhao|dikha|jao|chalo)\b",
+    r"\b(kholo|khol|chalao|chalu|shuru|dikhao|dikha|jao|chalo|bajao|baja|suno)\b",
+    r"\b(gaana|gana|song|music|trailer)\b",
     r"\byoutube\b",
     r"\bskill\b",
+    # Whisper often clips "play" → "ple" at the start of short holds.
+    r"^ple\b",
 )
 
 _AGENT_PATTERNS = (
