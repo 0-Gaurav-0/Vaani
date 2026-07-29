@@ -370,7 +370,7 @@ class Controller:
                     language=getattr(result, "language", None),
                 )
                 return
-            # Double STT (en+hi) → Latin Hinglish; avoid forced-en Hindi garble.
+            # Gemini (or Groq hinglish) transcription.
             transcribe_h = getattr(self.groq, "transcribe_hinglish", None)
             if callable(transcribe_h):
                 result = transcribe_h(
@@ -381,7 +381,37 @@ class Controller:
                     audio.path, key, cancel=self._cancel, delete_audio=True, language="en"
                 )
             if self._cancel.is_set() or token != self._token: return
-            guarded = guard_transcription(result.text) if result.text else None
+            raw = (result.text or "").strip()
+            gemini_raw = getattr(result, "language", None) == "gemini"
+            if gemini_raw:
+                # Iteration: API text only — no guard / cleanup / answer-prefix.
+                self.logger.info(
+                    "event=gemini_raw_deliver chars=%s preview=%r",
+                    len(raw),
+                    (raw[:120] + "…") if len(raw) > 120 else raw,
+                )
+                if not raw:
+                    with self._lock:
+                        if self._cancel.is_set() or token != self._token:
+                            return
+                        self.state = AppState.IDLE
+                        self._emit("cancelled")
+                    self._feedback("busy")
+                    return
+                if self.mode == "assistant":
+                    self._process_assistant(token, audio, key, raw, result)
+                    return
+                self._deliver_text(
+                    token,
+                    audio,
+                    raw=raw,
+                    final=raw,
+                    history_mode=self.mode or "literal",
+                    cleanup_status="gemini_raw",
+                    language="gemini",
+                )
+                return
+            guarded = guard_transcription(raw) if raw else None
             if guarded is None:
                 self.logger.info("event=transcription_rejected reason=prompt_bleed")
                 with self._lock:

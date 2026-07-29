@@ -38,13 +38,13 @@ def test_gemini_transcribe_inline(tmp_path):
     assert len(seen) == 1
 
 
-def test_gemini_transcribe_romanizes_devanagari(tmp_path):
+def test_gemini_keeps_raw_text_no_postprocess(tmp_path):
     def handler(req: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
                 "candidates": [
-                    {"content": {"parts": [{"text": "क्या हाल है"}]}}
+                    {"content": {"parts": [{"text": "  raw API text  "}]}}
                 ]
             },
         )
@@ -54,8 +54,7 @@ def test_gemini_transcribe_romanizes_devanagari(tmp_path):
     result = transcribe_with_gemini(
         wav, "k", transport=httpx.MockTransport(handler)
     )
-    assert "क" not in result.text
-    assert result.text
+    assert result.text == "raw API text"
 
 
 def test_gemini_quota_maps_to_groq_error(tmp_path):

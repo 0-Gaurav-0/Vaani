@@ -12,8 +12,7 @@ from typing import Any, Callable
 import httpx
 
 from .audio_upload import prepare_transcription_upload
-from .groq import GroqError, TranscriptResult, guard_transcription
-from .romanize import has_devanagari, romanize_devanagari
+from .groq import GroqError, TranscriptResult
 
 LOGGER = logging.getLogger("vaani")
 
@@ -27,7 +26,7 @@ GEMINI_TRANSCRIBE_PROMPT = (
     "Return only the transcript text."
 )
 
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
@@ -127,18 +126,14 @@ def transcribe_with_gemini(
             raise GroqError("malformed", "invalid gemini transcription") from exc
         if not text:
             raise GroqError("malformed", "empty gemini transcription")
-        if has_devanagari(text):
-            text = romanize_devanagari(text)
-        guarded = guard_transcription(text)
-        if not guarded:
-            raise GroqError("malformed", "gemini transcript rejected by guard")
+        # Iteration: paste Gemini output as-is (no guard / romanize / cleanup).
         logger.info(
             "event=gemini_transcribe_done chars=%s elapsed=%.2f preview=%r",
-            len(guarded),
+            len(text),
             clock() - started,
-            (guarded[:80] + "…") if len(guarded) > 80 else guarded,
+            (text[:80] + "…") if len(text) > 80 else text,
         )
-        return TranscriptResult(guarded, "gemini")
+        return TranscriptResult(text, "gemini")
     finally:
         if temp_upload:
             try:
