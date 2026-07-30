@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .types import AppState, DictationMode
 from .observability import exception_category, sanitize
-from .groq import GroqError, guard_transcription
+from .groq import GroqError, guard_transcription, light_local_cleanup
 from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
 from .folders import launch_folder, resolve_folder, resolve_folder_name
@@ -435,9 +435,13 @@ class Controller:
             if self.mode == "assistant":
                 self._process_assistant(token, audio, key, raw, result)
                 return
-            if not answered_via_prefix and self.mode != DictationMode.LITERAL.value:
-                cleaned = self.groq.cleanup(raw, key, cancel=self._cancel); final = cleaned.text
-                cleanup_status = "fallback" if cleaned.used_fallback else "cleaned"
+            # Exact-words dictation: never LLM-rewrite the transcript.
+            # (Cleanup was translating / paraphrasing Hinglish mixes.)
+            if not answered_via_prefix:
+                local = light_local_cleanup(raw)
+                if local:
+                    final = local
+                cleanup_status = "local_only"
             if self._cancel.is_set() or token != self._token: return
             self._deliver_text(
                 token,

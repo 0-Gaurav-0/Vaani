@@ -515,10 +515,10 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """English→English, Hindi→Latin, mix→mix via Groq Whisper only.
+        """One Whisper auto call. Keep words as spoken — no translate / polish.
 
-        Gemini dual-path was disabled: try-Gemini-then-fallback-Groq made
-        dictation 3–4× slower when Gemini failed/quota'd.
+        Devanagari → mechanical Latin only. No second ``en``/``hi`` pass (those
+        were translating mix speech and doubling latency).
         """
         path = Path(audio)
         started = self._clock()
@@ -531,132 +531,25 @@ class GroqClient:
                 language=None,
                 prompt=None,
             )
-            auto_latin, auto_deva = _to_latin(auto.text or "")
-            auto_g = guard_transcription(auto_latin) if auto_latin else None
-            detected = _normalize_lang(auto.language)
-
-            polish = False
-            picked: str | None = None
-            lang_out: str | None = auto.language
-            hi_chars = 0
-            en_chars = 0
-
-            def _english_cross_check() -> str | None:
-                nonlocal en_chars
-                en = self.transcribe(
-                    path,
-                    key,
-                    cancel=cancel,
-                    delete_audio=False,
-                    language="en",
-                    prompt=None,
-                )
-                en_chars = len(en.text or "")
-                en_g = guard_transcription(en.text or "")
-                if en_g and looks_like_english_prose(en_g) and _hinglish_density(en_g) < 0.12:
-                    return en_g
-                return None
-
-            # Auto returned Devanagari (often "Hindi") — may be real Hindi OR
-            # English mis-detected as Hindi. Cross-check English before romanize.
-            if auto_deva and auto_g:
-                en_g = _english_cross_check()
-                if en_g:
-                    picked, polish, lang_out = en_g, False, "en"
-                else:
-                    picked, polish, lang_out = auto_g, True, auto.language or "hi"
-            elif detected == "en" and auto_g:
-                picked, polish, lang_out = auto_g, False, auto.language or "en"
-            elif detected not in ("en", "hi", "") and auto_g:
-                # Weird LID (korean/malayalam/…) on short English — prefer en.
-                en_g = _english_cross_check()
-                if en_g:
-                    picked, polish, lang_out = en_g, False, "en"
-                else:
-                    picked, polish, lang_out = auto_g, False, auto.language
-            elif detected == "hi" and auto_g and looks_like_english_prose(auto_g) and _hinglish_density(auto_g) < 0.12:
-                # Hindi audio wrongly translated to English → dedicated hi pass.
-                hi = self.transcribe(
-                    path,
-                    key,
-                    cancel=cancel,
-                    delete_audio=False,
-                    language="hi",
-                    prompt=None,
-                )
-                hi_chars = len(hi.text or "")
-                hi_latin, hi_deva = _to_latin(hi.text or "")
-                hi_g = guard_transcription(hi_latin) if hi_latin else None
-                if hi_deva and hi_g:
-                    # Still verify it isn't English forced into Devanagari.
-                    en_g = _english_cross_check()
-                    if en_g and _hinglish_density(hi_g) < 0.15:
-                        picked, polish, lang_out = en_g, False, "en"
-                    else:
-                        picked, polish, lang_out = hi_g, True, "hi"
-                else:
-                    picked = pick_latin_transcript(auto_g, hi_g or "") or auto_g
-                    polish = False
-                    lang_out = "hi"
-            elif detected == "hi" and auto_g and not auto_deva:
-                if _hinglish_density(auto_g) >= 0.12 or not looks_like_english_prose(auto_g):
-                    picked, polish, lang_out = auto_g, False, "hi"
-                else:
-                    hi = self.transcribe(
-                        path,
-                        key,
-                        cancel=cancel,
-                        delete_audio=False,
-                        language="hi",
-                        prompt=None,
-                    )
-                    hi_chars = len(hi.text or "")
-                    hi_latin, hi_deva = _to_latin(hi.text or "")
-                    hi_g = guard_transcription(hi_latin) if hi_latin else None
-                    if hi_deva and hi_g:
-                        en_g = _english_cross_check()
-                        if en_g and _hinglish_density(hi_g) < 0.15:
-                            picked, polish, lang_out = en_g, False, "en"
-                        else:
-                            picked, polish, lang_out = hi_g, True, "hi"
-                    else:
-                        picked = pick_latin_transcript(auto_g, hi_g or "")
-                        lang_out = "hi"
-            elif auto_g:
-                picked, polish, lang_out = auto_g, False, auto.language
-            else:
-                hi = self.transcribe(
-                    path,
-                    key,
-                    cancel=cancel,
-                    delete_audio=False,
-                    language="hi",
-                    prompt=None,
-                )
-                hi_chars = len(hi.text or "")
-                hi_latin, hi_deva = _to_latin(hi.text or "")
-                picked = guard_transcription(hi_latin) if hi_latin else None
-                polish = bool(picked and hi_deva)
-                lang_out = hi.language or "hi"
-
+            raw = (auto.text or "").strip()
+            used_romanize = has_devanagari(raw)
+            if used_romanize:
+                raw = romanize_devanagari(raw)
+            picked = guard_transcription(raw) if raw else None
             if not picked:
                 return TranscriptResult("", None)
-            if polish:
-                picked = self._polish_romanized(picked, key, cancel=cancel)
 
             self._logger.info(
                 "event=groq_transcribe_pick chars=%s detected=%s romanize=%s "
-                "auto_chars=%s hi_chars=%s en_chars=%s elapsed=%.2f preview=%r",
+                "auto_chars=%s elapsed=%.2f preview=%r",
                 len(picked),
-                detected or "unknown",
-                int(polish),
+                _normalize_lang(auto.language) or "unknown",
+                int(used_romanize),
                 len(auto.text or ""),
-                hi_chars,
-                en_chars,
                 self._clock() - started,
                 (picked[:80] + "…") if len(picked) > 80 else picked,
             )
-            return TranscriptResult(picked, lang_out)
+            return TranscriptResult(picked, auto.language)
         finally:
             if delete_audio:
                 try:
@@ -667,59 +560,8 @@ class GroqClient:
     def _polish_romanized(
         self, text: str, key: str, *, cancel: Event | None = None
     ) -> str:
-        """Turn mechanical transliteration into natural Latin Hinglish spelling."""
-        local = light_local_cleanup(text) or text
-        if len(local.split()) <= 1:
-            return local
-        max_tokens = cleanup_max_tokens(local)
-        payload = {
-            "model": self.settings.cleanup_model,
-            "messages": [
-                {"role": "system", "content": ROMANIZE_POLISH_INSTRUCTION},
-                {"role": "user", "content": local},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0,
-        }
-        try:
-            self._logger.info(
-                "event=groq_romanize_polish_start chars=%s", len(local)
-            )
-            response = self._request(
-                "POST",
-                "/chat/completions",
-                key,
-                deadline=min(20.0, max(6.0, 4.0 + len(local) / 80.0)),
-                cancel=cancel,
-                json=payload,
-            )
-            if response.status_code >= 400:
-                return local
-            value = response.json()["choices"][0]["message"]["content"]
-            if not isinstance(value, str):
-                return local
-            cleaned = value.strip()
-            if cleaned.startswith("```") and cleaned.endswith("```"):
-                cleaned = cleaned.strip("`")
-                if "\n" in cleaned:
-                    cleaned = cleaned.split("\n", 1)[-1].strip()
-            cleaned = cleaned.strip().strip("\"'")
-            if not cleaned or has_devanagari(cleaned):
-                return local
-            # Reject English translation of the whole line.
-            if (
-                len(cleaned.split()) >= 4
-                and not _HINGLISH_TOKEN_RE.search(cleaned)
-                and _HINGLISH_TOKEN_RE.search(local)
-            ):
-                self._logger.info("event=groq_romanize_polish_rejected reason=english_drift")
-                return local
-            guarded = guard_transcription(cleaned)
-            return guarded or local
-        except (GroqError, ValueError, KeyError, IndexError, TypeError) as exc:
-            if isinstance(exc, GroqError) and exc.category == "cancelled":
-                raise
-            return local
+        """Unused in the exact-words path; kept for optional callers/tests."""
+        return light_local_cleanup(text) or text
 
     def cleanup(self, text: str, key: str, *, cancel: Event | None = None) -> CleanupResult:
         # Long transcripts + a large cleanup model is the usual "stuck" path.
