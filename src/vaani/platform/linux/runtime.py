@@ -17,7 +17,6 @@ from ...history import HistoryStore
 from ...hotkeys import MiddleButtonHotkeyManager, XTestMediaKeySender
 from ...observability import configure_logging
 from ...secrets import SecretServiceKeyStore, effective_key
-from ...gemini_stt import gemini_api_key
 from ...x11 import X11Probe
 from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
@@ -249,11 +248,10 @@ def _run_x11(settings: Settings) -> int:
             flush=True,
         )
         logger.info(
-            "event=startup_linux log=%s debug=%s session=%s backend=middle-button gemini_stt=%s",
+            "event=startup_linux log=%s debug=%s session=%s backend=middle-button stt=groq",
             log_path,
             settings.debug,
             session_type,
-            "on" if __import__("os").environ.get("GEMINI_API_KEY", "").strip() else "off",
         )
         hotkeys.register()
         logger.info(
