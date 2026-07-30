@@ -29,7 +29,8 @@ def make():
 
 def test_smart_and_literal_flow():
     c,h=make(); assert c.trigger('smart'); assert c.stop(); c._worker.join(1)
-    assert h.rows and h.rows[0]['final_text']=='Hello'
+    # Exact-words path: no LLM cleanup rewrite (hello stays hello).
+    assert h.rows and h.rows[0]['final_text']=='hello'
     c.trigger('literal'); c.stop(); c._worker.join(1)
     assert h.rows[-1]['final_text']=='hello'
 
