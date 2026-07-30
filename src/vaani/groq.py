@@ -515,14 +515,48 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """One Whisper auto call. Keep words as spoken — no translate / polish.
+        """Latin Hinglish + English mix. Prefer Gemini; Groq only on hard fail.
 
-        Devanagari → mechanical Latin only. No second ``en``/``hi`` pass (those
-        were translating mix speech and doubling latency).
+        Gemini can follow “Hindi→chat Hinglish, don’t translate” instructions.
+        Whisper on Groq cannot — it emits Devanagari or English translations.
         """
         path = Path(audio)
         started = self._clock()
         try:
+            from .gemini_stt import gemini_api_key, transcribe_with_gemini
+
+            gkey = gemini_api_key()
+            if gkey:
+                try:
+                    gem = transcribe_with_gemini(
+                        path,
+                        gkey,
+                        cancel=cancel,
+                        clock=self._clock,
+                        logger=self._logger,
+                    )
+                    if gem.text:
+                        self._logger.info(
+                            "event=groq_transcribe_pick provider=gemini chars=%s "
+                            "elapsed=%.2f preview=%r",
+                            len(gem.text),
+                            self._clock() - started,
+                            (gem.text[:80] + "…") if len(gem.text) > 80 else gem.text,
+                        )
+                        return gem
+                except GroqError as exc:
+                    if exc.category == "cancelled":
+                        raise
+                    self._logger.warning(
+                        "event=gemini_transcribe_fallback detail=%s", exc.category
+                    )
+                except Exception as exc:
+                    self._logger.warning(
+                        "event=gemini_transcribe_fallback detail=%s",
+                        type(exc).__name__,
+                    )
+
+            # Groq fallback only — one auto call, no translate cross-check.
             auto = self.transcribe(
                 path,
                 key,
@@ -540,8 +574,8 @@ class GroqClient:
                 return TranscriptResult("", None)
 
             self._logger.info(
-                "event=groq_transcribe_pick chars=%s detected=%s romanize=%s "
-                "auto_chars=%s elapsed=%.2f preview=%r",
+                "event=groq_transcribe_pick provider=groq chars=%s detected=%s "
+                "romanize=%s auto_chars=%s elapsed=%.2f preview=%r",
                 len(picked),
                 _normalize_lang(auto.language) or "unknown",
                 int(used_romanize),
