@@ -18,11 +18,16 @@ LOGGER = logging.getLogger("vaani")
 
 # Steerable transcript rules — Gemini follows these better than Whisper prompts.
 GEMINI_TRANSCRIBE_PROMPT = (
-    "Transcribe this speech exactly as spoken. "
-    "English words → English spelling. "
-    "Hindi words → Latin-script Hinglish (not Devanagari, not Arabic/Urdu). "
-    "If English and Hindi are mixed in one sentence, keep that mix. "
-    "Do not translate. Do not summarize. Do not add punctuation commentary. "
+    "Transcribe this speech into Latin letters only, exactly as spoken.\n"
+    "Rules:\n"
+    "1) Hindi → natural chat-style Hinglish spelling "
+    "(e.g. mujhe farak nahi padta, aisa hona nahi chahiye, kya haal hai). "
+    "NOT Devanagari. NOT mechanical dictionary transliteration.\n"
+    "2) English words stay English (Chrome, email, workflow, Cursor).\n"
+    "3) If English and Hindi are mixed in one sentence, keep that exact mix "
+    "in the same order.\n"
+    "4) Do NOT translate Hindi into English.\n"
+    "5) Do not summarize, do not add commentary.\n"
     "Return only the transcript text."
 )
 
