@@ -81,7 +81,7 @@ touchscreens, not this touchpad.
 
 ## Three-Finger Horizontal Swipes
 
-Keep repeated key delivery with five progress steps and preserve reversal within
+Keep repeated key delivery with three progress steps and preserve reversal within
 one gesture, but swap the forward/backward actions:
 
 - Left: hold Alt, repeat Shift+Tab, use Tab when reversing.
