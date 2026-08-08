@@ -21,9 +21,23 @@ from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
 from .folders import launch_folder, resolve_folder, resolve_folder_name
 from .volume import resolve_volume_action, run_volume_action
+from .media import resolve_media_action, run_media_action
 from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
-from .assistant_intent import classify_assistant_intent, looks_like_action
+from .codex import build_skill_prompt
+from .assistant_intent import (
+    AGENT_MUTATION_REFUSE,
+    classify_assistant_intent,
+    extract_agent_handoff,
+    extract_session_continue,
+    looks_like_action,
+    looks_like_agent_mutation,
+    clean_play_query,
+    is_weak_play_query,
+    with_vaani_source_tag,
+    with_work_context_hint,
+)
+from .handoff_memory import list_recent_handoffs, match_handoff, remember_handoff
 from .assistant_route import (
     RouteDecision,
     RouteOption,
@@ -68,12 +82,14 @@ class Controller:
                  amplitude_path: str | os.PathLike[str] | None = None,
                  indicator_control_path: str | os.PathLike[str] | None = None,
                  browser_launcher: Any | None = None,
-                 app_launcher: Any | None = None):
+                 app_launcher: Any | None = None,
+                 media_keys: Any | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self.codex, self.result_window = codex, result_window
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
+        self.media_keys = media_keys
         self.amplitude_path = str(
             amplitude_path
             or os.environ.get("VAANI_AMPLITUDE_PATH")
@@ -100,6 +116,11 @@ class Controller:
         self._clarify_raw = ""
         self._clarify_stop = threading.Event()
         self._clarify_thread: threading.Thread | None = None
+        self._handoff_job: Any | None = None
+        # True when the current RECORDING session was opened by a finger-snap
+        # (so TrackPoint press can complete it — gesture manager has no session).
+        self._snap_armed_session = False
+        self._snap_watcher: Any = None
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))
@@ -146,6 +167,125 @@ class Controller:
 
     start_assistant = trigger_assistant
 
+    def _stop_snap_watcher(self) -> None:
+        watcher = self._snap_watcher
+        self._snap_watcher = None
+        if watcher is not None:
+            try:
+                watcher.stop()
+            except Exception:
+                pass
+
+    def _arm_snap_session_watcher(self) -> None:
+        """Detect stop-snap / trailing silence from the recording WAV itself."""
+        self._stop_snap_watcher()
+        path = getattr(getattr(self, "_audio", None), "path", None)
+        if path is None:
+            return
+        from .snap_endpoint import SnapSessionWatcher
+
+        def _stop_from_endpoint() -> None:
+            with self._lock:
+                if self.state is not AppState.RECORDING:
+                    return
+                if not self._snap_armed_session:
+                    return
+            self.logger.info("event=snap_stop source=endpoint")
+            self.stop()
+
+        def _cancel_from_endpoint() -> None:
+            with self._lock:
+                if self.state is not AppState.RECORDING:
+                    return
+                if not self._snap_armed_session:
+                    return
+            self.logger.info("event=snap_cancel source=endpoint")
+            self.cancel()
+
+        watcher = SnapSessionWatcher(
+            path,
+            on_stop=_stop_from_endpoint,
+            on_cancel=_cancel_from_endpoint,
+            should_run=lambda: self._snap_armed_session
+            and self.state is AppState.RECORDING,
+        )
+        self._snap_watcher = watcher
+        watcher.start()
+
+    def snap_assistant_toggle(self) -> bool:
+        """Finger-snap: start assistant capture, or stop if already recording."""
+        with self._lock:
+            if self.state is AppState.PROCESSING:
+                self.logger.info("event=snap_ignored reason=processing")
+                return False
+            recording = self.state is AppState.RECORDING
+        if recording:
+            self.logger.info("event=snap_stop source=toggle")
+            ok = self.stop()
+            self._snap_armed_session = False
+            return ok
+        ok = self.trigger_assistant()
+        if ok:
+            self._snap_armed_session = True
+            self.logger.info("event=snap_start mode=assistant")
+            self._arm_snap_session_watcher()
+        return ok
+
+    def handle_wake_phrase(self, payload: str) -> bool:
+        """Hey Vaani: bare wake starts capture; wake+command runs assistant now."""
+        with self._lock:
+            if self._shutdown or self.state is not AppState.IDLE:
+                self.logger.info(
+                    "event=wake_ignored state=%s",
+                    getattr(self.state, "name", self.state),
+                )
+                return False
+        text = " ".join((payload or "").split()).strip()
+        if not text:
+            ok = self.trigger_assistant()
+            if ok:
+                self._snap_armed_session = True
+                self.logger.info("event=wake_start mode=assistant")
+                self._arm_snap_session_watcher()
+            return ok
+        return self._start_assistant_text(text)
+
+    def _start_assistant_text(self, text: str) -> bool:
+        """Run the assistant pipeline on an already-transcribed wake command."""
+        with self._lock:
+            if self.state is not AppState.IDLE:
+                return False
+            self.mode = "assistant"
+            self._cancel.clear()
+            self._token += 1
+            token = self._token
+            self.state = AppState.PROCESSING
+            self._emit("processing")
+        self._feedback("processing")
+        self.logger.info(
+            "event=wake_command chars=%s preview=%r",
+            len(text),
+            (text[:80] + "…") if len(text) > 80 else text,
+        )
+        key = self.key_provider() or ""
+        audio = type("Audio", (), {"duration_seconds": 0.0, "path": Path("/dev/null")})()
+        result = type("Result", (), {"text": text, "language": "wake"})()
+
+        def worker() -> None:
+            try:
+                self._process_assistant(token, audio, key, text, result)
+            except Exception as exc:
+                if not self._cancel.is_set():
+                    self._fail(exc, getattr(exc, "category", None))
+            finally:
+                with self._lock:
+                    if token == self._token and self.state is AppState.PROCESSING:
+                        self.state = AppState.IDLE
+                        self._emit("assistant_complete")
+
+        threading.Thread(target=worker, name="vaani-wake-cmd", daemon=True).start()
+        return True
+
     def handle_hotkey(self, mode: str) -> bool:
         """Callback seam for :class:`HotkeyManager`. A second press stops capture."""
         with self._lock:
@@ -154,7 +294,10 @@ class Controller:
                 self.logger.info("event=input_blocked reason=processing")
                 return False
             recording = self.state is AppState.RECORDING
-        return self.stop() if recording else self.trigger(mode)
+        if recording:
+            self._snap_armed_session = False
+            return self.stop()
+        return self.trigger(mode)
 
     on_trigger = handle_hotkey
 
@@ -167,6 +310,8 @@ class Controller:
         with self._lock:
             if self.state is not AppState.RECORDING: return False
             token = self._token; self.state = AppState.PROCESSING; self._emit("processing"); self._cancel.clear()
+            self._snap_armed_session = False
+        self._stop_snap_watcher()
         # Keep the session monitor alive during PROCESSING so the pill can
         # cancel, and so we can show a processing phase. Mic is released below.
         self._feedback("processing")
@@ -180,6 +325,7 @@ class Controller:
                 except Exception: pass
                 with self._lock:
                     self.state = AppState.IDLE
+                    self._snap_armed_session = False
                 self._emit("cancelled")
                 self._feedback("busy")
                 self.logger.info("event=recording_ignored reason=too_short")
@@ -190,9 +336,16 @@ class Controller:
         self._worker = worker; worker.start(); return True
 
     def cancel(self) -> bool:
+        self.logger.info(
+            "event=cancel_begin state=%s snap=%s",
+            getattr(self.state, "name", self.state),
+            self._snap_armed_session,
+        )
         self._cancel.set()
         self._amplitude_stop.set()
         self._clear_clarify()
+        self._snap_armed_session = False
+        self._stop_snap_watcher()
         try:
             if self.delivery is not None and hasattr(self.delivery, "cancel"):
                 self.delivery.cancel()
@@ -207,6 +360,13 @@ class Controller:
                 self.state = AppState.IDLE; self._emit("cancelled"); self._feedback("busy"); return True
             if self.state is AppState.PROCESSING:
                 self._token += 1
+                job = self._handoff_job
+                self._handoff_job = None
+                try:
+                    if job is not None and hasattr(job, "cancel"):
+                        job.cancel()
+                except Exception:
+                    pass
                 try:
                     if self.mode == "assistant" and self.codex is not None:
                         self.codex.cancel()
@@ -503,9 +663,53 @@ class Controller:
                 self.logger.info("event=assistant_clarify_abandoned")
                 pending = None
 
+        # Wake-shaped STT ("Hey Vani, who is…") still includes the wake words
+        # when the mic stays open after "hey Vaani". Strip them so a normal
+        # question is QA locally — not a Hermes handoff.
+        try:
+            from .wake_phrase import extract_wake_assistant
+
+            wake_payload = extract_wake_assistant(raw)
+        except Exception:
+            wake_payload = None
+        if wake_payload is not None and wake_payload.strip():
+            raw = wake_payload.strip()
+
+        # Explicit agent handoff ("ask Vaani…", "say hi to the agent") — skip
+        # open/play/clarify and forward straight to Hermes (no confirm gate).
+        handoff = extract_agent_handoff(raw)
+        if handoff is not None:
+            # "ask Vaani continue …" / follow-up inside an explicit handoff.
+            cont = extract_session_continue(handoff)
+            if cont is not None:
+                self._assistant_resume_or_clarify(
+                    token, audio, raw, follow_up=cont or handoff
+                )
+                return
+            self.logger.info(
+                "event=assistant_agent_handoff chars=%s preview=%r",
+                len(handoff),
+                (handoff[:80] + "…") if len(handoff) > 80 else handoff,
+            )
+            self._assistant_codex(token, audio, handoff, confirmed=True)
+            return
+
+        # Same-session follow-up ("continue…", "update on that…") — resume or clarify.
         # Fast path: deterministic resolvers (no LLM).
+        # Media before session-continue so "resume" / "continue playing"
+        # hit playback, not Hermes resume.
         if self._assistant_try_volume(token, audio, raw):
             return
+        if self._assistant_try_media(token, audio, raw):
+            return
+
+        cont = extract_session_continue(raw)
+        if cont is not None:
+            self._assistant_resume_or_clarify(
+                token, audio, raw, follow_up=cont or raw
+            )
+            return
+
         if self._assistant_try_app(token, audio, raw):
             return
         if self._assistant_try_folder(token, audio, raw):
@@ -534,7 +738,8 @@ class Controller:
                 self._assistant_qa(token, audio, key, raw, result)
                 return
             if intent == "codex":
-                self._assistant_codex(token, audio, raw)
+                # Heuristic "needs agent" → same async Hermes handoff as ask Vaani.
+                self._assistant_codex(token, audio, raw, confirmed=True)
                 return
             self._deliver_text(
                 token,
@@ -680,7 +885,36 @@ class Controller:
             return
 
         if intent == "play":
-            site = resolve_play_target(query, decision.target or "youtube")
+            # Local YouTube play is allowed. Only skip silence/lyric junk so we
+            # don't spam tabs — do NOT require a perfect play verb (STT mangles
+            # "play sanghu tere" → "plesa sanghoote de"). Hermes read-only is
+            # enforced separately in _assistant_codex.
+            play_query = clean_play_query(query, fallback=raw)
+            if is_weak_play_query(play_query, raw=raw):
+                self.logger.info(
+                    "event=assistant_play_rejected reason=weak_query "
+                    "chars=%s preview=%r",
+                    len(raw),
+                    (raw[:80] + "…") if len(raw) > 80 else raw,
+                )
+                with self._lock:
+                    if self._cancel.is_set() or token != self._token:
+                        return
+                    self.history.insert(
+                        raw_text=raw,
+                        final_text="",
+                        mode="assistant",
+                        delivery_status="rejected",
+                        cleanup_status="play_weak_query",
+                        duration_ms=int(
+                            getattr(audio, "duration_seconds", 0) * 1000
+                        ),
+                    )
+                    self.state = AppState.IDLE
+                    self._emit("cancelled")
+                self._feedback("busy")
+                return
+            site = resolve_play_target(play_query, decision.target or "youtube")
             if site and self._assistant_open_site(token, audio, raw, site):
                 return
             self._deliver_text(
@@ -733,16 +967,24 @@ class Controller:
             return
 
         if intent == "codex":
-            confirmed = (decision.target or "").casefold() in {"confirm", "confirmed"}
+            resume = None
+            target = (decision.target or "").strip()
+            if target.startswith("resume:"):
+                resume = target.split(":", 1)[1].strip() or None
+            # Router chose agent work → fire-and-forget Hermes (same as ask Vaani).
             self._assistant_codex(
-                token, audio, query or raw, confirmed=confirmed
+                token,
+                audio,
+                query or raw,
+                confirmed=True,
+                resume_session=resume,
             )
             return
 
         if intent == "skill":
             if self._assistant_try_skill(token, audio, query or raw):
                 return
-            self._assistant_codex(token, audio, query or raw)
+            self._assistant_codex(token, audio, query or raw, confirmed=True)
             return
 
         # paste / unknown
@@ -799,44 +1041,295 @@ class Controller:
             self.state = AppState.IDLE
             self._emit("assistant_complete")
 
+    def _assistant_resume_or_clarify(
+        self,
+        token: int,
+        audio: Any,
+        raw: str,
+        *,
+        follow_up: str,
+    ) -> None:
+        """Resume a recent Hermes handoff, or ask which one when ambiguous."""
+        recent = list_recent_handoffs(limit=5)
+        if not recent:
+            show = getattr(self.feedback, "show_answer", None)
+            msg = (
+                "No recent Vaani agent tasks to continue. "
+                "Start a new one, or open a session in Hermes."
+            )
+            if callable(show):
+                show(raw, msg)
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return
+                self.history.insert(
+                    raw_text=raw,
+                    final_text=msg,
+                    mode="assistant",
+                    delivery_status="displayed",
+                    cleanup_status="resume_none",
+                    duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+                )
+                self.state = AppState.IDLE
+                self._emit("assistant_complete")
+            return
+
+        matched = match_handoff(follow_up if follow_up != raw else raw, recent)
+        if matched is None and follow_up and follow_up != raw:
+            matched = match_handoff(raw, recent)
+        payload = follow_up.strip() if follow_up.strip() else (
+            "Continue from where we left off. Give a short status update."
+        )
+        if matched is not None:
+            self.logger.info(
+                "event=assistant_session_resume session=%s chars=%s",
+                matched.session_id,
+                len(payload),
+            )
+            self._assistant_codex(
+                token,
+                audio,
+                payload,
+                confirmed=True,
+                resume_session=matched.session_id,
+            )
+            return
+
+        options = tuple(
+            RouteOption(
+                label=rec.title,
+                intent="codex",
+                query=payload,
+                target=f"resume:{rec.session_id}",
+            )
+            for rec in recent
+        ) + (
+            RouteOption("New session (don't continue)", "codex", payload, "new"),
+        )
+        self.logger.info(
+            "event=assistant_session_clarify options=%s", len(options)
+        )
+        self._begin_clarify(token, audio, raw, options)
+
     def _assistant_codex(
-        self, token: int, audio: Any, raw: str, *, confirmed: bool = False
+        self,
+        token: int,
+        audio: Any,
+        raw: str,
+        *,
+        confirmed: bool = False,
+        prompt: str | None = None,
+        skill_id: str | None = None,
+        resume_session: str | None = None,
     ) -> None:
         if self.codex is None:
             raise RuntimeError("assistant runner unavailable")
+        agent_prompt = prompt if prompt is not None else raw
+        # Hard gate: Hermes via Vaani is read-only (no confirm override).
+        # Scan only the user utterance — skill markdown documents write CLIs
+        # and must not trip the gate. Local open/play/media never reach here.
+        if looks_like_agent_mutation(raw):
+            self.logger.info(
+                "event=agent_mutation_rejected chars=%s preview=%r",
+                len(raw or ""),
+                ((raw or "")[:80] + "…") if len(raw or "") > 80 else (raw or ""),
+            )
+            refuse = AGENT_MUTATION_REFUSE
+            show = getattr(self.feedback, "show_answer", None)
+            if callable(show):
+                show(raw, refuse)
+            elif self.result_window is not None and hasattr(
+                self.result_window, "show_text"
+            ):
+                self.result_window.show_text(refuse)
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return
+                self.history.insert(
+                    raw_text=raw,
+                    final_text=refuse,
+                    mode="assistant",
+                    delivery_status="rejected",
+                    cleanup_status="agent_read_only",
+                    duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+                )
+                self.state = AppState.IDLE
+                self._emit("cancelled")
+            self._feedback("busy")
+            return
+        if not resume_session:
+            agent_prompt = with_work_context_hint(agent_prompt, utterance=raw)
+        # Provenance only — read-only rules live in the preloaded ``vaani`` skill.
+        agent_prompt = with_vaani_source_tag(agent_prompt)
         if not confirmed:
             preview = " ".join((raw or "").split())
             if len(preview) > 120:
                 preview = preview[:117] + "..."
             options = (
-                RouteOption(f"Confirm — run Codex: {preview}", "codex", raw, "confirm"),
+                RouteOption(f"Confirm — run assistant: {preview}", "codex", raw, "confirm"),
                 RouteOption("Cancel", "paste", "", "cancel"),
             )
             self.logger.info("event=assistant_codex_confirm_prompt chars=%s", len(raw))
             self._begin_clarify(token, audio, raw, options)
             return
-        self.logger.info("event=assistant_route kind=codex chars=%s", len(raw))
+        self.logger.info(
+            "event=assistant_route kind=codex chars=%s skill=%s resume=%s",
+            len(raw),
+            skill_id or "-",
+            resume_session or "-",
+        )
         self._feedback("processing")
-        answer = self.codex.run(raw)
-        if self.result_window is not None and hasattr(self.result_window, "show"):
-            self.result_window.show(answer)
-        if getattr(answer, "cancelled", False) or getattr(answer, "timed_out", False):
-            raise RuntimeError("assistant request cancelled or timed out")
-        final = answer.stdout
-        with self._lock:
-            if self._cancel.is_set() or token != self._token:
-                return
-            self.history.insert(
-                raw_text=raw,
-                final_text=final,
-                mode="assistant",
-                delivery_status="displayed",
-                cleanup_status="skipped",
-                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+        start_handoff = getattr(self.codex, "start_handoff", None)
+        if not callable(start_handoff):
+            # Legacy sync runner (tests / no handoff API).
+            answer = self.codex.run(agent_prompt)
+            if self.result_window is not None and hasattr(self.result_window, "show"):
+                self.result_window.show(answer)
+            if getattr(answer, "cancelled", False) or getattr(answer, "timed_out", False):
+                raise RuntimeError("assistant request cancelled or timed out")
+            final = answer.stdout
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return
+                self.history.insert(
+                    raw_text=raw,
+                    final_text=final,
+                    mode="assistant",
+                    delivery_status="displayed",
+                    cleanup_status="skipped",
+                    duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+                )
+                self.state = AppState.IDLE
+                self._emit("assistant_complete")
+                self._feedback("success")
+            return
+
+        from .hermes_notify import notify_handoff
+
+        session_ref: dict[str, str | None] = {"id": None}
+        released = threading.Event()
+
+        def on_accepted(session_id: str | None) -> None:
+            if session_id:
+                session_ref["id"] = session_id
+            with self._lock:
+                if self._cancel.is_set() or token != self._token:
+                    return
+                self.history.insert(
+                    raw_text=raw,
+                    final_text=f"Handed to Hermes: {raw}",
+                    mode="assistant",
+                    delivery_status="displayed",
+                    cleanup_status="agent_handoff",
+                    duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+                )
+                self.state = AppState.IDLE
+                self._handoff_job = None
+                self._emit("assistant_complete")
+                self._feedback("success")
+            released.set()
+            self.logger.info(
+                "event=assistant_handoff_accepted chars=%s session=%s skill=%s",
+                len(raw),
+                session_ref["id"] or "-",
+                skill_id or "-",
             )
-            self.state = AppState.IDLE
-            self._emit("assistant_complete")
-            self._feedback("success")
+            # Defer "started" notify until we know the Hermes session id so
+            # Open jumps to this chat, not whatever was already focused.
+
+        def on_complete(answer: Any) -> None:
+            sid = getattr(answer, "session_id", None) or session_ref["id"]
+            if sid:
+                session_ref["id"] = sid
+            if getattr(answer, "cancelled", False):
+                kind = "cancelled"
+                detail = None
+            elif getattr(answer, "timed_out", False) or int(
+                getattr(answer, "returncode", 0) or 0
+            ):
+                kind = "failed"
+                detail = (getattr(answer, "stderr", None) or getattr(answer, "stdout", None) or "").strip()
+            else:
+                kind = "done"
+                detail = (getattr(answer, "stdout", None) or "").strip()
+            # If the job died before accept, release the pill here.
+            if not released.is_set():
+                with self._lock:
+                    if token == self._token and self.state is AppState.PROCESSING:
+                        self._handoff_job = None
+                        self.state = AppState.IDLE
+                        self._emit("cancelled" if kind == "cancelled" else "failure")
+                        self._feedback("busy")
+                released.set()
+            self.logger.info(
+                "event=assistant_handoff_complete kind=%s session=%s chars=%s",
+                kind,
+                sid or "-",
+                len(detail or ""),
+            )
+            if kind == "cancelled":
+                return
+            notify_handoff(
+                kind=kind,
+                task=raw,
+                session_ref=session_ref,
+                detail=detail or None,
+            )
+
+        job = start_handoff(
+            agent_prompt,
+            on_accepted=on_accepted,
+            on_complete=on_complete,
+            skill_id=None if resume_session else skill_id,
+            resume_session=resume_session,
+        )
+        with self._lock:
+            self._handoff_job = job
+        started_notified = threading.Event()
+        remembered = threading.Event()
+
+        def _remember(sid: str | None) -> None:
+            if not sid or remembered.is_set():
+                return
+            remembered.set()
+            try:
+                # Store the user-facing task (not skill-wrapped prompt) for picker labels.
+                remember_handoff(sid, raw)
+            except Exception:
+                self.logger.debug("handoff remember failed", exc_info=True)
+
+        def _watch_session() -> None:
+            for _ in range(240):
+                sid = getattr(job, "session_id", None)
+                if sid:
+                    session_ref["id"] = sid
+                    _remember(sid)
+                    if released.is_set() and not started_notified.is_set():
+                        started_notified.set()
+                        notify_handoff(
+                            kind="started",
+                            task=raw,
+                            session_ref=session_ref,
+                        )
+                    return
+                if getattr(job, "_thread", None) is not None and not job._thread.is_alive():
+                    sid = getattr(job, "session_id", None)
+                    if sid:
+                        session_ref["id"] = sid
+                        _remember(sid)
+                    if released.is_set() and not started_notified.is_set():
+                        started_notified.set()
+                        notify_handoff(
+                            kind="started",
+                            task=raw,
+                            session_ref=session_ref,
+                        )
+                    return
+                time.sleep(0.25)
+
+        if resume_session:
+            _remember(resume_session)
+        threading.Thread(target=_watch_session, name="vaani-handoff-sid", daemon=True).start()
 
     def _assistant_open_site(
         self, token: int, audio: Any, raw: str, site: Any
@@ -854,6 +1347,13 @@ class Controller:
             answer = self._open_browser(prefer_brave=prefer != "chrome", url=url)
         if answer.startswith("Opened"):
             answer = f"Opened {site.name}."
+        if "youtube" in (url or "").casefold() or "youtu.be" in (url or "").casefold():
+            try:
+                from .play_library import record_play
+
+                record_play(url=url, title=getattr(site, "name", "") or "", query=raw)
+            except Exception:
+                pass
         if self.result_window is not None and hasattr(self.result_window, "show_text"):
             self.result_window.show_text(answer)
         with self._lock:
@@ -889,6 +1389,37 @@ class Controller:
                 mode="assistant",
                 delivery_status="displayed",
                 cleanup_status="volume_action",
+                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+            )
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
+            self._feedback("success")
+        return True
+
+    def _assistant_try_media(self, token: int, audio: Any, raw: str) -> bool:
+        action = resolve_media_action(raw)
+        if action is None:
+            return False
+        self.logger.info(
+            "event=assistant_route kind=media name=%s times=%s",
+            action.name,
+            action.times,
+        )
+        answer = run_media_action(action, sender=self.media_keys)
+        show = getattr(self.feedback, "show_answer", None)
+        if callable(show):
+            show(raw, answer)
+        elif self.result_window is not None and hasattr(self.result_window, "show_text"):
+            self.result_window.show_text(answer)
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return True
+            self.history.insert(
+                raw_text=raw,
+                final_text=answer,
+                mode="assistant",
+                delivery_status="displayed",
+                cleanup_status="media_action",
                 duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
             )
             self.state = AppState.IDLE
@@ -984,7 +1515,12 @@ class Controller:
         return True
 
     def _assistant_try_skill(self, token: int, audio: Any, raw: str) -> bool:
-        if self.codex is None or not hasattr(self.codex, "run_skill"):
+        """Match a named skill and hand it to Hermes via the async handoff flow."""
+        if self.codex is None:
+            return False
+        if not (
+            hasattr(self.codex, "start_handoff") or hasattr(self.codex, "run_skill")
+        ):
             return False
         skills = load_skill_index()
         skill = match_skill(raw, skills)
@@ -996,27 +1532,16 @@ class Controller:
             skill.id,
             ",".join(mcp_list) or "-",
         )
-        self._feedback("processing")
-        answer = self.codex.run_skill(skill.body(), raw, mcps=mcp_list)
-        if self.result_window is not None and hasattr(self.result_window, "show"):
-            self.result_window.show(answer)
-        if getattr(answer, "cancelled", False) or getattr(answer, "timed_out", False):
-            raise RuntimeError("assistant skill cancelled or timed out")
-        final = (answer.stdout or answer.stderr or "").strip() or "Skill finished with no output."
-        with self._lock:
-            if self._cancel.is_set() or token != self._token:
-                return True
-            self.history.insert(
-                raw_text=raw,
-                final_text=final,
-                mode="assistant",
-                delivery_status="displayed",
-                cleanup_status="skill_action",
-                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
-            )
-            self.state = AppState.IDLE
-            self._emit("assistant_complete")
-            self._feedback("success")
+        skill_prompt = build_skill_prompt(skill.body(), raw)
+        # Same fire-and-forget path as "ask Vaani…" (notify + Hermes UI session).
+        self._assistant_codex(
+            token,
+            audio,
+            raw,
+            confirmed=True,
+            prompt=skill_prompt,
+            skill_id=skill.id,
+        )
         return True
 
     def _deliver_text(

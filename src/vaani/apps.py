@@ -38,6 +38,24 @@ APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
     (("libreoffice calc", "libre office calc"), AppTarget("LibreOffice Calc", ("libreoffice",), ("--calc",))),
     (("libreoffice impress", "libre office impress"), AppTarget("LibreOffice Impress", ("libreoffice",), ("--impress",))),
     (("libreoffice", "libre office"), AppTarget("LibreOffice", ("libreoffice",))),
+    # Quick resume: this machine's Cursor workspace (~/Vaani → control repo).
+    (
+        (
+            "vaani project",
+            "vani project",
+            "wani project",
+            "project vaani",
+            "project vani",
+            "project wani",
+            "vaani session",
+            "vani session",
+        ),
+        AppTarget(
+            "Vaani project",
+            ("cursor",),
+            (str(Path.home() / "Vaani"),),
+        ),
+    ),
     (("cursor editor", "cursor"), AppTarget("Cursor", ("cursor",))),
     (("antigravity ide", "antigravity"), AppTarget("Antigravity", ("antigravity-ide",))),
     (("thunderbird",), AppTarget("Thunderbird", ("thunderbird",))),
@@ -63,7 +81,7 @@ APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
 
 _OPEN_APP_RE = re.compile(
     r"\b("
-    r"open|launch|start|show|visit|"
+    r"open|launch|start|show|visit|initiate|resume|"
     r"kholo|khol|dikhao|dikha|chalu\s*karo|shuru\s*karo"
     r")\b"
 )

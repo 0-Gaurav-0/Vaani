@@ -17,7 +17,7 @@ from ...history import HistoryStore
 from ...hotkeys import MiddleButtonHotkeyManager, XTestMediaKeySender
 from ...observability import configure_logging
 from ...secrets import SecretServiceKeyStore, effective_key
-from ...gemini_stt import gemini_api_key
+from ...gemini_stt import gemini_stt_enabled
 from ...x11 import X11Probe
 from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
@@ -161,6 +161,7 @@ def _run_x11(settings: Settings) -> int:
     store = SecretServiceKeyStore()
     apps = LinuxAppLauncher()
     browser = LinuxBrowserLauncher()
+    media_keys = XTestMediaKeySender()
     controller = Controller(
         recorder=recorder,
         groq=groq,
@@ -172,6 +173,7 @@ def _run_x11(settings: Settings) -> int:
         indicator_control_path=settings.indicator_control_path,
         browser_launcher=browser,
         app_launcher=apps,
+        media_keys=media_keys,
     )
     assistant = CodexRunner()
 
@@ -190,6 +192,11 @@ def _run_x11(settings: Settings) -> int:
             logger.info("event=input_blocked reason=processing source=press")
             return False
         if controller.state is AppState.RECORDING:
+            # Snap-started assistant has no middle-button gesture session, so a
+            # TrackPoint click must complete capture on press (release won't).
+            if getattr(controller, "_snap_armed_session", False):
+                logger.info("event=snap_session_stop source=trackpoint")
+                controller.stop()
             return False
         return bool(controller.trigger(mode))
 
@@ -217,8 +224,6 @@ def _run_x11(settings: Settings) -> int:
     def assistant_trigger(_signum=None, _frame=None):
         on_hotkey_press("assistant")
 
-    media_keys = XTestMediaKeySender()
-
     def on_touchpad_middle() -> None:
         try:
             media_keys.play_pause()
@@ -236,6 +241,7 @@ def _run_x11(settings: Settings) -> int:
         on_touchpad_middle=on_touchpad_middle,
     )
     controller.hotkeys = hotkeys
+    snap_listener = None
     try:
         log_path = settings.log_dir / "vaani.log"
         session_type = os.environ.get("XDG_SESSION_TYPE", "unknown")
@@ -253,23 +259,80 @@ def _run_x11(settings: Settings) -> int:
             log_path,
             settings.debug,
             session_type,
-            "gemini" if gemini_api_key() else "groq",
+            "gemini" if gemini_stt_enabled() else "groq",
         )
         hotkeys.register()
+        snap_on = False
+        wake_on = False
+        try:
+            from ...snap_listener import snap_assistant_enabled
+            from ...wake_listener import WakeListener, wake_assistant_enabled
+            from ...types import AppState
+
+            snap_on = snap_assistant_enabled()
+            wake_on = wake_assistant_enabled()
+            if snap_on or wake_on:
+
+                def _wake_transcribe(path):
+                    key = effective_key(store).value
+                    if not key:
+                        return ""
+                    result = groq.transcribe(
+                        path, key, delete_audio=False, language="en", prompt=None
+                    )
+                    return getattr(result, "text", "") or ""
+
+                snap_listener = WakeListener(
+                    on_snap=controller.snap_assistant_toggle if snap_on else None,
+                    on_wake=controller.handle_wake_phrase if wake_on else None,
+                    transcribe=_wake_transcribe if wake_on else None,
+                    should_listen=lambda: controller.state is AppState.IDLE
+                    and not controller._shutdown,
+                    snap_enabled=snap_on,
+                    wake_enabled=wake_on,
+                )
+                snap_listener.start()
+        except Exception as exc:
+            logger.warning(
+                "event=wake_listener_unavailable detail=%s", type(exc).__name__
+            )
+            snap_listener = None
+            snap_on = False
+            wake_on = False
+        extras = []
+        if snap_listener is not None:
+            if snap_on:
+                extras.append("finger-snap toggles assistant")
+            if wake_on:
+                extras.append("say “hey Vaani” to start assistant")
         logger.info(
             "startup complete; hold ThinkPad middle button to dictate (release to stop); "
-            "double-press+hold for assistant; Esc cancels; Ctrl+Space is not used"
+            "double-press+hold for assistant; Esc cancels while pill is up; "
+            "agent handoffs dismiss the pill when Hermes accepts the task"
+            + (("; " + "; ".join(extras)) if extras else "")
         )
         print(
             "Vaani hotkeys ready (ThinkPad middle button):\n"
             "  Hold middle button              → smart dictation\n"
             "  Double-press + hold middle      → assistant\n"
-            "  Esc                             → cancel\n"
-            "Release to stop — pill stays up while processing.\n"
+            "  Esc                             → cancel while pill is up\n"
+            + (
+                "  Finger snap near mic            → toggle assistant recording\n"
+                if snap_listener is not None and snap_on
+                else ""
+            )
+            + (
+                "  Say “hey Vaani …”               → assistant (fuzzy name OK)\n"
+                if snap_listener is not None and wake_on
+                else ""
+            )
+            + "Release to stop — pill stays up while transcribing.\n"
+            "Agent handoffs: pill dismisses when Hermes accepts; desktop notify on\n"
+            "  start/done (click opens Hermes). Cancel running agents in Hermes.\n"
             "Ctrl+Space is left for the desktop / IME.\n"
             "Assistant: say “open …” / “play … on YouTube” for fast actions;\n"
-            "  say “run the <skill> skill …” for Agent Skills (lazy MCP);\n"
-            "  other requests use isolated Codex (up to ~30s).",
+            "  say “ask Vaani …” / “say hi to the agent” to pass straight to Hermes;\n"
+            "  say “run the <skill> skill …” for Agent Skills (lazy MCP).",
             flush=True,
         )
         signal.signal(signal.SIGINT, lambda *_: controller.shutdown())
@@ -298,6 +361,11 @@ def _run_x11(settings: Settings) -> int:
         controller.shutdown()
         return 1
     finally:
+        try:
+            if snap_listener is not None:
+                snap_listener.stop()
+        except Exception:
+            pass
         try:
             hotkeys.unregister()
         except Exception:

@@ -344,7 +344,7 @@ class MiddleButtonGesture:
         self,
         *,
         hold_ms: float = 150.0,
-        double_ms: float = 350.0,
+        double_ms: float = 500.0,
         clock: Callable[[], float] | None = None,
     ):
         import time as _time
@@ -403,6 +403,73 @@ class MiddleButtonGesture:
         return None
 
 
+class XTestMediaKeySender:
+    """Send global XF86 media keys through XTEST (play/pause, next, seek, …)."""
+
+    def __init__(
+        self,
+        display: Any | None = None,
+        fake_input: Callable[[Any, int, int], None] | None = None,
+    ):
+        self.display = display
+        self.fake_input = fake_input
+
+    def play_pause(self) -> None:
+        self._tap_xf86("XK_XF86_AudioPlay")
+
+    def pause(self) -> None:
+        self._tap_xf86("XK_XF86_AudioPause")
+
+    def stop(self) -> None:
+        self._tap_xf86("XK_XF86_AudioStop")
+
+    def next_track(self) -> None:
+        self._tap_xf86("XK_XF86_AudioNext")
+
+    def previous_track(self) -> None:
+        self._tap_xf86("XK_XF86_AudioPrev")
+
+    def seek_forward(self) -> None:
+        self._tap_xf86("XK_XF86_AudioForward")
+
+    def seek_backward(self) -> None:
+        self._tap_xf86("XK_XF86_AudioRewind")
+
+    def _tap_xf86(self, attr: str, *, times: int = 1) -> None:
+        from Xlib.keysymdef import xf86
+
+        keysym = getattr(xf86, attr, None)
+        if not keysym:
+            raise RuntimeError(f"{attr} is unavailable")
+        owns_display = self.display is None
+        if owns_display:
+            from Xlib.display import Display
+
+            dpy = Display()
+        else:
+            dpy = self.display
+        fake_input = self.fake_input
+        if fake_input is None:
+            from Xlib.ext import xtest
+
+            fake_input = xtest.fake_input
+        try:
+            keycode = int(dpy.keysym_to_keycode(keysym) or 0)
+            if not keycode:
+                raise RuntimeError(f"{attr} is not mapped in the X11 keymap")
+            for _ in range(max(1, int(times))):
+                try:
+                    fake_input(dpy, X.KeyPress, keycode)
+                finally:
+                    fake_input(dpy, X.KeyRelease, keycode)
+        finally:
+            try:
+                dpy.sync()
+            finally:
+                if owns_display:
+                    dpy.close()
+
+
 class MiddleButtonHotkeyManager:
     """ThinkPad middle-button hold-to-talk (owns button 2 while Vaani runs)."""
 
@@ -418,13 +485,15 @@ class MiddleButtonHotkeyManager:
         on_trigger: Callable[[str], None],
         on_release: Callable[[str], None] | None = None,
         on_cancel: Callable[[], None] | None = None,
+        on_touchpad_middle: Callable[[], None] | None = None,
         *,
         hold_ms: float = 150.0,
-        double_ms: float = 350.0,
+        double_ms: float = 500.0,
     ):
         self.on_trigger = on_trigger
         self.on_release = on_release
         self.on_cancel = on_cancel
+        self.on_touchpad_middle = on_touchpad_middle
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._gesture = MiddleButtonGesture(hold_ms=hold_ms, double_ms=double_ms)
@@ -436,6 +505,7 @@ class MiddleButtonHotkeyManager:
         self._session_active = False
         self._held_mode: str | None = None
         self._ignore_until_up = False
+        self._button_source: str | None = None
 
     def _xinput(self, *args: str) -> str:
         return subprocess.check_output(["xinput", *args], text=True, stderr=subprocess.DEVNULL)
@@ -485,6 +555,24 @@ class MiddleButtonHotkeyManager:
         if match is None:
             return None
         return match.group(1) == "down"
+
+    def _media_topology_is_verified(self) -> bool:
+        try:
+            listing = self._xinput("list")
+        except Exception:
+            return False
+        names = re.findall(
+            r"↳\s*(.*?)\s+id=\d+\s+\[slave\s+pointer",
+            listing,
+        )
+        physical = [name.strip() for name in names if "XTEST" not in name]
+        touchpads = [name for name in physical if name == "Elan Touchpad"]
+        trackpoints = [name for name in physical if name in self.TRACKPOINT_NAMES]
+        return (
+            len(physical) == 2
+            and len(touchpads) == 1
+            and len(trackpoints) == 1
+        )
 
     def _disable_button_scroll(self) -> None:
         pid = self._pointer_id
@@ -587,23 +675,68 @@ class MiddleButtonHotkeyManager:
             except Exception:
                 pass
 
+    def _finish_trackpoint_release(self) -> bool:
+        """Apply TrackPoint button-2 up to the gesture (shared by event + poll)."""
+        if self._button_source != "trackpoint" or not self._gesture.down:
+            return False
+        self._button_source = None
+        if self._gesture.on_up():
+            self._stop_mode()
+        else:
+            self._gesture.down = False
+        return True
+
+    def _sync_trackpoint_release(self) -> bool:
+        """Recover when a TrackPoint release event was missed or lag-ignored.
+
+        If button_source stays latched after a short click, the next press is
+        dropped and tick() promotes the stale hold into smart dictation — so
+        double-press+hold looks like plain transcription.
+        """
+        if self._button_source != "trackpoint" or not self._gesture.down:
+            return False
+        if self._trackpoint_middle_state() is not False:
+            return False
+        return self._finish_trackpoint_release()
+
     def _handle_button_event(self, event_type: int) -> bool:
-        """Handle button 2 only when it belongs to the physical TrackPoint."""
+        """Route button 2 to TrackPoint dictation or verified touchpad media."""
         press_type = getattr(X, "ButtonPress", 4)
         release_type = getattr(X, "ButtonRelease", 5)
         if event_type == press_type:
-            if self._ignore_until_up or self._trackpoint_middle_state() is not True:
+            if self._ignore_until_up:
                 return False
+            # Clear a stale TrackPoint latch before rejecting a new press.
+            if self._button_source is not None:
+                self._sync_trackpoint_release()
+            if self._button_source is not None:
+                return False
+            trackpoint_down = self._trackpoint_middle_state()
+            if trackpoint_down is False and self._media_topology_is_verified():
+                self._button_source = "touchpad"
+                return True
+            if trackpoint_down is not True:
+                return False
+            self._button_source = "trackpoint"
             mode = self._gesture.on_down()
             if mode:
                 self._start_mode(mode)
             return True
         if event_type != release_type:
             return False
+        if self._button_source == "touchpad":
+            self._button_source = None
+            if self.on_touchpad_middle:
+                try:
+                    self.on_touchpad_middle()
+                except Exception:
+                    pass
+            return True
         # Always clear Esc-armed ignore on a real button-2 release, even when
         # the press was ignored (gesture.down False) — otherwise the hotkey dies.
         self._ignore_until_up = False
-        if not self._gesture.down:
+        if self._button_source != "trackpoint" or not self._gesture.down:
+            self._button_source = None
             return False
         if self._trackpoint_middle_state() is True:
             # A touchpad middle-click can arrive while TrackPoint button 2 is
@@ -611,11 +744,7 @@ class MiddleButtonHotkeyManager:
             return False
         # Unknown state is safe to release: it can stop an accepted physical
         # press, but can never start a session or leave the microphone stuck.
-        if self._gesture.on_up():
-            self._stop_mode()
-        else:
-            self._gesture.down = False
-        return True
+        return self._finish_trackpoint_release()
 
     def _run(self) -> None:
         if X is None:
@@ -661,6 +790,7 @@ class MiddleButtonHotkeyManager:
         try:
             while not self._stop.is_set():
                 try:
+                    self._sync_trackpoint_release()
                     if not self._ignore_until_up:
                         mode = self._gesture.tick()
                         if mode:
@@ -725,5 +855,6 @@ class MiddleButtonHotkeyManager:
         self._held_mode = None
         self._escape_seen = False
         self._ignore_until_up = False
+        self._button_source = None
 
     stop = unregister

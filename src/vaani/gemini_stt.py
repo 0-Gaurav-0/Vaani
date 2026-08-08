@@ -41,6 +41,18 @@ def gemini_api_key(environ: dict[str, str] | None = None) -> str | None:
     return value or None
 
 
+def gemini_stt_enabled(environ: dict[str, str] | None = None) -> bool:
+    """Gemini STT is opt-in. Default off — use Groq dual Whisper instead.
+
+    Set ``VAANI_USE_GEMINI=1`` (and ``GEMINI_API_KEY``) to enable.
+    """
+    env = os.environ if environ is None else environ
+    flag = (env.get("VAANI_USE_GEMINI") or "").strip().casefold()
+    if flag not in {"1", "true", "yes", "on"}:
+        return False
+    return gemini_api_key(env) is not None
+
+
 def gemini_model(environ: dict[str, str] | None = None) -> str:
     env = os.environ if environ is None else environ
     return (env.get("VAANI_GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip()

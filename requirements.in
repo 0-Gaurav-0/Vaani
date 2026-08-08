@@ -7,6 +7,9 @@ python-xlib
 # directly because platform/linux/wayland/portal.py imports it for the
 # XDG Desktop Portal (GlobalShortcuts) D-Bus calls.
 jeepney
+# Post-record FLAC upload compression (libsndfile via soundfile).
+numpy
+soundfile
 pytest
 #
 # macOS (Darwin): do not install python-xlib. Use the packaging extra instead:

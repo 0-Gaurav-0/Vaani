@@ -62,7 +62,7 @@ def test_youtube_beats_skill(monkeypatch):
             self.calls.append(("run", prompt))
             return SimpleNamespace(stdout="nope", cancelled=False, timed_out=False)
 
-        def run_skill(self, body, utterance, *, mcps=()):
+        def run_skill(self, body, utterance, *, mcps=(), skill_id=None):
             self.calls.append(("skill", utterance, mcps))
             return SimpleNamespace(stdout="skill", cancelled=False, timed_out=False)
 
@@ -101,7 +101,11 @@ def test_youtube_beats_skill(monkeypatch):
     assert c.state is AppState.IDLE
 
 
-def test_matched_skill_uses_run_skill(monkeypatch):
+def test_matched_skill_uses_async_handoff(monkeypatch):
+    class Job:
+        session_id = None
+        _thread = SimpleNamespace(is_alive=lambda: False)
+
     class Runner:
         def __init__(self):
             self.calls = []
@@ -110,9 +114,25 @@ def test_matched_skill_uses_run_skill(monkeypatch):
             self.calls.append(("run", prompt))
             return SimpleNamespace(stdout="chat", cancelled=False, timed_out=False)
 
-        def run_skill(self, body, utterance, *, mcps=()):
-            self.calls.append(("skill", body, utterance, tuple(mcps)))
-            return SimpleNamespace(stdout="skill-done", cancelled=False, timed_out=False)
+        def start_handoff(self, prompt, *, on_accepted=None, on_complete=None, skill_id=None, timeout=None, **_kw):
+            self.calls.append(("handoff", prompt, skill_id))
+            if on_accepted:
+                on_accepted("sess_skill")
+            if on_complete:
+                on_complete(
+                    SimpleNamespace(
+                        stdout="skill-done",
+                        stderr="",
+                        returncode=0,
+                        cancelled=False,
+                        timed_out=False,
+                        session_id="sess_skill",
+                    )
+                )
+            return Job()
+
+        def run_skill(self, *a, **k):
+            raise AssertionError("blocking run_skill must not be used")
 
     skill = SkillMeta(
         id="sample-skill",
@@ -128,6 +148,7 @@ def test_matched_skill_uses_run_skill(monkeypatch):
         lambda utterance, skills: skill,
     )
     monkeypatch.setattr(SkillMeta, "body", lambda self: "# Sample\nDo it.")
+    monkeypatch.setattr("vaani.hermes_notify.notify_handoff", lambda **kw: None)
 
     runner = Runner()
     h = History()
@@ -149,14 +170,21 @@ def test_matched_skill_uses_run_skill(monkeypatch):
     assert c.stop()
     c._worker.join(1)
 
-    assert runner.calls and runner.calls[0][0] == "skill"
-    assert runner.calls[0][3] == ("browseros",)
-    assert h.rows[0]["cleanup_status"] == "skill_action"
-    assert h.rows[0]["final_text"] == "skill-done"
-    assert w.results == ["skill-done"]
+    assert runner.calls and runner.calls[0][0] == "handoff"
+    assert runner.calls[0][2] == "sample-skill"
+    assert "Do it." in runner.calls[0][1]
+    assert "run the sample skill for acme" in runner.calls[0][1]
+    assert "[source: vaani]" in runner.calls[0][1]
+    assert h.rows[0]["cleanup_status"] == "agent_handoff"
+    assert h.rows[0]["raw_text"] == "run the sample skill for acme"
+    assert "Handed to Hermes" in h.rows[0]["final_text"]
 
 
 def test_no_skill_match_falls_back_to_codex(monkeypatch):
+    class Job:
+        session_id = None
+        _thread = SimpleNamespace(is_alive=lambda: False)
+
     class Runner:
         def __init__(self):
             self.calls = []
@@ -164,6 +192,23 @@ def test_no_skill_match_falls_back_to_codex(monkeypatch):
         def run(self, prompt):
             self.calls.append(("run", prompt))
             return SimpleNamespace(stdout="chat-answer", cancelled=False, timed_out=False)
+
+        def start_handoff(self, prompt, *, on_accepted=None, on_complete=None, skill_id=None, timeout=None, **_kw):
+            self.calls.append(("handoff", prompt, skill_id))
+            if on_accepted:
+                on_accepted(None)
+            if on_complete:
+                on_complete(
+                    SimpleNamespace(
+                        stdout="chat-answer",
+                        stderr="",
+                        returncode=0,
+                        cancelled=False,
+                        timed_out=False,
+                        session_id=None,
+                    )
+                )
+            return Job()
 
         def run_skill(self, *a, **k):
             raise AssertionError("should not run skill")
@@ -173,13 +218,14 @@ def test_no_skill_match_falls_back_to_codex(monkeypatch):
     monkeypatch.setattr("vaani.controller.resolve_app", lambda text: None)
     monkeypatch.setattr("vaani.controller.resolve_youtube", lambda text: None)
     monkeypatch.setattr("vaani.controller.resolve_site", lambda text: None)
+    monkeypatch.setattr("vaani.hermes_notify.notify_handoff", lambda **kw: None)
 
     runner = Runner()
     h = History()
     w = Window()
     c = Controller(
         recorder=Rec(),
-        groq=Groq("refactor the flaky login test"),
+        groq=Groq("ask Vaani what are my assigned todos"),
         delivery=Delivery(),
         history=h,
         codex=runner,
@@ -189,8 +235,40 @@ def test_no_skill_match_falls_back_to_codex(monkeypatch):
     assert c.trigger_assistant()
     assert c.stop()
     c._worker.join(1)
-    assert runner.calls == [("run", "refactor the flaky login test")]
-    assert h.rows[0]["cleanup_status"] == "skipped"
+    assert runner.calls and runner.calls[0][0] == "handoff"
+    assert "what are my assigned todos" in runner.calls[0][1]
+    assert "[source: vaani]" in runner.calls[0][1]
+    assert h.rows[0]["cleanup_status"] == "agent_handoff"
+
+
+def test_mutation_request_never_starts_handoff(monkeypatch):
+    class Runner:
+        def start_handoff(self, *a, **k):
+            raise AssertionError("mutation must not hand off")
+
+        def run(self, *a, **k):
+            raise AssertionError("mutation must not run")
+
+    monkeypatch.setattr("vaani.controller.load_skill_index", lambda: [])
+    monkeypatch.setattr("vaani.controller.match_skill", lambda utterance, skills: None)
+    monkeypatch.setattr("vaani.controller.resolve_app", lambda text: None)
+    monkeypatch.setattr("vaani.controller.resolve_youtube", lambda text: None)
+    monkeypatch.setattr("vaani.controller.resolve_site", lambda text: None)
+
+    h = History()
+    c = Controller(
+        recorder=Rec(),
+        groq=Groq("refactor the flaky login test"),
+        delivery=Delivery(),
+        history=h,
+        codex=Runner(),
+        result_window=Window(),
+        key_provider=lambda: "key",
+    )
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(1)
+    assert h.rows and h.rows[0]["cleanup_status"] == "agent_read_only"
 
 
 def test_ai_route_play_when_fast_path_misses(monkeypatch):
@@ -229,7 +307,7 @@ def test_ai_route_play_when_fast_path_misses(monkeypatch):
     h = History()
     c = Controller(
         recorder=Rec(),
-        groq=RoutingGroq("kya tum brand new day ka trailer chala sakte ho"),
+        groq=RoutingGroq("play brand new day trailer on youtube"),
         delivery=Delivery(),
         history=h,
         key_provider=lambda: "key",

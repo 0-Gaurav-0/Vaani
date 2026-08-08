@@ -1,6 +1,7 @@
 """Small, synchronous, redaction-safe Groq HTTP adapter."""
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import time
@@ -342,8 +343,76 @@ def pick_latin_transcript(*candidates: str) -> str | None:
         return None
     return winner
 
+
+def _weak_silence_hallucination(picked: str, *, en_raw: str) -> bool:
+    """True when EN was Whisper junk and the winner looks like lyric/noise crumbs.
+
+    Live failure: silence/music → en="Thank you." (junk) + hi="प्यार"/"झाल"
+    → latin_pick plays YouTube on nonsense.
+    """
+    en_guarded = guard_transcription((en_raw or "").strip())
+    if en_guarded is not None:
+        return False
+    text = " ".join((picked or "").split())
+    if not text:
+        return True
+    words = text.split()
+    if len(words) > 4 or len(text) > 28:
+        return False
+    # Real short commands still win ("mute", "pause", "next song").
+    folded = text.casefold()
+    if re.search(
+        r"\b(open|close|mute|unmute|pause|resume|stop|next|previous|skip|"
+        r"volume|play|watch|chalao|bajao|suno|kholo|khol)\b",
+        folded,
+    ):
+        return False
+    return True
+
+
+def pick_en_hi_transcript(en: str, hi: str) -> str | None:
+    """Pick between Whisper-en and Whisper-hi for Gemini-fallback STT.
+
+    English prose wins over mechanical Devanagari→romanize (Whisper-hi often
+    invents Hindi for English audio; that romanize must not beat real English).
+    Spoken Latin Hinglish from Whisper-hi can still beat an English translation.
+    """
+    en_raw = (en or "").strip()
+    hi_raw = (hi or "").strip()
+    hi_latin, hi_romanized = _to_latin(hi_raw)
+    en_latin, _ = _to_latin(en_raw)
+    en_guarded = guard_transcription(en_latin) if en_latin else None
+    if (
+        en_guarded
+        and looks_like_english_prose(en_guarded)
+        and _hinglish_density(en_guarded) < 0.12
+    ):
+        # Latin Hinglish (not Devanagari→romanize) may be the true utterance.
+        if (
+            not hi_romanized
+            and hi_latin
+            and _hinglish_density(hi_latin) >= 0.12
+            and not looks_like_english_prose(hi_latin)
+        ):
+            return pick_latin_transcript(en_latin, hi_latin)
+        return en_guarded
+    picked = pick_latin_transcript(en_latin, hi_latin)
+    if picked and _weak_silence_hallucination(picked, en_raw=en_raw):
+        return None
+    return picked
+
+
 def _fallback(text: str) -> str:
     return text.strip()
+
+
+# Quota outages are sticky; skip Gemini after one 429/402 so dual Whisper is not
+# paying a failed Gemini round-trip on every clip.
+GEMINI_QUOTA_STRIKES = 1
+GEMINI_COOLDOWN_S = 20 * 60
+# When Whisper-en is clear English, don't block paste on a slow Whisper-hi call.
+HI_WAIT_FOR_ENGLISH_S = 1.25
+
 
 class GroqClient:
     def __init__(self, settings: GroqModelSettings | None = None, *, transport: httpx.BaseTransport | None = None,
@@ -354,6 +423,20 @@ class GroqClient:
         self._cleanup_timeout = httpx.Timeout(CLEANUP_READ_TIMEOUT, connect=CONNECT_TIMEOUT, write=UPLOAD_TIMEOUT, pool=POOL_ACQUISITION_TIMEOUT)
         self._transport = transport
         self._client = httpx.Client(base_url=self.settings.base_url.rstrip("/"), timeout=self._transcription_timeout, transport=transport)
+        self._gemini_quota_strikes = 0
+        self._gemini_skip_until = 0.0
+
+    def _gemini_in_cooldown(self) -> bool:
+        return self._clock() < self._gemini_skip_until
+
+    def _note_gemini_quota_fail(self) -> None:
+        self._gemini_quota_strikes += 1
+        if self._gemini_quota_strikes >= GEMINI_QUOTA_STRIKES:
+            self._gemini_skip_until = self._clock() + GEMINI_COOLDOWN_S
+
+    def _note_gemini_success(self) -> None:
+        self._gemini_quota_strikes = 0
+        self._gemini_skip_until = 0.0
 
     def close(self) -> None: self._client.close()
 
@@ -515,75 +598,164 @@ class GroqClient:
         cancel: Event | None = None,
         delete_audio: bool = False,
     ) -> TranscriptResult:
-        """Latin Hinglish + English mix. Prefer Gemini; Groq only on hard fail.
+        """Latin Hinglish + English mix via parallel Whisper en+hi + pick.
 
-        Gemini can follow “Hindi→chat Hinglish, don’t translate” instructions.
-        Whisper on Groq cannot — it emits Devanagari or English translations.
+        Gemini STT is opt-in (``VAANI_USE_GEMINI=1``); default is Groq-only.
         """
         path = Path(audio)
         started = self._clock()
         try:
-            from .gemini_stt import gemini_api_key, transcribe_with_gemini
+            from .gemini_stt import gemini_api_key, gemini_stt_enabled, transcribe_with_gemini
 
-            gkey = gemini_api_key()
-            if gkey:
-                try:
-                    gem = transcribe_with_gemini(
-                        path,
-                        gkey,
-                        cancel=cancel,
-                        clock=self._clock,
-                        logger=self._logger,
+            if gemini_stt_enabled():
+                gkey = gemini_api_key()
+                if gkey and self._gemini_in_cooldown():
+                    self._logger.info(
+                        "event=gemini_cooldown_skip strikes=%s until_in=%.1f",
+                        self._gemini_quota_strikes,
+                        max(0.0, self._gemini_skip_until - self._clock()),
                     )
-                    if gem.text:
-                        self._logger.info(
-                            "event=groq_transcribe_pick provider=gemini chars=%s "
-                            "elapsed=%.2f preview=%r",
-                            len(gem.text),
-                            self._clock() - started,
-                            (gem.text[:80] + "…") if len(gem.text) > 80 else gem.text,
+                elif gkey:
+                    try:
+                        gem = transcribe_with_gemini(
+                            path,
+                            gkey,
+                            cancel=cancel,
+                            clock=self._clock,
+                            logger=self._logger,
                         )
-                        return gem
-                except GroqError as exc:
-                    if exc.category == "cancelled":
+                        if gem.text:
+                            self._note_gemini_success()
+                            self._logger.info(
+                                "event=groq_transcribe_pick provider=gemini chars=%s "
+                                "elapsed=%.2f preview=%r",
+                                len(gem.text),
+                                self._clock() - started,
+                                (gem.text[:80] + "…") if len(gem.text) > 80 else gem.text,
+                            )
+                            return gem
+                    except GroqError as exc:
+                        if exc.category == "cancelled":
+                            raise
+                        if exc.category == "quota":
+                            self._note_gemini_quota_fail()
+                        self._logger.warning(
+                            "event=gemini_transcribe_fallback detail=%s", exc.category
+                        )
+                    except Exception as exc:
+                        self._logger.warning(
+                            "event=gemini_transcribe_fallback detail=%s",
+                            type(exc).__name__,
+                        )
+
+            # Dual Whisper. English often finishes in <1s while hi can take many
+            # seconds — if en is clear prose, only wait briefly for hi.
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            try:
+                fut_en = pool.submit(
+                    self.transcribe,
+                    path,
+                    key,
+                    cancel=cancel,
+                    delete_audio=False,
+                    language="en",
+                    prompt=None,
+                )
+                fut_hi = pool.submit(
+                    self.transcribe,
+                    path,
+                    key,
+                    cancel=cancel,
+                    delete_audio=False,
+                    language="hi",
+                    prompt=None,
+                )
+                try:
+                    en_res = fut_en.result()
+                except GroqError:
+                    # Prefer hi if English call failed hard.
+                    hi_res = fut_hi.result()
+                    hi_text = hi_res.text or ""
+                    hi_latin, _ = _to_latin(hi_text)
+                    picked = guard_transcription(hi_latin) if hi_latin else None
+                    if not picked:
                         raise
-                    self._logger.warning(
-                        "event=gemini_transcribe_fallback detail=%s", exc.category
+                    self._logger.info(
+                        "event=groq_transcribe_pick provider=groq reason=hi_only "
+                        "chars=%s elapsed=%.2f preview=%r",
+                        len(picked),
+                        self._clock() - started,
+                        (picked[:80] + "…") if len(picked) > 80 else picked,
                     )
-                except Exception as exc:
-                    self._logger.warning(
-                        "event=gemini_transcribe_fallback detail=%s",
-                        type(exc).__name__,
+                    return TranscriptResult(picked, "hi")
+
+                en_text = en_res.text or ""
+                en_latin, _ = _to_latin(en_text)
+                en_guarded = guard_transcription(en_latin) if en_latin else None
+                en_clear = bool(
+                    en_guarded
+                    and looks_like_english_prose(en_guarded)
+                    and _hinglish_density(en_guarded) < 0.12
+                )
+
+                hi_text = ""
+                if en_clear:
+                    done, _not_done = concurrent.futures.wait(
+                        [fut_hi],
+                        timeout=HI_WAIT_FOR_ENGLISH_S,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
                     )
+                    if fut_hi not in done:
+                        self._logger.info(
+                            "event=groq_transcribe_pick provider=groq reason=en_fast "
+                            "chars=%s hi_wait=%.2f elapsed=%.2f preview=%r",
+                            len(en_guarded or ""),
+                            HI_WAIT_FOR_ENGLISH_S,
+                            self._clock() - started,
+                            ((en_guarded or "")[:80] + "…")
+                            if en_guarded and len(en_guarded) > 80
+                            else (en_guarded or ""),
+                        )
+                        return TranscriptResult(en_guarded or "", "en")
+                    try:
+                        hi_res = fut_hi.result()
+                    except GroqError:
+                        return TranscriptResult(en_guarded or "", "en")
+                    hi_text = hi_res.text or ""
+                else:
+                    hi_res = fut_hi.result()
+                    hi_text = hi_res.text or ""
 
-            # Groq fallback only — one auto call, no translate cross-check.
-            auto = self.transcribe(
-                path,
-                key,
-                cancel=cancel,
-                delete_audio=False,
-                language=None,
-                prompt=None,
-            )
-            raw = (auto.text or "").strip()
-            used_romanize = has_devanagari(raw)
-            if used_romanize:
-                raw = romanize_devanagari(raw)
-            picked = guard_transcription(raw) if raw else None
-            if not picked:
-                return TranscriptResult("", None)
+                picked = pick_en_hi_transcript(en_text, hi_text)
+                if not picked:
+                    return TranscriptResult("", None)
 
-            self._logger.info(
-                "event=groq_transcribe_pick provider=groq chars=%s detected=%s "
-                "romanize=%s auto_chars=%s elapsed=%.2f preview=%r",
-                len(picked),
-                _normalize_lang(auto.language) or "unknown",
-                int(used_romanize),
-                len(auto.text or ""),
-                self._clock() - started,
-                (picked[:80] + "…") if len(picked) > 80 else picked,
-            )
-            return TranscriptResult(picked, auto.language)
+                hi_latin, _ = _to_latin(hi_text)
+                if (
+                    en_guarded
+                    and looks_like_english_prose(en_guarded)
+                    and _hinglish_density(hi_latin) < 0.12
+                    and picked == en_guarded
+                ):
+                    pick_reason = "en_prose"
+                else:
+                    pick_reason = "latin_pick"
+
+                self._logger.info(
+                    "event=groq_transcribe_pick provider=groq reason=%s chars=%s "
+                    "en_preview=%r hi_preview=%r elapsed=%.2f preview=%r",
+                    pick_reason,
+                    len(picked),
+                    (en_text[:80] + "…") if len(en_text) > 80 else en_text,
+                    (hi_text[:80] + "…") if len(hi_text) > 80 else hi_text,
+                    self._clock() - started,
+                    (picked[:80] + "…") if len(picked) > 80 else picked,
+                )
+                return TranscriptResult(
+                    picked, "en" if pick_reason == "en_prose" else "hi"
+                )
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
         finally:
             if delete_audio:
                 try:
@@ -757,9 +929,14 @@ class GroqClient:
             "each {label, intent, query, target}. "
             "Play examples: chalao, bajao, play karo, gaana chalao, trailer dikhao, "
             "play <song>, suno. "
-            "If the utterance looks like playing media (play/chalao/bajao/suno/gaana/"
-            "song/music) prefer intent=play on youtube — do NOT use qa or clarify "
-            "just because Hindi words like kya/hai appear. "
+            "Only use intent=play when the user clearly used a play/watch verb "
+            "(play/watch/chalao/bajao/suno/play karo) or named YouTube/OTT with "
+            "search/play. NEVER invent play for short nonsense, single words, "
+            "lyric-like fragments, or silence junk (e.g. pyaara, jhaala, kara do, "
+            "thank you) — use intent=paste with low confidence, or clarify. "
+            "If the utterance looks like playing media (play/chalao/bajao/suno/"
+            "gaana chalao) prefer intent=play on youtube — do NOT use qa just "
+            "because Hindi words like kya/hai appear. "
             "Open examples: kholo, dikhao, jao, go to, visit, browse, "
             "Cursor kholo, Gmail kholo, github pe jao, open wikipedia. "
             "Do not answer the user; only route."
