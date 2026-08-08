@@ -230,23 +230,97 @@ def test_middle_button_short_click_expires_without_second_press():
     assert g.tick() == SMART
 
 
-def test_middle_button_manager_rejects_touchpad_button_2(monkeypatch):
+def test_middle_button_manager_routes_verified_touchpad_button_2_to_media(monkeypatch):
     from vaani.hotkeys import MiddleButtonHotkeyManager
 
     presses = []
     releases = []
+    media = []
     manager = MiddleButtonHotkeyManager(
         lambda mode: presses.append(mode) or True,
         on_release=releases.append,
+        on_touchpad_middle=lambda: media.append("play"),
         hold_ms=0,
     )
     monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
+    monkeypatch.setattr(manager, "_media_topology_is_verified", lambda: True)
 
-    assert manager._handle_button_event(X.ButtonPress) is False
-    assert manager._handle_button_event(X.ButtonRelease) is False
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._handle_button_event(X.ButtonRelease) is True
     assert manager._gesture.down is False
     assert presses == []
     assert releases == []
+    assert media == ["play"]
+
+
+def test_middle_button_media_requires_exact_physical_pointer_topology(monkeypatch):
+    from vaani.hotkeys import MiddleButtonHotkeyManager
+
+    media = []
+    manager = MiddleButtonHotkeyManager(
+        lambda _mode: True,
+        on_touchpad_middle=lambda: media.append("play"),
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
+    monkeypatch.setattr(
+        manager,
+        "_xinput",
+        lambda *_args: """
+⎜   ↳ Virtual core XTEST pointer               id=4 [slave  pointer  (2)]
+⎜   ↳ Elan Touchpad                            id=9 [slave  pointer  (2)]
+⎜   ↳ Elan TrackPoint                          id=10 [slave  pointer  (2)]
+""",
+    )
+
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._handle_button_event(X.ButtonRelease) is True
+    assert media == ["play"]
+
+
+def test_unknown_physical_pointer_disables_media_but_not_trackpoint(monkeypatch):
+    from vaani.hotkeys import MiddleButtonHotkeyManager, SMART
+
+    presses = []
+    media = []
+    states = iter((False, True))
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: presses.append(mode) or True,
+        on_touchpad_middle=lambda: media.append("play"),
+        hold_ms=0,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: next(states))
+    monkeypatch.setattr(
+        manager,
+        "_xinput",
+        lambda *_args: """
+⎜   ↳ Elan Touchpad                            id=9 [slave  pointer  (2)]
+⎜   ↳ Elan TrackPoint                          id=10 [slave  pointer  (2)]
+⎜   ↳ USB Mouse                                id=14 [slave  pointer  (2)]
+""",
+    )
+
+    assert manager._handle_button_event(X.ButtonPress) is False
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._gesture.tick() == SMART
+    assert media == []
+
+
+def test_duplicate_touchpad_events_toggle_media_only_once(monkeypatch):
+    from vaani.hotkeys import MiddleButtonHotkeyManager
+
+    media = []
+    manager = MiddleButtonHotkeyManager(
+        lambda _mode: True,
+        on_touchpad_middle=lambda: media.append("play"),
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
+    monkeypatch.setattr(manager, "_media_topology_is_verified", lambda: True)
+
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._handle_button_event(X.ButtonPress) is False
+    assert manager._handle_button_event(X.ButtonRelease) is True
+    assert manager._handle_button_event(X.ButtonRelease) is False
+    assert media == ["play"]
 
 
 def test_middle_button_manager_accepts_trackpoint_press_and_release(monkeypatch):
@@ -269,6 +343,53 @@ def test_middle_button_manager_accepts_trackpoint_press_and_release(monkeypatch)
     assert manager._handle_button_event(X.ButtonRelease) is True
     assert presses == [SMART]
     assert releases == [SMART]
+
+
+def test_missed_trackpoint_release_sync_allows_double_press_assistant(monkeypatch):
+    """Laggy query-state on release used to latch button_source and force smart."""
+    from vaani.hotkeys import ASSISTANT, MiddleButtonHotkeyManager
+
+    presses = []
+    # press1 down, release still-down (ignored), sync up, press2 down
+    states = iter((True, True, False, True))
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: presses.append(mode) or True,
+        hold_ms=150,
+        double_ms=500,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: next(states))
+
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._handle_button_event(X.ButtonRelease) is False
+    assert manager._button_source == "trackpoint"
+    assert manager._gesture.down is True
+
+    assert manager._sync_trackpoint_release() is True
+    assert manager._button_source is None
+    assert manager._gesture.down is False
+    assert manager._gesture.armed_until >= 0.0
+
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert presses == [ASSISTANT]
+
+
+def test_stale_trackpoint_latch_clears_on_next_press(monkeypatch):
+    from vaani.hotkeys import ASSISTANT, MiddleButtonHotkeyManager
+
+    presses = []
+    # press1, ignored release, next press syncs then accepts
+    states = iter((True, True, False, True))
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: presses.append(mode) or True,
+        hold_ms=150,
+        double_ms=500,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: next(states))
+
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._handle_button_event(X.ButtonRelease) is False
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert presses == [ASSISTANT]
 
 
 def test_middle_button_manager_fails_closed_when_trackpoint_state_is_unknown(monkeypatch):
@@ -314,3 +435,74 @@ def test_button2_release_clears_ignore_even_when_press_was_ignored(monkeypatch):
     monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
     assert manager._handle_button_event(X.ButtonRelease) is False
     assert manager._ignore_until_up is False
+
+
+def test_unregister_clears_middle_button_routing_latches():
+    from vaani.hotkeys import MiddleButtonHotkeyManager
+
+    manager = MiddleButtonHotkeyManager(lambda _mode: True)
+    manager._button_source = "touchpad"
+
+    manager.unregister()
+
+    assert manager._button_source is None
+
+
+def test_media_sender_resolves_xf86_constant_and_sends_press_release():
+    from Xlib.keysymdef.xf86 import XK_XF86_AudioPlay
+    from vaani.hotkeys import XTestMediaKeySender
+
+    class MediaDisplay:
+        def __init__(self):
+            self.keysyms = []
+            self.synced = 0
+
+        def keysym_to_keycode(self, keysym):
+            self.keysyms.append(keysym)
+            return 172
+
+        def sync(self):
+            self.synced += 1
+
+    display = MediaDisplay()
+    events = []
+    sender = XTestMediaKeySender(
+        display=display,
+        fake_input=lambda dpy, event_type, keycode: events.append(
+            (dpy, event_type, keycode)
+        ),
+    )
+
+    sender.play_pause()
+
+    assert display.keysyms == [XK_XF86_AudioPlay]
+    assert events == [
+        (display, X.KeyPress, 172),
+        (display, X.KeyRelease, 172),
+    ]
+    assert display.synced == 1
+
+
+def test_media_sender_attempts_release_when_press_injection_fails():
+    from vaani.hotkeys import XTestMediaKeySender
+
+    class MediaDisplay:
+        def keysym_to_keycode(self, _keysym):
+            return 172
+
+        def sync(self):
+            pass
+
+    events = []
+
+    def failing_input(_display, event_type, _keycode):
+        events.append(event_type)
+        if event_type == X.KeyPress:
+            raise RuntimeError("press failed")
+
+    sender = XTestMediaKeySender(display=MediaDisplay(), fake_input=failing_input)
+
+    with pytest.raises(RuntimeError, match="press failed"):
+        sender.play_pause()
+
+    assert events == [X.KeyPress, X.KeyRelease]

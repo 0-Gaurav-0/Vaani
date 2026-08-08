@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Vaani history catalog sync every 6 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=vaani-history-sync.service
+
+[Install]
+WantedBy=timers.target

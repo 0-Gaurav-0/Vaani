@@ -23,6 +23,9 @@ ANSWER_TEXT_MIN_HEIGHT = 44
 MARGIN_BOTTOM = 48
 BAR_COUNT = 15
 HIT_PAD = 34
+# Ignore clicks right after the pill maps — Mutter/GTK sometimes delivers a
+# ghost press on the left cancel pad ~1s after spawn (kills snap sessions).
+CLICK_GRACE_S = 0.75
 ANSWER_AUTO_DISMISS_MS = 9000
 ANSWER_CLARIFY_DISMISS_MS = 45000
 ANSWER_LEAVE_DISMISS_MS = 5000
@@ -893,6 +896,9 @@ def run_gtk(
             win.close()
 
         def on_click_pressed(_gesture, _n, x: float, y: float) -> None:
+            armed_at = float(state.get("click_armed_at") or 0.0)
+            if time.monotonic() < armed_at:
+                return
             phase = read_phase(phase_path)
             if phase == "answer" or state.get("answer_active"):
                 if state.get("anim_mode") == "collapse":
@@ -1003,6 +1009,11 @@ def run_gtk(
 
         def tick() -> bool:
             phase = read_phase(phase_path)
+            prev = state.get("last_phase")
+            if phase != prev:
+                state["last_phase"] = phase
+                if phase in {"recording", "processing"}:
+                    state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S
             if phase == "answer":
                 _enter_answer_phase()
                 if state.get("answer_active") and float(state.get("anim_progress") or 0) < 1.0:
@@ -1037,6 +1048,7 @@ def run_gtk(
         win.connect("realize", on_realize)
         win.connect("close-request", on_close)
         GLib.timeout_add(33, tick)
+        state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S
         win.present()
         # Re-apply after map; Mutter/GTK can ignore the first configure.
         for delay in (0, 50, 120, 250):

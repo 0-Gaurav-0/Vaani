@@ -83,24 +83,85 @@ def _looks_like_rickroll(text: str) -> bool:
     return bool(re.search(r"\b(rick|reck|wreck|ric)\b.{0,16}\broll\b", normalized))
 
 
-def _first_youtube_watch_url(query: str, *, timeout: float = 2.5) -> str | None:
-    """Resolve the first watch URL for a search query (play, not search page)."""
+def _youtube_search_html(query: str, *, sp: str | None = None, timeout: float = 2.5) -> str | None:
     from urllib.parse import quote_plus
     from urllib.request import Request, urlopen
 
+    url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+    if sp:
+        url = f"{url}&sp={sp}"
     req = Request(
-        f"https://www.youtube.com/results?search_query={quote_plus(query)}",
+        url,
         headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Vaani/0.1"},
     )
     try:
         with urlopen(req, timeout=timeout) as resp:
-            html = resp.read().decode("utf-8", "ignore")
+            return resp.read().decode("utf-8", "ignore")
     except Exception:
         return None
-    match = re.search(r"watch\?v=([A-Za-z0-9_-]{11})", html)
-    if not match:
+
+
+def _pick_non_short_video_id(html: str) -> str | None:
+    """First result video id that is not a YouTube Short."""
+    if not html:
         return None
-    return f"https://www.youtube.com/watch?v={match.group(1)}"
+    shorts = set(re.findall(r"/shorts/([A-Za-z0-9_-]{11})", html))
+    # ytInitialData lists videoId densely; skip any id also seen as /shorts/.
+    for vid in re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html):
+        if vid not in shorts:
+            return vid
+    for vid in re.findall(r"watch\?v=([A-Za-z0-9_-]{11})", html):
+        if vid not in shorts:
+            return vid
+    return None
+
+
+def _first_youtube_watch_url(query: str, *, timeout: float = 2.5) -> str | None:
+    """Resolve a full watch URL — never prefer Shorts.
+
+    Uses YouTube's Videos filter (``sp=EgIQAQ%3D%3D``) so Shorts/Channels are
+    pushed out of the top results, then skips any leftover ``/shorts/`` ids.
+    """
+    cleaned = " ".join((query or "").split())
+    if not cleaned:
+        return None
+    # Bias music title searches toward full tracks when the user didn't already.
+    search_q = cleaned
+    if not re.search(r"\b(full\s+song|official\s+video|lyrics|trailer|shorts?)\b", cleaned, re.I):
+        search_q = f"{cleaned} full song"
+
+    for q, sp in (
+        (search_q, "EgIQAQ%3D%3D"),  # Videos only
+        (cleaned, "EgIQAQ%3D%3D"),
+        (search_q, None),
+        (cleaned, None),
+    ):
+        html = _youtube_search_html(q, sp=sp, timeout=timeout)
+        vid = _pick_non_short_video_id(html or "")
+        if vid:
+            return f"https://www.youtube.com/watch?v={vid}"
+    return None
+
+
+def _first_youtube_playlist_url(query: str, *, timeout: float = 2.5) -> str | None:
+    """Prefer a playlist result (sp=EgIQAw filters to playlists)."""
+    # EgIQAw%3D%3D = playlist search filter
+    html = _youtube_search_html(query, sp="EgIQAw%3D%3D", timeout=timeout)
+    if not html:
+        html = _youtube_search_html(f"{query} playlist", timeout=timeout)
+    if not html:
+        return None
+    match = re.search(r"playlist\?list=([A-Za-z0-9_-]+)", html)
+    if match:
+        return f"https://www.youtube.com/playlist?list={match.group(1)}"
+    # Radio / mix style list on a watch URL
+    match = re.search(
+        r"watch\?v=([A-Za-z0-9_-]{11})[^\"']*?list=(RD[A-Za-z0-9_-]+)",
+        html,
+    )
+    if match:
+        return f"https://www.youtube.com/watch?v={match.group(1)}&list={match.group(2)}"
+    return None
 
 
 def _valid_url(value: str) -> bool:
@@ -151,11 +212,16 @@ def resolve_site_name(
             if _contains_phrase(normalized, alias) or normalized == alias:
                 ranked.append((len(alias), site_name, url))
                 break
-    if not ranked:
+    if ranked:
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        _alias_len, site_name, url = ranked[0]
+        return SiteTarget(site_name, url, browser)
+    # History catalog (Chrome/Brave) — source-aware browser preference.
+    try:
+        from .history_catalog import resolve_from_catalog
+    except Exception:
         return None
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    _alias_len, site_name, url = ranked[0]
-    return SiteTarget(site_name, url, browser)
+    return resolve_from_catalog(normalized, browser_hint=browser)
 
 
 def resolve_browse_query(
@@ -297,12 +363,12 @@ def _extract_play_query(normalized: str) -> tuple[str, str] | None:
     # Also "ple …" (Whisper clipping "play") and trailing "… bajao/play karo".
     match = re.search(
         r"^(?:(?:please|can you|could you|would you|will you)(?:\s+please)?\s+)*"
-        r"(play|watch|chalao|suno|bajao|ple)\s+(.+)$",
+        r"(play|watch|chalao|suno|bajao|ple|plesa)\s+(.+)$",
         normalized,
     )
     if match is not None:
         action, query = match.group(1), match.group(2)
-        if action == "ple":
+        if action in {"ple", "plesa"}:
             action = "play"
         query = query.rstrip(" .,!?\"'")
         query = re.sub(r"\s+on\s+.+$", "", query).strip()
@@ -327,13 +393,51 @@ def _extract_play_query(normalized: str) -> tuple[str, str] | None:
     return None
 
 
+def _resolve_youtube_from_library(command: str, query: str) -> SiteTarget | None:
+    """Prefer the user's listening history over a cold YouTube scrape."""
+    try:
+        from .play_library import (
+            is_playlist_intent,
+            is_vague_play,
+            is_vague_playlist,
+            match_history_for_query,
+            pick_listening_target,
+        )
+    except Exception:
+        return None
+
+    prefer_playlist = is_vague_playlist(command) or is_vague_playlist(query)
+    if prefer_playlist or is_vague_play(command) or is_vague_play(query):
+        picked = pick_listening_target(
+            prefer_playlist=prefer_playlist or is_playlist_intent(command)
+        )
+        if picked is not None:
+            return picked
+        if prefer_playlist:
+            pl = _first_youtube_playlist_url(
+                query
+                if query not in {"different", "another", "new", "other", "playlist"}
+                else "bollywood songs"
+            )
+            if pl:
+                return SiteTarget("YouTube playlist", pl, "brave")
+        return None
+
+    matched = match_history_for_query(query)
+    if matched is not None:
+        return matched
+    return None
+
+
 def resolve_play_target(query: str, target: str = "youtube") -> SiteTarget | None:
     """Build a media URL from an already-extracted query + platform target."""
     from urllib.parse import quote_plus
 
     cleaned = _youtube_query_clean(query)
-    if not cleaned or cleaned in {"it", "this", "that", "yeh", "woh"}:
-        return None
+    if not cleaned or cleaned in {"it", "this", "that", "yeh", "woh", "do", "the"}:
+        # Vague leftovers like "good" after stripping "song" — still play history.
+        lib = _resolve_youtube_from_library(query, query)
+        return lib
     if _looks_like_rickroll(cleaned):
         return SiteTarget("Rickroll on YouTube", RICKROLL_URL, None)
 
@@ -353,6 +457,10 @@ def resolve_play_target(query: str, target: str = "youtube") -> SiteTarget | Non
             f"{ott[1]}: {cleaned}", ott[2].format(query=quote_plus(cleaned)), None
         )
 
+    lib = _resolve_youtube_from_library(query, cleaned)
+    if lib is not None:
+        return lib
+
     watch = _first_youtube_watch_url(cleaned)
     if watch:
         return SiteTarget(f"YouTube: {cleaned}", watch, None)
@@ -365,6 +473,7 @@ def resolve_youtube(command: str) -> SiteTarget | None:
 
     - Named OTT (Prime / Netflix / Hotstar / SonyLIV) → that service's search.
     - Explicit YouTube, or bare ``play <title>`` / Hinglish play verbs → YouTube.
+    - Vague "play a song" / "different playlist" → user's listening history.
     """
     from urllib.parse import quote_plus
 
@@ -372,14 +481,41 @@ def resolve_youtube(command: str) -> SiteTarget | None:
     if _looks_like_rickroll(normalized):
         return SiteTarget("Rickroll on YouTube", RICKROLL_URL, None)
 
+    # Playlist / vague play can be a fragment ("different playlist") without "play".
+    try:
+        from .play_library import (
+            is_vague_play,
+            is_vague_playlist,
+            pick_listening_target,
+        )
+    except Exception:
+        is_vague_play = None  # type: ignore[assignment]
+        is_vague_playlist = None  # type: ignore[assignment]
+        pick_listening_target = None  # type: ignore[assignment]
+
     extracted = _extract_play_query(normalized)
     if extracted is None:
+        if callable(is_vague_playlist) and (
+            is_vague_playlist(normalized)
+            or (callable(is_vague_play) and is_vague_play(normalized))
+        ):
+            picked = pick_listening_target(
+                prefer_playlist=bool(is_vague_playlist(normalized))
+            )
+            if picked is not None:
+                return picked
+            if is_vague_playlist(normalized):
+                pl = _first_youtube_playlist_url("bollywood hits")
+                if pl:
+                    return SiteTarget("YouTube playlist", pl, "brave")
         return None
 
     action, query = extracted
+    raw_query = query
     query = _youtube_query_clean(query)
     if not query or query in {"it", "this", "that", "yeh", "woh"}:
-        return None
+        lib = _resolve_youtube_from_library(normalized, raw_query)
+        return lib
     if _looks_like_rickroll(query):
         return SiteTarget("Rickroll on YouTube", RICKROLL_URL, None)
 
@@ -388,6 +524,10 @@ def resolve_youtube(command: str) -> SiteTarget | None:
         name, template, _alias = ott
         url = template.format(query=quote_plus(query))
         return SiteTarget(f"{name}: {query}", url, None)
+
+    lib = _resolve_youtube_from_library(normalized, query)
+    if lib is not None:
+        return lib
 
     search_only = str(action).startswith("search")
     if not search_only:

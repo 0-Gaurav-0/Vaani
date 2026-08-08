@@ -96,6 +96,10 @@ def test_resolves_hinglish_youtube_pe_chalao(monkeypatch):
         return "https://www.youtube.com/watch?v=kesariya001"
 
     monkeypatch.setattr("vaani.sites._first_youtube_watch_url", fake_resolve)
+    monkeypatch.setattr(
+        "vaani.sites._resolve_youtube_from_library",
+        lambda *_a, **_k: None,
+    )
     target = resolve_youtube("youtube pe kesariya gaana chalao")
     assert target is not None
     assert target.url.endswith("watch?v=kesariya001")
@@ -132,7 +136,7 @@ def test_browse_verbs_and_known_sites():
     assert resolve_site("browse LinkedIn").name == "LinkedIn"
 
 
-def test_resolve_browse_query_domain_and_search():
+def test_resolve_browse_query_domain_and_search(monkeypatch):
     from vaani.sites import resolve_browse_query
 
     domain = resolve_browse_query("github.com")
@@ -143,16 +147,21 @@ def test_resolve_browse_query_domain_and_search():
     assert spoken is not None
     assert "stackoverflow.com" in spoken.url
 
+    monkeypatch.setattr(
+        "vaani.history_catalog.resolve_from_catalog",
+        lambda *_a, **_k: None,
+    )
     search = resolve_browse_query("best mechanical keyboards")
     assert search is not None
     assert "google.com/search" in search.url
 
 
-def test_codex_fast_command_is_ephemeral_and_isolated():
-    command = CodexRunner.command_for("codex", "explain this")
-    assert "--ephemeral" in command
-    assert "--ignore-user-config" in command
-    assert 'model_reasoning_effort="low"' in command
+def test_assistant_fast_command_is_hermes_oneshot():
+    command = CodexRunner.command_for("hermes", "explain this")
+    assert command[:3] == ["hermes", "-z", "explain this"]
+    assert "--yolo" in command
+    assert "--reasoning" in command
+    assert "low" in command
 
 
 def test_bare_play_defaults_to_youtube(monkeypatch):

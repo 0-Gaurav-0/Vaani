@@ -112,8 +112,9 @@ processing finishes.
 
 ### Optional assistant dependency
 
-Codex assistant mode requires an installed and authenticated Codex CLI.
-Dictation does not require Codex.
+Assistant mode requires an installed and authenticated Hermes CLI
+(`hermes`, default). Override with `VAANI_AGENT_BIN` (falls back to Codex
+CLI only if Hermes is missing from `PATH`). Dictation does not require Hermes.
 
 ## Fresh installation
 
@@ -418,30 +419,31 @@ mcps:
 ---
 ```
 
-#### Codex boundary
+#### Assistant agent boundary
 
-- **Chat fallback** uses `codex exec --ephemeral --ignore-user-config` (no user
-  MCP servers / skills loaded). Default timeout 30s.
-- **Skill runs** use a temporary `CODEX_HOME` with auth preserved and an empty
-  MCP set, then re-add only allowlisted `mcp_servers.*` entries from the user’s
-  Codex config. Default skill timeout 120s (`VAANI_SKILL_TIMEOUT`).
+- **Chat fallback** uses Hermes oneshot: `hermes -z PROMPT --yolo --reasoning low`
+  (final response only on stdout). Default timeout 30s.
+- **Skill runs** inject the skill body into the prompt and best-effort pass
+  `--skills <id>`. Codex’s temp-`CODEX_HOME` MCP allowlist applies only when
+  `VAANI_AGENT_BIN` points at Codex. Default skill timeout 120s
+  (`VAANI_SKILL_TIMEOUT`).
 - Reasoning effort is set to `low` for voice.
 - The working directory is `VAANI_ASSISTANT_CWD`, or the home directory when
   unset.
-- Codex CLI must already be installed and authenticated.
+- Agent binary: `VAANI_AGENT_BIN` (default `hermes` if on `PATH`, else `codex`).
+  Hermes config/auth lives under `~/.hermes/` (Codex auth may still be used as
+  a Hermes provider).
 - The process runs with the desktop user's operating-system permissions.
 - The desktop environment is inherited except for `OPENAI_API_KEY` and
   `GROQ_API_KEY`.
-- Voice never boots the full MCP catalog “just in case.”
 
-This mode does not reuse an interactive Codex session. Treat spoken assistant
-tasks as commands executed with your user permissions.
+Treat spoken assistant tasks as commands executed with your user permissions.
 
 ## Configuration
 
 ### Assistant workspace
 
-Set the directory where Codex assistant requests run:
+Set the directory where assistant agent requests run:
 
 ```bash
 export VAANI_ASSISTANT_CWD="$HOME/path/to/workspace"
@@ -858,7 +860,7 @@ Run the complete suite and security scans before committing a lock update.
 | `x11.py` | Active-window and input-focus snapshots |
 | `history.py` | Private SQLite schema and concurrency-safe transcript storage |
 | `secrets.py` | GNOME Keyring access and Groq model validation |
-| `codex.py` | Bounded, cancellable, ephemeral Codex CLI execution |
+| `codex.py` | Bounded, cancellable Hermes (or Codex) CLI execution |
 | `apps.py` | Deterministic desktop application resolution and launch |
 | `sites.py` | Public aliases plus optional private local site configuration |
 | `feedback.py` | Recording sounds, notifications, and indicator lifecycle |

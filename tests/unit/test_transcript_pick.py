@@ -1,4 +1,8 @@
-from vaani.groq import looks_like_english_prose, pick_latin_transcript
+from vaani.groq import (
+    looks_like_english_prose,
+    pick_en_hi_transcript,
+    pick_latin_transcript,
+)
 
 
 def test_pick_prefers_latin_over_arabic():
@@ -49,3 +53,57 @@ def test_english_prose_not_confused_with_garbled_romanize():
     )
     assert looks_like_english_prose(english)
     assert not looks_like_english_prose(garbage)
+
+
+def test_pick_en_hi_prefers_en_over_romanize_garbage():
+    en = (
+        "Please share the information so I can transcribe this correctly "
+        "when I am talking in English."
+    )
+    hi = "inphormeshana traansapraaiba"
+    out = pick_en_hi_transcript(en, hi)
+    assert out is not None
+    assert "information" in out.casefold()
+    assert "inphormeshana" not in out.casefold()
+
+
+def test_pick_en_hi_prefers_en_over_devanagari_english_phonetics():
+    en = (
+        "What the fuck is this man? I mean, when I am talking in English, "
+        "it is saying in Hindi and even that is not correct."
+    )
+    # Devanagari phonetic of English → romanize garbage; low Hinglish density.
+    hi = "इनफॉरमेशन ट्रांस्क्राइब"
+    out = pick_en_hi_transcript(en, hi)
+    assert out is not None
+    assert looks_like_english_prose(out)
+    assert "fuck" in out.casefold() or "english" in out.casefold()
+
+
+def test_pick_en_hi_prefers_hinglish_over_english_translation():
+    en = "Please open Chrome for me I am in a hurry right now"
+    hi = "bhai chrome kholo jaldi"
+    out = pick_en_hi_transcript(en, hi)
+    assert out is not None
+    assert "kholo" in out.casefold()
+    assert "please open chrome for me" not in out.casefold()
+
+
+def test_pick_en_hi_prefers_en_over_devanagari_hindi_hallucination():
+    # Live failure: English speech → Whisper-hi invents Hindi → romanize wins wrongly.
+    en = "I'm not going to touch me What is this?"
+    hi = "अगर आप यह नहीं लगते हैं, तो आप यह नहीं लगते हैं"
+    out = pick_en_hi_transcript(en, hi)
+    assert out is not None
+    assert "what is this" in out.casefold()
+    assert "agara" not in out.casefold()
+    assert "lagate" not in out.casefold()
+
+
+def test_pick_en_hi_rejects_thank_you_plus_short_hi_junk():
+    # Live bug: silence/music → en Thank you + hi lyric crumb → YouTube spam.
+    assert pick_en_hi_transcript("Thank you.", "प्यार") is None
+    assert pick_en_hi_transcript("Thank you.", "झाल") is None
+    assert pick_en_hi_transcript("Thank you.", "कर दो") is None
+    # Real short command still kept when EN is not junk-only.
+    assert pick_en_hi_transcript("pause", "पॉज़") is not None

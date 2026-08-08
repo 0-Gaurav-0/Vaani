@@ -8,13 +8,34 @@ from vaani.codex import (
 )
 
 
-def test_chat_command_still_ignores_user_config():
+def test_chat_command_hermes_oneshot():
+    cmd = CodexRunner.command_for("hermes", "hello")
+    assert cmd[:3] == ["hermes", "-z", "hello"]
+    assert "--yolo" in cmd
+    assert "saleshandy" not in " ".join(cmd)
+
+
+def test_chat_command_codex_fallback_still_ignores_user_config():
     cmd = CodexRunner.command_for("codex", "hello")
     assert "--ignore-user-config" in cmd
     assert "saleshandy" not in " ".join(cmd)
 
 
-def test_skill_command_has_no_unrelated_mcp_names():
+def test_skill_command_hermes_uses_skills_flag():
+    prompt = build_skill_prompt("# Skill\nDo the thing.", "run it")
+    cmd = CodexRunner.command_for_skill(
+        "hermes", prompt, mcp_names=["browseros"], skill_id="do-thing"
+    )
+    joined = " ".join(cmd)
+    assert cmd[:3] == ["hermes", "-z", prompt]
+    assert "--skills" in cmd
+    assert "do-thing" in cmd
+    assert "saleshandy" not in joined
+    assert "mixpanel" not in joined
+    assert "Do the thing." in prompt and "run it" in prompt
+
+
+def test_skill_command_codex_has_no_unrelated_mcp_names():
     prompt = build_skill_prompt("# Skill\nDo the thing.", "run it")
     cmd = CodexRunner.command_for_skill("codex", prompt, mcp_names=["browseros"])
     joined = " ".join(cmd)
