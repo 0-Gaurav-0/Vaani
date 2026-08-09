@@ -119,7 +119,7 @@ All under `~/.local/share/vaani/` unless noted.
 
 ## G. How a voice request flows (mental model)
 
-1. **Gesture/wake** — TrackPoint hold, double-press+hold, finger-snap, or “hey Vaani”.  
+1. **Gesture/wake** — TrackPoint hold, double-press+hold, **double** clap/snap, or “hey Vaani”.  
 2. **Vaani process** — records mic → Groq STT → router / fast paths.  
 3. **Local fast paths** (no Hermes) — volume, media play/pause/next, open app/site, open Vaani project, YouTube play.  
 4. **Hermes handoff** — tagged `[source: vaani]`, `--skills vaani` (+ basecamp when matched), cwd = `vani-task`.  
@@ -134,7 +134,9 @@ All under `~/.local/share/vaani/` unless noted.
 | `VAANI_ASSISTANT_CWD` | Hermes working dir (default `~/vaani-agent/vani-task`). |
 | `VAANI_AGENT_BIN` | Override agent CLI (default `hermes`). |
 | `VAANI_WAKE_ASSISTANT` | `0` disables always-on “hey Vaani” listening. |
-| `VAANI_SNAP_ASSISTANT` | `0` disables finger-snap assistant. |
+| `VAANI_SNAP_ASSISTANT` | `0` disables double clap/snap assistant. |
+| `VAANI_SNAP_DOUBLE_WINDOW_S` | Max gap between the two claps (default `0.75`). |
+| `VAANI_WAKE_END_SILENCE_S` | Silence before wake STT (default `0.30`). |
 | `VAANI_HANDOFF_TIMEOUT` | Max seconds for a Hermes handoff job. |
 
 ---

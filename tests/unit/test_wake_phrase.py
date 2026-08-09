@@ -8,6 +8,9 @@ def test_wake_name_aliases_and_near_miss():
     assert wake_name_matches("Vernie")
     assert wake_name_matches("vaanii")  # levenshtein to vaani
     assert wake_name_matches("wanii")
+    assert wake_name_matches("bunny")
+    assert wake_name_matches("Rami")
+    assert wake_name_matches("Bani")
     assert not wake_name_matches("youtube")
     assert not wake_name_matches("hey")
 
@@ -24,5 +27,12 @@ def test_extract_wake_variants():
         "status of this todo"
     )
     assert extract_wake_assistant("hey Barney") == ""
+    assert extract_wake_assistant("hey bunny") == ""
+    assert extract_wake_assistant("okay Rami") == ""
+    assert extract_wake_assistant("A Vani") == ""
+    assert extract_wake_assistant("a bani open youtube") == "open youtube"
+    assert extract_wake_assistant("OKAY VANI") == ""
     assert extract_wake_assistant("play a song") is None
     assert extract_wake_assistant("hey youtube play music") is None
+    # Bare name alone stays out of scope for v1.
+    assert extract_wake_assistant("Vaani") is None

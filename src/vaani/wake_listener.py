@@ -18,8 +18,9 @@ from .snap_listener import (
     _FRAME_SAMPLES,
     _MONITOR_ARGV,
     _SAMPLE_RATE,
+    DoubleClapGate,
     detect_snap_frames,
-    highpass_rms,
+    frame_impulse_features,
 )
 from .wake_phrase import extract_wake_assistant
 
@@ -51,7 +52,7 @@ def _write_wav(path: Path, pcm: bytes) -> None:
 
 
 class WakeListener:
-    """Share the idle mic stream: finger-snap + hey-Vaani wake phrasing."""
+    """Share the idle mic stream: double clap/snap + hey-Vaani wake phrasing."""
 
     def __init__(
         self,
@@ -74,12 +75,18 @@ class WakeListener:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen[bytes] | None = None
-        self._cooldown_s = _env_float("VAANI_SNAP_COOLDOWN", 0.55)
-        self._abs_threshold = _env_float("VAANI_SNAP_THRESHOLD", 0.045)
-        self._ratio = _env_float("VAANI_SNAP_RATIO", 6.0)
+        # Match SnapListener strictness — WakeListener is the live path in runtime.
+        self._abs_threshold = _env_float("VAANI_SNAP_THRESHOLD", 0.07)
+        self._ratio = _env_float("VAANI_SNAP_RATIO", 9.0)
+        self._gate = DoubleClapGate(
+            window_s=_env_float("VAANI_SNAP_DOUBLE_WINDOW_S", 0.75),
+            settle_s=_env_float("VAANI_SNAP_SETTLE_S", 0.18),
+            min_gap_s=_env_float("VAANI_SNAP_MIN_GAP_S", 0.12),
+            cooldown_s=_env_float("VAANI_SNAP_COOLDOWN", 2.8),
+        )
         self._speech_floor = _env_float("VAANI_WAKE_SPEECH_FLOOR", 0.02)
-        self._end_silence_s = _env_float("VAANI_WAKE_END_SILENCE_S", 0.55)
-        self._min_utt_s = _env_float("VAANI_WAKE_MIN_S", 0.35)
+        self._end_silence_s = _env_float("VAANI_WAKE_END_SILENCE_S", 0.30)
+        self._min_utt_s = _env_float("VAANI_WAKE_MIN_S", 0.30)
         self._max_utt_s = _env_float("VAANI_WAKE_MAX_S", 6.0)
         self._wake_cooldown_s = _env_float("VAANI_WAKE_COOLDOWN", 2.0)
         self._last_snap = 0.0
@@ -96,9 +103,11 @@ class WakeListener:
         )
         self._thread.start()
         logger.info(
-            "event=wake_listener_start snap=%s wake=%s",
+            "event=wake_listener_start snap=%s wake=%s double_window=%.2f end_silence=%.2f",
             self.snap_enabled,
             self.wake_enabled and self.transcribe is not None and self.on_wake is not None,
+            self._gate.window_s,
+            self._end_silence_s,
         )
 
     def stop(self) -> None:
@@ -145,10 +154,7 @@ class WakeListener:
     def _fire_snap(self) -> None:
         if not self.on_snap:
             return
-        now = time.monotonic()
-        if now - self._last_snap < self._cooldown_s:
-            return
-        self._last_snap = now
+        self._last_snap = time.monotonic()
         logger.info("event=snap_detected")
         try:
             self.on_snap()
@@ -201,6 +207,8 @@ class WakeListener:
 
     def _run(self) -> None:
         recent_hp: list[float] = []
+        recent_crest: list[float] = []
+        recent_zcr: list[float] = []
         buf = b""
         speech_pcm = bytearray()
         pre_roll = bytearray()
@@ -208,11 +216,16 @@ class WakeListener:
         in_speech = False
         silent_frames = 0
         end_silence_frames = max(1, int(self._end_silence_s / 0.01))
+        # Short wake phrases can close a bit sooner than long commands.
+        short_end_silence_frames = max(1, int(0.22 / 0.01))
 
         while not self._stop.is_set():
             if not self.should_listen():
                 self._kill_proc()
                 recent_hp.clear()
+                recent_crest.clear()
+                recent_zcr.clear()
+                self._gate.reset()
                 buf = b""
                 speech_pcm.clear()
                 pre_roll.clear()
@@ -228,6 +241,9 @@ class WakeListener:
                     continue
                 buf = b""
                 recent_hp.clear()
+                recent_crest.clear()
+                recent_zcr.clear()
+                self._gate.reset()
             try:
                 chunk = proc.stdout.read(_FRAME_BYTES)
             except Exception:
@@ -242,34 +258,59 @@ class WakeListener:
                 frame = buf[:_FRAME_BYTES]
                 buf = buf[_FRAME_BYTES:]
                 samples = list(struct.unpack(f"<{_FRAME_SAMPLES}h", frame))
-                hp = highpass_rms(samples)
+                hp, crest, zcr = frame_impulse_features(samples)
                 broadband = min(
                     1.0,
                     (sum(s * s for s in samples) / len(samples)) ** 0.5 / 32768.0,
                 )
+                now = time.monotonic()
                 if hp < self._baseline * 2.5:
                     self._baseline = (0.95 * self._baseline) + (0.05 * max(hp, 1e-5))
                 recent_hp.append(hp)
-                if len(recent_hp) > 12:
+                recent_crest.append(crest)
+                recent_zcr.append(zcr)
+                if len(recent_hp) > 14:
                     recent_hp.pop(0)
+                    recent_crest.pop(0)
+                    recent_zcr.pop(0)
 
-                if self.snap_enabled and detect_snap_frames(
-                    recent_hp,
-                    baseline=self._baseline,
-                    abs_threshold=self._abs_threshold,
-                    ratio=self._ratio,
-                ):
-                    recent_hp.clear()
-                    speech_pcm.clear()
-                    in_speech = False
-                    silent_frames = 0
-                    self._fire_snap()
-                    try:
-                        if proc.stdout is not None:
-                            proc.stdout.read(_FRAME_BYTES * 8)
-                    except Exception:
-                        pass
-                    continue
+                if self.snap_enabled:
+                    if detect_snap_frames(
+                        recent_hp,
+                        baseline=self._baseline,
+                        abs_threshold=self._abs_threshold,
+                        ratio=self._ratio,
+                        frames_crest=recent_crest,
+                        frames_zcr=recent_zcr,
+                    ):
+                        recent_hp.clear()
+                        recent_crest.clear()
+                        recent_zcr.clear()
+                        speech_pcm.clear()
+                        in_speech = False
+                        silent_frames = 0
+                        decision = self._gate.note_impulse(now)
+                        if decision == "armed":
+                            logger.info("event=snap_armed waiting_for_second")
+                        elif decision == "pending":
+                            logger.info("event=snap_pending settle_for_double")
+                        elif decision == "reject_burst":
+                            logger.info("event=snap_rejected reason=tap_burst")
+                    polled = self._gate.poll(now)
+                    if polled == "fire":
+                        speech_pcm.clear()
+                        in_speech = False
+                        silent_frames = 0
+                        recent_hp.clear()
+                        recent_crest.clear()
+                        recent_zcr.clear()
+                        self._fire_snap()
+                        try:
+                            if proc.stdout is not None:
+                                proc.stdout.read(_FRAME_BYTES * 8)
+                        except Exception:
+                            pass
+                        continue
 
                 # Wake: accumulate speech, STT on trailing silence.
                 if not self.wake_enabled:
@@ -291,7 +332,13 @@ class WakeListener:
                     if in_speech:
                         speech_pcm.extend(frame)
                         silent_frames += 1
-                        if silent_frames >= end_silence_frames:
+                        utt_s = len(speech_pcm) / (2 * _SAMPLE_RATE)
+                        need_silence = (
+                            short_end_silence_frames
+                            if utt_s <= 1.6
+                            else end_silence_frames
+                        )
+                        if silent_frames >= need_silence:
                             pcm = bytes(speech_pcm)
                             in_speech = False
                             speech_pcm.clear()

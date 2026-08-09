@@ -302,7 +302,7 @@ def _run_x11(settings: Settings) -> int:
         extras = []
         if snap_listener is not None:
             if snap_on:
-                extras.append("finger-snap toggles assistant")
+                extras.append("double clap/snap toggles assistant")
             if wake_on:
                 extras.append("say “hey Vaani” to start assistant")
         logger.info(
