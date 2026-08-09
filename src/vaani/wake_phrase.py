@@ -26,8 +26,12 @@ _WAKE_NAME_ALIASES = frozenset(
         "varni",
         "vonnie",
         "bonnie",  # occasional Whisper miss
+        "bunny",  # hey Vaani → hey bunny
+        "bunnie",
         "fani",
         "bani",
+        "rami",  # accent / STT miss for Vaani
+        "rani",
         "waniy",
         "vanii",
         "vauney",
@@ -35,11 +39,17 @@ _WAKE_NAME_ALIASES = frozenset(
         "barney",  # Whisper often hears Vaani → Barney
         "barnie",
         "varney",
+        "vanny",
+        "vannie",
+        "waniie",
     }
 )
 
+# Short fillers ("a vani", "eh vani") plus common wake words. Matching is
+# case-insensitive via casefold on the token before fullmatch.
 _WAKE_PREFIX = (
-    r"(?:hey|hi|hello|ok|okay|yo|oye|arey|are|sun|ei|ay|awaken|wake)"
+    r"(?:hey|hi|hello|ok|okay|yo|oye|arey|are|sun|ei|ay|awaken|wake|"
+    r"a|ah|eh|ey|ee|oh|hai|hoye|ya)"
 )
 
 

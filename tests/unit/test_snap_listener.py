@@ -1,4 +1,5 @@
 from vaani.snap_listener import (
+    DoubleClapGate,
     detect_snap_frames,
     frame_impulse_features,
     snap_assistant_enabled,
@@ -93,3 +94,30 @@ def test_snap_enabled_default(monkeypatch):
     assert snap_assistant_enabled()
     monkeypatch.setenv("VAANI_SNAP_ASSISTANT", "0")
     assert not snap_assistant_enabled()
+
+
+def test_double_clap_gate_ignores_single_and_fires_on_pair():
+    gate = DoubleClapGate(window_s=0.75, settle_s=0.18, min_gap_s=0.12, cooldown_s=0.0)
+    assert gate.note_impulse(1.0) == "armed"
+    assert gate.poll(1.10) == "none"
+    assert gate.note_impulse(1.05) == "armed"  # ring / too soon
+    assert gate.note_impulse(1.40) == "pending"
+    assert gate.poll(1.50) == "none"
+    assert gate.poll(1.58) == "fire"
+
+
+def test_double_clap_gate_single_expires_without_fire():
+    gate = DoubleClapGate(window_s=0.75, settle_s=0.18, min_gap_s=0.12, cooldown_s=0.0)
+    assert gate.note_impulse(1.0) == "armed"
+    assert gate.poll(1.80) == "expired"
+    # After expiry, a lone later impulse is a new arm — never fire alone.
+    assert gate.note_impulse(2.0) == "armed"
+    assert gate.poll(2.10) == "none"
+
+
+def test_double_clap_gate_rejects_third_tap_during_settle():
+    gate = DoubleClapGate(window_s=0.75, settle_s=0.18, min_gap_s=0.05, cooldown_s=0.0)
+    assert gate.note_impulse(1.00) == "armed"
+    assert gate.note_impulse(1.20) == "pending"
+    assert gate.note_impulse(1.30) == "reject_burst"
+    assert gate.poll(1.50) == "none"

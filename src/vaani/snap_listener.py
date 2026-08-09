@@ -52,6 +52,83 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+class DoubleClapGate:
+    """Require two clap/snap impulses; ignore singles and typing bursts.
+
+    Flow:
+    - 1st impulse → armed (never fires alone; expires after ``window_s``)
+    - 2nd within window (≥ ``min_gap_s``) → pending fire after ``settle_s``
+    - Extra impulse before settle → reject (keyboard / chassis chatter)
+    - ``poll(now)`` emits ``fire`` once settle elapses cleanly
+    """
+
+    def __init__(
+        self,
+        *,
+        window_s: float = 0.75,
+        settle_s: float = 0.18,
+        min_gap_s: float = 0.12,
+        cooldown_s: float = 2.8,
+    ):
+        self.window_s = window_s
+        self.settle_s = settle_s
+        self.min_gap_s = min_gap_s
+        self.cooldown_s = cooldown_s
+        self._count = 0
+        self._first_t = 0.0
+        self._last_impulse = 0.0
+        self._fire_at = 0.0
+        self._last_fire = 0.0
+
+    def reset(self) -> None:
+        self._count = 0
+        self._first_t = 0.0
+        self._last_impulse = 0.0
+        self._fire_at = 0.0
+
+    def note_impulse(self, now: float) -> str:
+        """Return ``armed``, ``pending``, ``reject_burst``, or ``cooldown``."""
+        if now - self._last_fire < self.cooldown_s:
+            return "cooldown"
+        # Expire a lone first clap.
+        if self._count == 1 and (now - self._first_t) > self.window_s:
+            self.reset()
+        if self._count > 0 and (now - self._last_impulse) < self.min_gap_s:
+            # Same impulse ringing / mic bounce — do not count.
+            return "armed" if self._count == 1 else "pending"
+        if self._count == 0:
+            self._count = 1
+            self._first_t = now
+            self._last_impulse = now
+            return "armed"
+        if self._count == 1:
+            if (now - self._first_t) > self.window_s:
+                # Late second = new first.
+                self._count = 1
+                self._first_t = now
+                self._last_impulse = now
+                self._fire_at = 0.0
+                return "armed"
+            self._count = 2
+            self._last_impulse = now
+            self._fire_at = now + self.settle_s
+            return "pending"
+        # Already pending a double — another tap is chatter.
+        self.reset()
+        return "reject_burst"
+
+    def poll(self, now: float) -> str:
+        """Return ``fire``, ``expired``, or ``none``."""
+        if self._count == 1 and (now - self._first_t) > self.window_s:
+            self.reset()
+            return "expired"
+        if self._count == 2 and self._fire_at > 0.0 and now >= self._fire_at:
+            self.reset()
+            self._last_fire = now
+            return "fire"
+        return "none"
+
+
 def frame_impulse_features(samples: list[int]) -> tuple[float, float, float]:
     """Return ``(hp_rms, crest, zcr)`` for one PCM frame.
 
@@ -189,16 +266,15 @@ class SnapListener:
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         # Stricter defaults: prefer missed snaps over false voice triggers.
-        self._cooldown_s = _env_float("VAANI_SNAP_COOLDOWN", 2.8)
         self._abs_threshold = _env_float("VAANI_SNAP_THRESHOLD", 0.07)
         self._ratio = _env_float("VAANI_SNAP_RATIO", 9.0)
-        # Wait this long after a candidate snap; another tap ⇒ typing/lid, abort.
-        self._confirm_s = _env_float("VAANI_SNAP_CONFIRM", 0.22)
-        self._burst_window_s = _env_float("VAANI_SNAP_BURST_WINDOW", 0.55)
-        self._last_snap = 0.0
+        self._gate = DoubleClapGate(
+            window_s=_env_float("VAANI_SNAP_DOUBLE_WINDOW_S", 0.75),
+            settle_s=_env_float("VAANI_SNAP_SETTLE_S", 0.18),
+            min_gap_s=_env_float("VAANI_SNAP_MIN_GAP_S", 0.12),
+            cooldown_s=_env_float("VAANI_SNAP_COOLDOWN", 2.8),
+        )
         self._baseline = 0.002
-        self._pending_until = 0.0
-        self._impulse_times: list[float] = []
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -209,10 +285,10 @@ class SnapListener:
         )
         self._thread.start()
         logger.info(
-            "event=snap_listener_start threshold=%.3f ratio=%.1f cooldown=%.2f",
+            "event=snap_listener_start threshold=%.3f ratio=%.1f double_window=%.2f",
             self._abs_threshold,
             self._ratio,
-            self._cooldown_s,
+            self._gate.window_s,
         )
 
     def stop(self) -> None:
@@ -257,25 +333,11 @@ class SnapListener:
         return proc
 
     def _fire(self) -> None:
-        now = time.monotonic()
-        if now - self._last_snap < self._cooldown_s:
-            return
-        self._last_snap = now
-        self._pending_until = 0.0
         logger.info("event=snap_detected")
         try:
             self.on_snap()
         except Exception:
             logger.exception("snap callback failed")
-
-    def _note_impulse(self, now: float) -> None:
-        cutoff = now - max(self._burst_window_s * 2.0, 1.0)
-        self._impulse_times = [t for t in self._impulse_times if t >= cutoff]
-        self._impulse_times.append(now)
-
-    def _tap_burst(self, now: float) -> bool:
-        recent = [t for t in self._impulse_times if now - t <= self._burst_window_s]
-        return len(recent) >= 2
 
     def _run(self) -> None:
         recent_hp: list[float] = []
@@ -288,7 +350,7 @@ class SnapListener:
                 recent_hp.clear()
                 recent_crest.clear()
                 recent_zcr.clear()
-                self._pending_until = 0.0
+                self._gate.reset()
                 buf = b""
                 self._stop.wait(0.15)
                 continue
@@ -302,7 +364,7 @@ class SnapListener:
                 recent_hp.clear()
                 recent_crest.clear()
                 recent_zcr.clear()
-                self._pending_until = 0.0
+                self._gate.reset()
             try:
                 chunk = proc.stdout.read(_FRAME_BYTES)
             except Exception:
@@ -338,43 +400,26 @@ class SnapListener:
                     frames_crest=recent_crest,
                     frames_zcr=recent_zcr,
                 )
-
-                # Confirm window: a lone snap stays quiet afterward; typing/lid
-                # taps keep clicking and abort the candidate.
-                if self._pending_until > 0.0:
-                    if candidate or hp >= self._abs_threshold * 0.75:
-                        self._note_impulse(now)
-                        self._pending_until = 0.0
-                        recent_hp.clear()
-                        recent_crest.clear()
-                        recent_zcr.clear()
+                if candidate:
+                    recent_hp.clear()
+                    recent_crest.clear()
+                    recent_zcr.clear()
+                    decision = self._gate.note_impulse(now)
+                    if decision == "armed":
+                        logger.info("event=snap_armed waiting_for_second")
+                    elif decision == "pending":
+                        logger.info("event=snap_pending settle_for_double")
+                    elif decision == "reject_burst":
                         logger.info("event=snap_rejected reason=tap_burst")
-                        continue
-                    if now >= self._pending_until:
-                        tail = recent_hp[-4:] or [0.0]
-                        if max(tail) < self._abs_threshold * 0.45:
-                            recent_hp.clear()
-                            recent_crest.clear()
-                            recent_zcr.clear()
-                            self._fire()
-                            try:
-                                if proc.stdout is not None:
-                                    proc.stdout.read(_FRAME_BYTES * 10)
-                            except Exception:
-                                pass
-                        else:
-                            self._pending_until = 0.0
-                            logger.info("event=snap_rejected reason=noisy_confirm")
-                    continue
 
-                if not candidate:
-                    continue
-                self._note_impulse(now)
-                recent_hp.clear()
-                recent_crest.clear()
-                recent_zcr.clear()
-                if self._tap_burst(now):
-                    self._pending_until = 0.0
-                    logger.info("event=snap_rejected reason=tap_burst")
-                    continue
-                self._pending_until = now + self._confirm_s
+                polled = self._gate.poll(now)
+                if polled == "fire":
+                    self._fire()
+                    try:
+                        if proc.stdout is not None:
+                            proc.stdout.read(_FRAME_BYTES * 10)
+                    except Exception:
+                        pass
+                    recent_hp.clear()
+                    recent_crest.clear()
+                    recent_zcr.clear()
