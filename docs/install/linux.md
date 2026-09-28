@@ -1,11 +1,13 @@
 # Vaani on Linux
 
-Linux is the production baseline: PulseAudio/`parec` capture, X11 global hotkeys,
-clipboard paste, GTK/tk recording pill, and desktop notifications.
+Linux is the production baseline: PulseAudio/`parec` capture, global hotkeys
+(X11 passive grabs, or the GlobalShortcuts portal on Wayland), clipboard
+paste, GTK/tk recording pill, and desktop notifications.
 
 ## Requirements
 
-- Ubuntu 22.04+ (or similar) with **X11** (or XWayland)
+- Ubuntu 22.04+ (or similar) with **X11**, or a **Wayland** session with a
+  GlobalShortcuts-capable portal (GNOME 45+, KDE Plasma 6+)
 - Python 3.10+
 - [uv](https://github.com/astral-sh/uv) (recommended) or pip
 - PulseAudio / PipeWire with `parec` and a default source
@@ -75,21 +77,26 @@ shortcut or change the other app’s binding.
 
 ## X11 vs Wayland
 
-| Session | Global hotkeys | Notes |
-|---|---|---|
-| **X11** | Supported | Primary / tested path |
-| **Wayland (XWayland)** | Often works | Apps under XWayland can grab; pure Wayland compositors may not deliver grabs to Vaani |
-| **Pure Wayland** | Not supported yet | No global grab API equivalent to X11 `XGrabKey` in this stack |
+Vaani auto-detects the session (`WAYLAND_DISPLAY`, falling back to
+`XDG_SESSION_TYPE`) and picks a backend — no configuration needed.
+
+| Session | Global hotkeys | Auto-paste | Notes |
+|---|---|---|---|
+| **X11** | Supported | Yes (XTEST) | Primary / most-tested path |
+| **Wayland — GNOME 45+, KDE Plasma 6+** | Supported via the `org.freedesktop.portal.GlobalShortcuts` portal | No — clipboard only, press Ctrl+V yourself | First run shows a system dialog to assign each shortcut's key combo; there's no Esc-cancel equivalent on the portal |
+| **Wayland — Sway, Hyprland (wlroots)** | Supported via the same portal | Yes, via `wtype` (needs the `wtype` binary installed) | Falls back to clipboard-only if `wtype` is missing or the compositor rejects it |
+| **Wayland — no portal / older xdg-desktop-portal** | Not supported | — | Vaani logs `event=startup_failure` and exits; install/upgrade `xdg-desktop-portal` or use an X11 session |
 
 Check your session:
 
 ```bash
-echo "$XDG_SESSION_TYPE"   # expect x11, or wayland with XWayland
+echo "$XDG_SESSION_TYPE"
+echo "$WAYLAND_DISPLAY"
 ```
 
-If hotkeys never fire on Wayland, log into an **X11 session** (or ensure
-XWayland is available) and restart Vaani. Startup prints
-`session=…` and whether the X11 display opened.
+Startup always prints which backend it picked (`[vaani] session=…`). If the
+portal doesn't implement GlobalShortcuts, Vaani prints the D-Bus error and
+exits with a clear message rather than silently doing nothing.
 
 ## Run
 
@@ -117,5 +124,6 @@ Log file path is printed at startup (`[vaani] log file: …`).
 - Stop/cancel from the pill uses the control file (and optional SIGUSR on Linux).
 - Feedback cues use `paplay` / FreeDesktop sounds when present, else `notify-send`
   / beep.
-- Wayland-native global shortcuts are a future workstream; document real limits
-  rather than claiming parity that the compositor cannot provide.
+- Wayland-native global shortcuts are shipped (portal-based); auto-paste
+  parity with X11 only exists on wlroots compositors — GNOME/KDE Wayland is
+  clipboard-only by the compositor's own design, not a Vaani limitation.

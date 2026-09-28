@@ -60,19 +60,10 @@ class XTestPaster:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("modifier release timeout")
                 time.sleep(0.01)
-        # Terminal emulators reserve Ctrl+V; their conventional paste shortcut
-        # is Ctrl+Shift+V. Editors and browsers use Ctrl+V.
-        shift = False
-        try:
-            root = d.screen().root
-            atom = d.intern_atom("_NET_ACTIVE_WINDOW")
-            prop = root.get_full_property(atom, X.AnyPropertyType)
-            wid = int(prop.value[0]) if prop is not None and getattr(prop, "value", None) else 0
-            window = d.create_resource_object("window", wid)
-            classes = " ".join(window.get_wm_class() or ()).lower()
-            shift = any(name in classes for name in ("terminal", "gnome-terminal", "konsole", "alacritty", "kitty", "xterm", "tilix", "terminator"))
-        except Exception:
-            pass
+        # Terminals / IDE terminals use Ctrl+Shift+V; editors use Ctrl+V.
+        from .paste_target import needs_shift_paste
+
+        shift = bool(needs_shift_paste(d))
         ctrl = d.keysym_to_keycode(XK.string_to_keysym("Control_L"))
         shift_key = d.keysym_to_keycode(XK.string_to_keysym("Shift_L"))
         v = d.keysym_to_keycode(XK.string_to_keysym("v"))
@@ -107,6 +98,10 @@ class ClipboardDelivery:
 
     def cancel(self) -> None:
         self._cancelled.set()
+
+    def arm(self) -> None:
+        """Clear cancel latch for a new dictation session."""
+        self._cancelled.clear()
 
     def shutdown(self) -> None:
         self.cancel()

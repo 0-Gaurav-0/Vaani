@@ -2,12 +2,15 @@
 set -eu
 
 runtime_log="$HOME/.local/share/vaani/logs/autostart.log"
+# Hermes project "Vaani agent" → sessions land under this folder, not Home.
+: "${VAANI_ASSISTANT_CWD:=$HOME/vaani-agent/vani-task}"
 
 if pgrep -f '^\.venv/bin/python -m vaani$' >/dev/null 2>&1; then
     exit 0
 fi
 
-mkdir -p "$(dirname "$runtime_log")"
+mkdir -p "$(dirname "$runtime_log")" "$VAANI_ASSISTANT_CWD"
+export VAANI_ASSISTANT_CWD
 if [ -n "${VAANI_PROJECT_DIR:-}" ]; then
     cd "$VAANI_PROJECT_DIR"
     exec .venv/bin/python -m vaani >>"$runtime_log" 2>&1

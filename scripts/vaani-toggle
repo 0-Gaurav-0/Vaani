@@ -1,2 +1,4 @@
 #!/bin/sh
+# Stop-only via SIGUSR1 (never starts recording — avoids ghost starts from the pill).
+# Prefer native hold-to-talk: Hold ThinkPad middle button, release to stop.
 pkill -USR1 -f '^\.venv/bin/python -m vaani$' 2>/dev/null || true

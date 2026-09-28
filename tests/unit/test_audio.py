@@ -57,3 +57,59 @@ def test_startup_sweep_owned_files_only(tmp_path):
     link=d/'link'; link.symlink_to(own)
     sweep_audio_directory(d, uid=os.getuid())
     assert not own.exists() and link.is_symlink()
+
+
+def test_silent_wav_detects_near_zero_pcm(tmp_path):
+    from vaani.audio import is_silent_wav, wav_peak_rms
+
+    quiet = tmp_path / "quiet.wav"
+    wav(quiet, 0.4)
+    assert wav_peak_rms(quiet) < 0.012
+    assert is_silent_wav(quiet) is True
+
+    loud = tmp_path / "loud.wav"
+    import struct
+    with wave.open(str(loud), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        # ~0.3s of audible tone-ish amplitude
+        frames = b"".join(struct.pack("<h", 8000 if (i // 40) % 2 == 0 else -8000) for i in range(4800))
+        w.writeframes(frames)
+    assert wav_peak_rms(loud) > 0.05
+    assert is_silent_wav(loud) is False
+
+
+def test_is_silent_wav_missing_file_is_not_silent(tmp_path):
+    from vaani.audio import is_silent_wav
+
+    assert is_silent_wav(tmp_path / "missing.wav") is False
+
+
+def test_reap_orphan_parec_matches_vaani_argv_only(monkeypatch):
+    from vaani import audio as audio_mod
+
+    calls = []
+
+    def fake_check_output(argv, **kwargs):
+        return " 1111 fake-recorder --rate=16000\n 2222 parec --device=@DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le --file-format=wav\n"
+
+    def fake_kill(pid, sig):
+        calls.append((pid, sig))
+
+    monkeypatch.setattr(audio_mod.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(audio_mod.os, "kill", fake_kill)
+    monkeypatch.setattr(audio_mod.time, "sleep", lambda _s: None)
+    # Second ps pass empty so no SIGKILL follow-up.
+    seen = {"n": 0}
+
+    def check_output2(argv, **kwargs):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return fake_check_output(argv, **kwargs)
+        return ""
+
+    monkeypatch.setattr(audio_mod.subprocess, "check_output", check_output2)
+    killed = audio_mod.reap_orphan_parec()
+    assert killed == 1
+    assert calls and calls[0][0] == 2222

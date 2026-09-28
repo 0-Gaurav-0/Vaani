@@ -10,15 +10,17 @@ dependencies = [
   "httpx",
   "keyring",
   "python-xlib; sys_platform == 'linux'",
+  "jeepney; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
 macos = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
 windows = ["sounddevice", "numpy", "soundfile", "pyperclip", "pynput"]
-linux = ["python-xlib"]
+linux = ["python-xlib", "jeepney", "numpy", "soundfile"]
 
 [project.scripts]
 vaani = "vaani.__main__:main"
+vaani-history-sync = "vaani.history_catalog:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
