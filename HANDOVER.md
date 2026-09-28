@@ -4,6 +4,22 @@ Living handoff for the next session. Covers **what is running**, **what we built
 
 ---
 
+---
+
+## 0. 2026-09-28 — Jev + latency (branch `feat/jev-openrouter-latency`)
+
+| Change | Detail |
+| --- | --- |
+| **Jev** (`src/vaani/jev.py`) | OpenRouter free-model tool-calling brain. Replaces the Groq router step: one call → play / open app·site·folder / media / volume / delegate to agent / type / clarify, or a direct answer (no 2nd answer call). Deterministic fast paths still run first. Any Jev failure → Groq router. |
+| Jev config | `.env` `OPENROUTER_API_KEY` (gitignored). `VAANI_JEV=0` off, `VAANI_JEV_FIRST=1` Jev before fast paths, `VAANI_JEV_MODELS=a,b,c` (max 3 — OpenRouter 400s above), `VAANI_JEV_TIMEOUT` (6s) |
+| Free tier limits | 50 **successful** req/day (429s don't count). Single free models often 429 upstream → `models` fallback list. Daily-cap 429 → 1h cooldown, Groq takes over. |
+| Release lag | processing cue ran `paplay` synchronously before mic stop (~1.1s every clip). Mic now stops first; cues play off-thread. |
+| Pill startup | Pill was a fresh python→reexec→GTK4 process per press (~1s). Now prewarmed at daemon start, parked offscreen/click-through in phase `idle`, shown in ≤1 tick. Exits when daemon pid dies. |
+| Pill buttons | Hover glow, press squeeze + halo, clarify-row flash. Pill no longer closes on click — daemon phase drives it (1.5s local fallback hide). |
+| Chunked STT (`stt_chunks.py`) | Dictation >20s: cut at pauses, packets transcribed while recording; only tail waits after release. <20s unchanged. Failure → full-file path. `VAANI_CHUNKED_STT=0` off. |
+
+---
+
 ## 1. Repo & branch (READ FIRST)
 
 | Item | Value |
