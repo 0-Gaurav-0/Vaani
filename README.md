@@ -11,9 +11,11 @@ application. Private URLs, credentials, browser history, transcript history,
 logs, and machine-specific paths are intentionally not stored in Git.
 
 > [!IMPORTANT]
-> Vaani currently targets **Ubuntu 22.04, GNOME, Xorg/X11, and x86_64**. It is
-> not yet a Windows, macOS, or Wayland application. Planned cross-platform
-> operator and remote work lives in [ROADMAP.md](ROADMAP.md).
+> Vaani currently targets **Ubuntu 22.04, GNOME, Xorg/X11, and x86_64**, with
+> a Wayland backend (GNOME 45+/KDE Plasma 6+ via the GlobalShortcuts portal,
+> full auto-paste on wlroots compositors like Sway/Hyprland). It is not yet
+> a Windows or macOS application. Planned cross-platform operator and
+> remote work lives in [ROADMAP.md](ROADMAP.md).
 
 ## Contents
 
@@ -90,7 +92,9 @@ processing finishes.
 
 - Ubuntu 22.04 LTS
 - GNOME desktop session
-- Xorg/X11 session (`XDG_SESSION_TYPE=x11`)
+- Xorg/X11 session (`XDG_SESSION_TYPE=x11`), **or** a Wayland session with a
+  GlobalShortcuts-capable portal (GNOME 45+, KDE Plasma 6+) — see
+  [docs/install/linux.md](docs/install/linux.md) for the X11/Wayland matrix
 - x86_64 CPU
 - Python 3.10 or newer
 - Network access to the Groq API
@@ -108,8 +112,9 @@ processing finishes.
 
 ### Optional assistant dependency
 
-Codex assistant mode requires an installed and authenticated Codex CLI.
-Dictation does not require Codex.
+Assistant mode requires an installed and authenticated Hermes CLI
+(`hermes`, default). Override with `VAANI_AGENT_BIN` (falls back to Codex
+CLI only if Hermes is missing from `PATH`). Dictation does not require Hermes.
 
 ## Fresh installation
 
@@ -262,7 +267,11 @@ printf 'Session type: %s\n' "$XDG_SESSION_TYPE"
 printf 'Display: %s\n' "$DISPLAY"
 ```
 
-Both must describe an active X11 desktop. A Wayland session is unsupported.
+Both must describe an active X11 desktop for this check specifically — it's
+for the X11 backend's own diagnostics. A Wayland session runs through the
+portal backend instead (`vaani.platform.linux.wayland`); see
+[docs/install/linux.md](docs/install/linux.md) for what does and doesn't
+work there.
 
 ### Test transcription without global hotkeys
 
@@ -380,47 +389,61 @@ flow is fixed.
 
 ### Assistant mode
 
-Use `Ctrl+Alt+Space` or, on the reference keyboard, `Ctrl+Super+Space`.
+Use `Ctrl+Alt+Space` (hold-to-talk via xinput on Linux).
 
 Assistant transcription currently forces English. After transcription, Vaani
 tries these routes in order:
 
-1. Resolve and launch a known desktop application.
-2. Resolve a configured site or direct browser request.
-3. Send the spoken request to Codex CLI.
+1. Resolve and launch a known desktop application (`open` / `launch` / …).
+2. Resolve YouTube play/search, a configured site, or a direct browser request.
+3. Match **one** installed Agent Skill (`~/.agents/skills`, `~/.claude/skills`)
+   by name/alias and run it with Codex using **only that skill’s body** and
+   **only MCPs listed in the skill frontmatter** (`mcps: […]`; default none).
+4. Otherwise fall back to an isolated Codex chat request (no user MCP catalog).
 
 Brave is preferred for generic browser/site requests unless Chrome is named
-explicitly. Site URLs are opened in a new window. App and site actions return a
-desktop notification and are written to local history.
+explicitly. Site URLs are opened in a new window. App, site, skill, and Codex
+actions return a desktop notification and are written to local history.
 
-#### Codex boundary
+Fast examples: `Open VS Code`, `Play rickroll on YouTube`.  
+Skill example: `Run the sample skill for Acme` (skill must exist on disk).
 
-Codex requests are intentionally isolated:
+Optional skill frontmatter for selective MCP:
 
-- Each request starts a new `codex exec --ephemeral` session.
-- `--ignore-user-config` is enabled.
-- User-configured MCP servers, skills, and related Codex configuration are
-  therefore **not loaded**.
-- Reasoning effort is set to `low`.
-- The default timeout is 30 seconds.
+```yaml
+---
+name: my-workflow
+description: Compare product pricing
+mcps:
+  - browseros
+---
+```
+
+#### Assistant agent boundary
+
+- **Chat fallback** uses Hermes oneshot: `hermes -z PROMPT --yolo --reasoning low`
+  (final response only on stdout). Default timeout 30s.
+- **Skill runs** inject the skill body into the prompt and best-effort pass
+  `--skills <id>`. Codex’s temp-`CODEX_HOME` MCP allowlist applies only when
+  `VAANI_AGENT_BIN` points at Codex. Default skill timeout 120s
+  (`VAANI_SKILL_TIMEOUT`).
+- Reasoning effort is set to `low` for voice.
 - The working directory is `VAANI_ASSISTANT_CWD`, or the home directory when
   unset.
-- Codex CLI must already be installed and authenticated.
+- Agent binary: `VAANI_AGENT_BIN` (default `hermes` if on `PATH`, else `codex`).
+  Hermes config/auth lives under `~/.hermes/` (Codex auth may still be used as
+  a Hermes provider).
 - The process runs with the desktop user's operating-system permissions.
 - The desktop environment is inherited except for `OPENAI_API_KEY` and
-  `GROQ_API_KEY`; other environment variables are not stripped.
-- The spoken prompt is passed as a Codex command argument and may be transiently
-  visible to local process inspection.
+  `GROQ_API_KEY`.
 
-This mode does not reuse an interactive Codex session and does not dynamically
-load MCPs. Treat spoken assistant tasks as commands executed with your user
-permissions.
+Treat spoken assistant tasks as commands executed with your user permissions.
 
 ## Configuration
 
 ### Assistant workspace
 
-Set the directory where Codex assistant requests run:
+Set the directory where assistant agent requests run:
 
 ```bash
 export VAANI_ASSISTANT_CWD="$HOME/path/to/workspace"
@@ -837,7 +860,7 @@ Run the complete suite and security scans before committing a lock update.
 | `x11.py` | Active-window and input-focus snapshots |
 | `history.py` | Private SQLite schema and concurrency-safe transcript storage |
 | `secrets.py` | GNOME Keyring access and Groq model validation |
-| `codex.py` | Bounded, cancellable, ephemeral Codex CLI execution |
+| `codex.py` | Bounded, cancellable Hermes (or Codex) CLI execution |
 | `apps.py` | Deterministic desktop application resolution and launch |
 | `sites.py` | Public aliases plus optional private local site configuration |
 | `feedback.py` | Recording sounds, notifications, and indicator lifecycle |
@@ -938,7 +961,11 @@ Skip a command when that backup file does not exist.
 
 See [ROADMAP.md](ROADMAP.md) for planned work beyond this list.
 
-- Linux/X11 only; no Windows, macOS, or Wayland backend.
+- Linux only (X11 or Wayland); no Windows or macOS backend yet.
+- Wayland: hotkeys need a GlobalShortcuts-capable portal (GNOME 45+, KDE
+  Plasma 6+) and a one-time system dialog to assign each shortcut; auto-paste
+  only works on compositors with `wtype` support (Sway, Hyprland) — GNOME/KDE
+  Wayland deliver to the clipboard only, and you press Ctrl+V yourself.
 - Ubuntu 22.04 GNOME/Xorg x86_64 is the validated platform.
 - Cloud transcription requires network access, a Groq key, and available quota.
 - Recordings are not transcribed incrementally or streamed as text.

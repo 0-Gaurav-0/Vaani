@@ -18,6 +18,10 @@ from .config import sweep_audio_directory
 from .types import AudioResult
 
 PAREC_ARGV = ("parec", "--device=@DEFAULT_SOURCE@", "--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav")
+PAREC_CMDLINE = " ".join(PAREC_ARGV)
+
+# Peak window RMS below this ⇒ treat as muted / no speech (matches waveform idle floor).
+SILENCE_PEAK_RMS = 0.012
 
 
 class AudioError(RuntimeError):
@@ -26,6 +30,85 @@ class AudioError(RuntimeError):
 
 class AudioPreflightError(AudioError):
     pass
+
+
+def reap_orphan_parec(*, keep_pid: int | None = None) -> int:
+    """Kill leftover Vaani ``parec`` processes so the mic is released.
+
+    Crashes / SIGKILL can leave ``parec`` recording forever (OS privacy LED
+    stays on). Safe to call at startup and shutdown; only matches Vaani's
+    exact argv for the current user.
+    """
+    killed = 0
+    try:
+        out = subprocess.check_output(
+            ["ps", "-u", str(os.getuid()), "-o", "pid=,args="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    for line in out.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        pid_s, _, args = raw.partition(" ")
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        if keep_pid is not None and pid == keep_pid:
+            continue
+        cmdline = args.strip()
+        if cmdline != PAREC_CMDLINE and not cmdline.endswith(" " + PAREC_CMDLINE):
+            # Also match when argv0 is an absolute path to parec.
+            if " --device=@DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le --file-format=wav" not in cmdline:
+                continue
+            if "parec" not in cmdline.split()[0] and "/parec" not in cmdline.split()[0]:
+                continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            killed += 1
+        except OSError:
+            continue
+    if killed:
+        # Give them a moment, then force any stubborn leftovers.
+        time.sleep(0.15)
+        try:
+            out = subprocess.check_output(
+                ["ps", "-u", str(os.getuid()), "-o", "pid=,args="],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        for line in out.splitlines():
+            raw = line.strip()
+            if not raw:
+                continue
+            pid_s, _, args = raw.partition(" ")
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            if keep_pid is not None and pid == keep_pid:
+                continue
+            cmdline = args.strip()
+            if " --device=@DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le --file-format=wav" not in cmdline:
+                continue
+            if "parec" not in cmdline:
+                continue
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            import logging
+
+            logging.getLogger("vaani").info("event=mic_reap orphans=%s", killed)
+        except Exception:
+            pass
+    return killed
 
 
 def _pcm16_rms(data: bytes) -> float:
@@ -114,6 +197,18 @@ class AudioRecorderImpl:
         self._level_thread = threading.Thread(target=monitor, daemon=True)
         self._level_thread.start()
 
+    def _clear_amplitude(self) -> None:
+        amp_path = self.amplitude_path
+        if amp_path is None:
+            return
+        try:
+            amp_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = amp_path.with_suffix(".tmp")
+            tmp.write_text("0.0000", encoding="utf-8")
+            os.replace(tmp, amp_path)
+        except OSError:
+            pass
+
     def _stop_level_monitor(self) -> None:
         self._level_stop.set()
         self._level = 0.0
@@ -124,11 +219,14 @@ class AudioRecorderImpl:
                 thread.join(timeout=0.5)
             except Exception:
                 pass
+        self._clear_amplitude()
 
     def start(self) -> AudioResult:
         self._stopped = None
         if self._proc is not None:
             raise AudioError("recording already active")
+        # Never leave a prior crash holding the mic open.
+        reap_orphan_parec()
         self.audio_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.audio_dir.chmod(0o700)
         fd, path = tempfile.mkstemp(prefix="recording-", suffix=".wav", dir=self.audio_dir)
@@ -243,6 +341,38 @@ class AudioRecorderImpl:
         if self._path:
             self._path.unlink(missing_ok=True)
             self._path = None
+        # Belt-and-suspenders: never leave a Vaani parec behind after cleanup.
+        reap_orphan_parec()
+
+
+def wav_peak_rms(path: Path, *, window_bytes: int = 3200) -> float:
+    """Max PCM16 RMS over short windows (0..1). Header is skipped."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(44)
+            data = fh.read()
+    except OSError:
+        return 0.0
+    if len(data) < 2:
+        return 0.0
+    step = max(2, window_bytes - (window_bytes % 2))
+    peak = 0.0
+    for i in range(0, len(data) - 1, step):
+        chunk = data[i : i + step]
+        if len(chunk) >= 2:
+            peak = max(peak, _pcm16_rms(chunk))
+    return peak
+
+
+def is_silent_wav(path: Path, *, floor: float = SILENCE_PEAK_RMS) -> bool:
+    """True when the recording looks like a muted mic / no speech."""
+    target = Path(path)
+    try:
+        if not target.is_file():
+            return False
+    except OSError:
+        return False
+    return wav_peak_rms(target) < floor
 
 
 def validate_wav(path: Path, *, duration_seconds: float | None = None) -> AudioResult:

@@ -8,7 +8,33 @@ def test_resolves_desktop_app_aliases():
     assert resolve_app("Launch the Terminal").name == "Terminal"
     assert resolve_app("Start Text Editor").name == "Text Editor"
     assert resolve_app("Open VS Code").name == "Visual Studio Code"
+    assert resolve_app("Open vscode").name == "Visual Studio Code"
+    assert resolve_app("Open code").name == "Visual Studio Code"
     assert resolve_app("Show Files").name == "Files"
+    assert resolve_app("Cursor kholo").name == "Cursor"
+    assert resolve_app("Chrome dikhao").name == "Chrome"
+    assert resolve_app("Can you open Slack").name == "Slack"
+
+
+def test_resolve_app_name_without_verb():
+    from vaani.apps import resolve_app_name
+    from pathlib import Path
+
+    assert resolve_app_name("cursor").name == "Cursor"
+    assert resolve_app_name("vs code").name == "Visual Studio Code"
+    assert resolve_app_name("spotify").name == "Spotify"
+
+
+def test_resolves_vaani_project_to_cursor_workspace():
+    from pathlib import Path
+
+    target = resolve_app("open Vaani project")
+    assert target is not None
+    assert target.name == "Vaani project"
+    assert target.executables == ("cursor",)
+    assert target.arguments == (str(Path.home() / "Vaani"),)
+    assert resolve_app("initiate project Vani").name == "Vaani project"
+    assert resolve_app("resume vani session").name == "Vaani project"
 
 
 def test_resolves_installed_work_and_system_apps():

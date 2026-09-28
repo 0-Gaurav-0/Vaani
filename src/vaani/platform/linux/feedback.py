@@ -6,19 +6,32 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ...indicator_protocol import clear_phase, resolve_phase_path, write_phase
+from ...indicator_protocol import (
+    clear_answer,
+    clear_phase,
+    resolve_answer_path,
+    resolve_phase_path,
+    resolve_session_path,
+    write_answer,
+    write_phase,
+    write_session,
+)
 
 SOUNDS = {
     "start": "/usr/share/sounds/freedesktop/stereo/message.oga",
     "stop": "/usr/share/sounds/freedesktop/stereo/button-pressed.oga",
-    "success": "/usr/share/sounds/freedesktop/stereo/complete.oga",
+    # success/paste intentionally silent — paste already confirms visually.
+    "success": None,
     "busy": "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
     "failure": "/usr/share/sounds/freedesktop/stereo/dialog-error.oga",
     "processing": "/usr/share/sounds/freedesktop/stereo/button-pressed.oga",
-    "paste": "/usr/share/sounds/freedesktop/stereo/complete.oga",
+    "paste": None,
+    # 1 minute before the recording cap.
+    "warn": "/usr/share/sounds/freedesktop/stereo/dialog-information.oga",
 }
 
 CATEGORIES = {"key", "mic", "Groq", "quota", "cleanup", "target", "paste", "shortcut"}
@@ -35,7 +48,21 @@ _DEFAULT_MESSAGES = {
 }
 
 # Dismiss the pill — NOT processing (pill stays visible while Groq works).
+# Answer phase has its own auto-dismiss in the indicator; no answer cue here.
 _DISMISS_CUES = frozenset({"success", "failure", "busy", "paste", "stop"})
+_SILENT_CUES = frozenset({"success", "paste"})
+_SESSION_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "DISPLAY",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+        "XAUTHORITY",
+        "HOME",
+    }
+)
 _LOG = logging.getLogger("vaani")
 
 
@@ -51,15 +78,33 @@ class LinuxFeedback:
         control_path: str | os.PathLike[str] | None = None,
         popen: Callable[..., Any] = subprocess.Popen,
         log_dir: str | os.PathLike[str] | None = None,
+        persistent_indicator: bool = True,
+        sound_async: bool | None = None,
     ):
         self.paplay = paplay
+        # Keep one pill process alive (hidden when idle) so the next press shows
+        # it instantly instead of paying ~1s python + GTK4 startup each time.
+        self.persistent_indicator = persistent_indicator
+        # Cue sounds must never block the hotkey / stop path. Injected runners
+        # (tests) stay synchronous so assertions are deterministic.
+        self.sound_async = (runner is subprocess.run) if sound_async is None else sound_async
         self.runner = runner
         self.beeper = beeper
         self.popen = popen
         self.env = {"PATH": "/usr/bin:/bin"}
+        for key in (
+            "DISPLAY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+            "XAUTHORITY",
+            "HOME",
+        ):
+            value = os.environ.get(key)
+            if value:
+                self.env[key] = value
         if env:
             self.env.update(
-                {k: v for k, v in env.items() if k in {"PATH", "LANG", "LC_ALL"}}
+                {k: v for k, v in env.items() if k in _SESSION_ENV_KEYS}
             )
         self.amplitude_path = (
             str(amplitude_path)
@@ -71,22 +116,46 @@ class LinuxFeedback:
             if control_path is not None
             else os.environ.get("VAANI_INDICATOR_CONTROL")
         )
-        self.phase_path = str(
-            resolve_phase_path(
-                cache_dir=Path(self.amplitude_path).parent
-                if self.amplitude_path
-                else None
-            )
+        cache_dir = (
+            Path(self.amplitude_path).parent if self.amplitude_path else None
         )
+        self.phase_path = str(resolve_phase_path(cache_dir=cache_dir))
+        self.answer_path = str(resolve_answer_path(cache_dir=cache_dir))
+        self.session_path = str(resolve_session_path(cache_dir=cache_dir))
         self.log_dir = Path(
             log_dir
             or os.environ.get("VAANI_LOG_DIR", Path.home() / ".local" / "state" / "vaani" / "logs")
         )
         self.indicator = None
 
-    def _spawn_indicator(self) -> None:
+    def _indicator_alive(self) -> bool:
+        proc = self.indicator
+        return proc is not None and getattr(proc, "poll", lambda: None)() is None
+
+    def prewarm(self) -> None:
+        """Start the hidden pill at daemon startup so the first press is instant."""
+        if not self.persistent_indicator or self._indicator_alive():
+            return
+        self._spawn_indicator(initial_phase="idle")
+
+    def shutdown(self) -> None:
+        """Kill the persistent pill (daemon exit)."""
+        self._kill_indicator()
+
+    close = shutdown
+
+    def _spawn_indicator(self, initial_phase: str = "recording") -> None:
         if self.indicator is not None:
             if getattr(self.indicator, "poll", lambda: None)() is None:
+                # Reuse the live answer card — flip it back to recording.
+                try:
+                    write_phase(self.phase_path, "recording")
+                except Exception:
+                    pass
+                try:
+                    clear_answer(self.answer_path)
+                except Exception:
+                    pass
                 return
             self.indicator = None
         env = os.environ.copy()
@@ -96,8 +165,15 @@ class LinuxFeedback:
         if self.control_path:
             env["VAANI_INDICATOR_CONTROL"] = self.control_path
         env["VAANI_INDICATOR_PHASE"] = self.phase_path
+        env["VAANI_INDICATOR_ANSWER"] = self.answer_path
+        env["VAANI_INDICATOR_SESSION"] = self.session_path
+        env["VAANI_DAEMON_PID"] = str(os.getpid())
         try:
-            write_phase(self.phase_path, "recording")
+            write_phase(self.phase_path, initial_phase)
+        except Exception:
+            pass
+        try:
+            clear_answer(self.answer_path)
         except Exception:
             pass
         try:
@@ -129,6 +205,20 @@ class LinuxFeedback:
                 pass
 
     def _stop_indicator(self) -> None:
+        if self.persistent_indicator and self._indicator_alive():
+            # Hide, don't kill — the next press reuses the warm process.
+            try:
+                write_phase(self.phase_path, "idle")
+            except Exception:
+                pass
+            try:
+                clear_answer(self.answer_path)
+            except Exception:
+                pass
+            return
+        self._kill_indicator()
+
+    def _kill_indicator(self) -> None:
         if self.indicator is None:
             try:
                 clear_phase(self.phase_path)
@@ -152,6 +242,42 @@ class LinuxFeedback:
             except Exception:
                 pass
 
+    def set_session(
+        self, *, mode: str, handsfree: bool, started: float, max_s: float, warn_s: float
+    ) -> None:
+        """Tell the pill the mode, hands-free state and timer origin."""
+        try:
+            write_session(
+                self.session_path,
+                mode=mode,
+                handsfree=handsfree,
+                started=started,
+                max_s=max_s,
+                warn_s=warn_s,
+            )
+        except Exception:
+            pass
+
+    def show_answer(self, question: str, answer: str) -> None:
+        """Expand the live pill with Q&A. Does not stop the indicator or toast."""
+        try:
+            write_answer(self.answer_path, question, answer)
+            write_phase(self.phase_path, "answer")
+        except Exception:
+            pass
+
+    def show_clarify(
+        self, question: str, options: list[str] | tuple[str, ...]
+    ) -> None:
+        """Expand the pill with numbered choices the user can click or speak."""
+        labels = [str(item) for item in list(options)[:5]]
+        body = "\n".join(f"{i}. {label}" for i, label in enumerate(labels, start=1))
+        try:
+            write_answer(self.answer_path, question, body, options=labels)
+            write_phase(self.phase_path, "answer")
+        except Exception:
+            pass
+
     def play(self, cue: str) -> bool:
         if cue == "start":
             self._spawn_indicator()
@@ -161,10 +287,19 @@ class LinuxFeedback:
                 write_phase(self.phase_path, "processing")
             except Exception:
                 pass
-            self.notify("paste", "Transcribing…")
         elif cue in _DISMISS_CUES:
             self._stop_indicator()
 
+        if cue in _SILENT_CUES:
+            return True
+        if self.sound_async:
+            threading.Thread(
+                target=self._play_sound, args=(cue,), daemon=True, name="vaani-cue"
+            ).start()
+            return True
+        return self._play_sound(cue)
+
+    def _play_sound(self, cue: str) -> bool:
         path = SOUNDS.get(cue)
         try:
             if path and Path(path).is_file():

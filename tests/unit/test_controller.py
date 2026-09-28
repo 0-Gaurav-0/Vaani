@@ -29,7 +29,8 @@ def make():
 
 def test_smart_and_literal_flow():
     c,h=make(); assert c.trigger('smart'); assert c.stop(); c._worker.join(1)
-    assert h.rows and h.rows[0]['final_text']=='Hello'
+    # Exact-words path: no LLM cleanup rewrite (hello stays hello).
+    assert h.rows and h.rows[0]['final_text']=='hello'
     c.trigger('literal'); c.stop(); c._worker.join(1)
     assert h.rows[-1]['final_text']=='hello'
 
@@ -39,9 +40,18 @@ def test_cancel_returns_idle_without_history():
 
 def test_indicator_control_file_stop(tmp_path):
     from vaani.indicator_protocol import write_command
+    import struct
+    import wave
 
     wav = tmp_path / "a.wav"
-    wav.write_bytes(b"RIFF" + b"\x00" * 40 + b"\x00\x00")
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        frames = b"".join(
+            struct.pack("<h", 8000 if (i // 40) % 2 == 0 else -8000) for i in range(8000)
+        )
+        w.writeframes(frames)
     control = tmp_path / "indicator_control.json"
     amp = tmp_path / "amplitude"
 
@@ -114,21 +124,201 @@ def test_assistant_uses_runner_displays_and_persists():
     class Window:
         def __init__(self): self.results=[]
         def show(self, result): self.results.append(result.stdout)
-    h=History(); w=Window()
-    c=Controller(recorder=Rec(), groq=Groq(), delivery=Delivery(), history=h,
-                 codex=Runner(), result_window=w, key_provider=lambda:'key')
+    class CodingGroq(Groq):
+        def transcribe(self, *a, **k): return SimpleNamespace(text='fix the flaky test', language='en')
+        def route(self, text, *a, **k):
+            from vaani.assistant_route import RouteDecision
+            return RouteDecision(intent='codex', query=text, confidence=0.9)
+    class FB:
+        def __init__(self):
+            self.clarify = None
+        def play(self, cue):
+            return True
+        def show_clarify(self, question, options):
+            self.clarify = (question, list(options))
+    h=History(); w=Window(); fb=FB()
+    c=Controller(recorder=Rec(), groq=CodingGroq(), delivery=Delivery(), history=h,
+                 feedback=fb, codex=Runner(), result_window=w, key_provider=lambda:'key')
     assert c.trigger_assistant(); assert c.stop(); c._worker.join(1)
+    # Codex is confirm-gated: first stop only shows Confirm/Cancel.
+    assert w.results == []
+    assert fb.clarify is not None
+    c._apply_clarify_index(0)
     assert w.results == ['answer']
-    assert h.rows[0]['mode'] == 'assistant' and h.rows[0]['final_text'] == 'answer'
+    assert h.rows[-1]['mode'] == 'assistant' and h.rows[-1]['final_text'] == 'answer'
     assert c.state is AppState.IDLE
+
+
+def test_assistant_qa_shows_answer_without_paste():
+    class QAGroq(Groq):
+        def transcribe(self, *a, **k):
+            return SimpleNamespace(text='Who is the PM of India?', language='en')
+
+        def answer(self, question, *a, **k):
+            return SimpleNamespace(text='Narendra Modi', used_fallback=False)
+
+    class FB:
+        def __init__(self):
+            self.cues = []
+            self.answers = []
+
+        def play(self, cue):
+            self.cues.append(cue)
+            return True
+
+        def show_answer(self, question, answer):
+            self.answers.append((question, answer))
+
+    class DeliverySpy(Delivery):
+        def __init__(self):
+            self.calls = []
+
+        def deliver(self, text, **_k):
+            self.calls.append(text)
+            return 'paste_dispatched'
+
+    h = History()
+    fb = FB()
+    delivery = DeliverySpy()
+    c = Controller(
+        recorder=Rec(),
+        groq=QAGroq(),
+        delivery=delivery,
+        history=h,
+        feedback=fb,
+        key_provider=lambda: 'key',
+    )
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(1)
+    assert delivery.calls == []
+    assert fb.answers == [('Who is the PM of India?', 'Narendra Modi')]
+    assert h.rows[0]['cleanup_status'] == 'qa_answer'
+    assert 'success' not in fb.cues
+
+
+def test_assistant_ambiguous_pastes():
+    class StatementGroq(Groq):
+        def transcribe(self, *a, **k):
+            return SimpleNamespace(text='please send this to John', language='en')
+
+    class DeliverySpy(Delivery):
+        def __init__(self):
+            self.calls = []
+
+        def deliver(self, text, **_k):
+            self.calls.append(text)
+            return 'paste_dispatched'
+
+    h = History()
+    delivery = DeliverySpy()
+    c = Controller(
+        recorder=Rec(),
+        groq=StatementGroq(),
+        delivery=delivery,
+        history=h,
+        key_provider=lambda: 'key',
+    )
+    assert c.trigger_assistant()
+    assert c.stop()
+    c._worker.join(1)
+    assert delivery.calls == ['please send this to John']
+
+
+def test_answer_prefix_skips_cleanup():
+    class PrefixGroq(Groq):
+        def transcribe(self, *a, **k):
+            return SimpleNamespace(text='Answer this: capital of France', language='en')
+
+        def answer(self, question, *a, **k):
+            return SimpleNamespace(text='Paris', used_fallback=False)
+
+        def cleanup(self, text, *a, **k):
+            raise AssertionError('cleanup must not overwrite answers')
+
+    h = History()
+    c = Controller(
+        recorder=Rec(),
+        groq=PrefixGroq(),
+        delivery=Delivery(),
+        history=h,
+        key_provider=lambda: 'key',
+    )
+    assert c.trigger('smart')
+    assert c.stop()
+    c._worker.join(1)
+    assert h.rows[0]['final_text'] == 'Paris'
+    assert h.rows[0]['mode'] == 'answer'
+
+
+def test_delivery_failed_plays_failure_cue():
+    class FailDelivery(Delivery):
+        def deliver(self, text, **_k):
+            return 'failed'
+
+    class FB:
+        def __init__(self):
+            self.cues = []
+
+        def play(self, cue):
+            self.cues.append(cue)
+            return True
+
+    h = History()
+    fb = FB()
+    c = Controller(
+        recorder=Rec(),
+        groq=Groq(),
+        delivery=FailDelivery(),
+        history=h,
+        feedback=fb,
+        key_provider=lambda: 'key',
+    )
+    assert c.trigger('smart')
+    assert c.stop()
+    c._worker.join(1)
+    assert fb.cues[-1] == 'failure'
+
+
+def test_prompt_bleed_rejects_without_paste():
+    class BleedGroq(Groq):
+        def transcribe(self, *a, **k):
+            from vaani.groq import TRANSCRIPTION_PROMPT
+            return SimpleNamespace(text=TRANSCRIPTION_PROMPT, language='en')
+
+    class DeliverySpy(Delivery):
+        def __init__(self):
+            self.calls = []
+
+        def deliver(self, text, **_k):
+            self.calls.append(text)
+            return 'paste_dispatched'
+
+    h = History()
+    delivery = DeliverySpy()
+    c = Controller(
+        recorder=Rec(),
+        groq=BleedGroq(),
+        delivery=delivery,
+        history=h,
+        key_provider=lambda: 'key',
+    )
+    assert c.trigger('smart')
+    assert c.stop()
+    c._worker.join(1)
+    assert delivery.calls == []
+    assert not h.rows
 
 
 def test_assistant_launches_resolved_desktop_app(monkeypatch):
     class Window:
         def __init__(self): self.results=[]
         def show_text(self, result): self.results.append(result)
+    class OpenGroq(Groq):
+        def transcribe(self, *a, **k):
+            return SimpleNamespace(text='open Terminal', language='en')
     h=History(); w=Window()
-    c=Controller(recorder=Rec(), groq=Groq(), delivery=Delivery(), history=h,
+    c=Controller(recorder=Rec(), groq=OpenGroq(), delivery=Delivery(), history=h,
                  result_window=w, key_provider=lambda:'key')
     app = SimpleNamespace(name="Terminal")
     monkeypatch.setattr("vaani.controller.resolve_app", lambda text: app)

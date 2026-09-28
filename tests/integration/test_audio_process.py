@@ -10,7 +10,7 @@ def test_escalation_reaps_and_stop_is_idempotent(tmp_path):
 
 def test_normal_sigint_stop_reaps_and_cleanup_deletes(tmp_path):
     fixture = Path(__file__).parents[1] / 'fixtures' / 'valid.wav'
-    script = tmp_path/'parec'; script.write_text(f'#!/bin/sh\ncat {fixture} & wait\n'); script.chmod(stat.S_IRWXU)
+    script = tmp_path/'parec'; script.write_text(f'#!/bin/sh\ncat "{fixture}" & wait\n'); script.chmod(stat.S_IRWXU)
     rec = AudioRecorder(tmp_path/'audio', parec=str(script)); rec.start()
     result = rec.stop()
     assert result.path.exists() and rec._proc is None

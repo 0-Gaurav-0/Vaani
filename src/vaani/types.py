@@ -15,7 +15,8 @@ class DictationMode(str, Enum):
 @dataclass(frozen=True)
 class GroqModelSettings:
     base_url: str = "https://api.groq.com/openai/v1"
-    transcription_model: str = "whisper-large-v3-turbo"
+    # large-v3 >> turbo for Hindi/Hinglish; turbo was producing broken roman phonetics.
+    transcription_model: str = "whisper-large-v3"
     # Instant 8B is much faster than gpt-oss-120b for cleanup; quality is enough
     # for punctuation / light Hinglish cleanup.
     cleanup_model: str = "llama-3.1-8b-instant"

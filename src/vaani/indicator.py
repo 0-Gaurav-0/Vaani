@@ -97,17 +97,26 @@ class GtkRecordingIndicator(RecordingIndicator):
     def _draw(self, area, cr, width, height):
         def rounded(x, y, w, h, r):
             cr.new_sub_path(); cr.arc(x+w-r, y+r, r, -math.pi/2, 0); cr.arc(x+w-r, y+h-r, r, 0, math.pi/2); cr.arc(x+r, y+h-r, r, math.pi/2, math.pi); cr.arc(x+r, y+r, r, math.pi, 3*math.pi/2); cr.close_path()
-        cr.set_source_rgba(.08,.09,.12,.96); rounded(0,0,240,40,20); cr.fill()
-        cr.set_source_rgb(.75,.76,.8); cr.arc(22,20,16,0,6.283); cr.fill(); cr.set_source_rgb(.15,.15,.18); cr.set_line_width(2); cr.move_to(17,15); cr.line_to(27,25); cr.move_to(27,15); cr.line_to(17,25); cr.stroke()
-        cr.set_source_rgb(.85,.12,.2); cr.arc(218,20,16,0,6.283); cr.fill(); cr.set_source_rgb(1,1,1); cr.rectangle(213,15,10,10); cr.fill()
+        cr.set_source_rgba(.17, .18, .20, .72); rounded(0, 0, 240, 40, 20); cr.fill()
+        cr.set_source_rgba(.58, .60, .66, .35); cr.set_line_width(1.0)
+        rounded(0.5, 0.5, 239, 39, 19.5); cr.stroke()
+        cr.set_source_rgb(.23, .24, .27); cr.arc(22, 20, 12, 0, 6.283); cr.fill()
+        cr.set_source_rgb(.78, .80, .84); cr.set_line_width(1.6)
+        cr.move_to(18, 16); cr.line_to(26, 24); cr.move_to(26, 16); cr.line_to(18, 24); cr.stroke()
+        cr.set_source_rgb(.92, .93, .95); cr.arc(218, 20, 12, 0, 6.283); cr.fill()
+        cr.set_source_rgb(.18, .19, .22); cr.set_line_width(1.6)
+        cr.move_to(213, 20); cr.line_to(216.5, 23.5); cr.line_to(223, 16.5); cr.stroke()
         levels = self.waveform or (0.0,)
-        colors = ((.96,.97,1.0),); samples = (list(levels)[-16:] or [0.0])
+        samples = (list(levels)[-16:] or [0.0])
         for i in range(16):
-            level = samples[i] if i < len(samples) else 0.0; x = 48 + i*144/15
-            color = colors[0]; cr.set_source_rgba(*color, .95)
-            if level <= 0.01: cr.arc(x, height/2, 2, 0, 6.283); cr.fill()
+            level = samples[i] if i < len(samples) else 0.0
+            x = 48 + i * 144 / 15
+            cr.set_source_rgba(.78, .80, .84, .85)
+            if level <= 0.01:
+                cr.arc(x, height / 2, 1.6, 0, 6.283); cr.fill()
             else:
-                bar_h = max(4, level*(height-8)); rounded(x-1.5, height/2-bar_h/2, 3, bar_h, 1.5); cr.fill()
+                bar_h = max(4, level * (height - 12))
+                rounded(x - 1.4, height / 2 - bar_h / 2, 2.8, bar_h, 1.4); cr.fill()
 
     def _click(self, gesture, n, x, y):
         action = self.dispatch_control(x, y)

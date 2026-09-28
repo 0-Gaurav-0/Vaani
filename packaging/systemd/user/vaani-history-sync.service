@@ -1,0 +1,11 @@
+[Unit]
+Description=Vaani browser history catalog sync (Chrome + Brave)
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=50
+# Prefer PATH wrapper (~/.local/bin/vaani-history-sync) so spaces in the
+# project path never break ExecStart parsing.
+ExecStart=%h/.local/bin/vaani-history-sync
