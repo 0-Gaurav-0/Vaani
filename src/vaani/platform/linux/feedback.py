@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -73,8 +74,16 @@ class LinuxFeedback:
         control_path: str | os.PathLike[str] | None = None,
         popen: Callable[..., Any] = subprocess.Popen,
         log_dir: str | os.PathLike[str] | None = None,
+        persistent_indicator: bool = True,
+        sound_async: bool | None = None,
     ):
         self.paplay = paplay
+        # Keep one pill process alive (hidden when idle) so the next press shows
+        # it instantly instead of paying ~1s python + GTK4 startup each time.
+        self.persistent_indicator = persistent_indicator
+        # Cue sounds must never block the hotkey / stop path. Injected runners
+        # (tests) stay synchronous so assertions are deterministic.
+        self.sound_async = (runner is subprocess.run) if sound_async is None else sound_async
         self.runner = runner
         self.beeper = beeper
         self.popen = popen
@@ -114,7 +123,23 @@ class LinuxFeedback:
         )
         self.indicator = None
 
-    def _spawn_indicator(self) -> None:
+    def _indicator_alive(self) -> bool:
+        proc = self.indicator
+        return proc is not None and getattr(proc, "poll", lambda: None)() is None
+
+    def prewarm(self) -> None:
+        """Start the hidden pill at daemon startup so the first press is instant."""
+        if not self.persistent_indicator or self._indicator_alive():
+            return
+        self._spawn_indicator(initial_phase="idle")
+
+    def shutdown(self) -> None:
+        """Kill the persistent pill (daemon exit)."""
+        self._kill_indicator()
+
+    close = shutdown
+
+    def _spawn_indicator(self, initial_phase: str = "recording") -> None:
         if self.indicator is not None:
             if getattr(self.indicator, "poll", lambda: None)() is None:
                 # Reuse the live answer card — flip it back to recording.
@@ -138,7 +163,7 @@ class LinuxFeedback:
         env["VAANI_INDICATOR_ANSWER"] = self.answer_path
         env["VAANI_DAEMON_PID"] = str(os.getpid())
         try:
-            write_phase(self.phase_path, "recording")
+            write_phase(self.phase_path, initial_phase)
         except Exception:
             pass
         try:
@@ -174,6 +199,20 @@ class LinuxFeedback:
                 pass
 
     def _stop_indicator(self) -> None:
+        if self.persistent_indicator and self._indicator_alive():
+            # Hide, don't kill — the next press reuses the warm process.
+            try:
+                write_phase(self.phase_path, "idle")
+            except Exception:
+                pass
+            try:
+                clear_answer(self.answer_path)
+            except Exception:
+                pass
+            return
+        self._kill_indicator()
+
+    def _kill_indicator(self) -> None:
         if self.indicator is None:
             try:
                 clear_phase(self.phase_path)
@@ -229,9 +268,17 @@ class LinuxFeedback:
         elif cue in _DISMISS_CUES:
             self._stop_indicator()
 
-        path = SOUNDS.get(cue)
         if cue in _SILENT_CUES:
             return True
+        if self.sound_async:
+            threading.Thread(
+                target=self._play_sound, args=(cue,), daemon=True, name="vaani-cue"
+            ).start()
+            return True
+        return self._play_sound(cue)
+
+    def _play_sound(self, cue: str) -> bool:
+        path = SOUNDS.get(cue)
         try:
             if path and Path(path).is_file():
                 result = self.runner(
