@@ -4,6 +4,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -414,6 +415,11 @@ GEMINI_COOLDOWN_S = 20 * 60
 HI_WAIT_FOR_ENGLISH_S = 1.25
 # After Groq 429/402, pause background STT (wake) so it stops burning the quota.
 GROQ_QUOTA_COOLDOWN_S = 3 * 60
+# httpx drops idle sockets after 5s by default, so nearly every clip paid a
+# fresh DNS+TCP+TLS handshake (measured 0.3-0.9s). Keep them much longer and
+# warm the connection when recording starts.
+KEEPALIVE_S = 120.0
+HTTP_LIMITS = httpx.Limits(max_keepalive_connections=4, keepalive_expiry=KEEPALIVE_S)
 
 
 class GroqClient:
@@ -424,7 +430,7 @@ class GroqClient:
         self._transcription_timeout = httpx.Timeout(TRANSCRIPTION_READ_TIMEOUT, connect=CONNECT_TIMEOUT, write=UPLOAD_TIMEOUT, pool=POOL_ACQUISITION_TIMEOUT)
         self._cleanup_timeout = httpx.Timeout(CLEANUP_READ_TIMEOUT, connect=CONNECT_TIMEOUT, write=UPLOAD_TIMEOUT, pool=POOL_ACQUISITION_TIMEOUT)
         self._transport = transport
-        self._client = httpx.Client(base_url=self.settings.base_url.rstrip("/"), timeout=self._transcription_timeout, transport=transport)
+        self._client = httpx.Client(base_url=self.settings.base_url.rstrip("/"), timeout=self._transcription_timeout, transport=transport, limits=HTTP_LIMITS)
         self._gemini_quota_strikes = 0
         self._gemini_skip_until = 0.0
         self._quota_skip_until = 0.0
@@ -466,7 +472,33 @@ class GroqClient:
             base_url=self.settings.base_url.rstrip("/"),
             timeout=self._transcription_timeout,
             transport=self._transport,
+            limits=HTTP_LIMITS,
         )
+
+    def warm(self, key: str) -> None:
+        """Open (or refresh) pooled connections so the upload skips the handshake.
+
+        Two sockets: the Hinglish path may run en+hi in parallel.
+        """
+        if not key:
+            return
+        started = self._clock()
+
+        def ping() -> None:
+            try:
+                self._client.get(
+                    "/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=httpx.Timeout(5.0),
+                )
+            except Exception:
+                pass
+
+        other = threading.Thread(target=ping, daemon=True)
+        other.start()
+        ping()
+        other.join(5.0)
+        self._logger.info("event=groq_warm elapsed=%.2f", self._clock() - started)
 
     def _request(self, method: str, path: str, key: str, *, deadline: float, cancel: Event | None = None, **kwargs: Any) -> httpx.Response:
         started = self._clock(); attempts = 0
@@ -622,8 +654,12 @@ class GroqClient:
         *,
         cancel: Event | None = None,
         delete_audio: bool = False,
+        parallel: bool = False,
     ) -> TranscriptResult:
         """Latin Hinglish + English mix via parallel Whisper en+hi + pick.
+
+        ``parallel``: start the Hindi pass alongside English instead of after it
+        (assistant mode — short, often Hinglish commands; saves one round trip).
 
         Gemini STT is opt-in (``VAANI_USE_GEMINI=1``); default is Groq-only.
         """
@@ -676,6 +712,16 @@ class GroqClient:
             # English first (1 API call). Hindi only when English is weak /
             # Hinglish-ish — parallel en+hi was burning free-tier RPM and
             # making dictation fail with quota after a few clips.
+            hi_future = None
+            if parallel:
+                from concurrent.futures import ThreadPoolExecutor
+
+                pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaani-stt-hi")
+                hi_future = pool.submit(
+                    self.transcribe, path, key, cancel=cancel, delete_audio=False,
+                    language="hi", prompt=None,
+                )
+                pool.shutdown(wait=False)
             try:
                 en_res = self.transcribe(
                     path,
@@ -710,15 +756,18 @@ class GroqClient:
                 return TranscriptResult(en_guarded or "", "en")
 
             try:
-                hi_res = self.transcribe(
-                    path,
-                    key,
-                    cancel=cancel,
-                    delete_audio=False,
-                    language="hi",
-                    prompt=None,
-                )
-            except GroqError:
+                if hi_future is not None:
+                    hi_res = hi_future.result(timeout=TRANSCRIPTION_DEADLINE)
+                else:
+                    hi_res = self.transcribe(
+                        path,
+                        key,
+                        cancel=cancel,
+                        delete_audio=False,
+                        language="hi",
+                        prompt=None,
+                    )
+            except (GroqError, concurrent.futures.TimeoutError):
                 if en_guarded:
                     self._logger.info(
                         "event=groq_transcribe_pick provider=groq reason=en_fallback "

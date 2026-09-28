@@ -62,6 +62,16 @@ RAW_STT_NO_POSTPROCESS = os.environ.get("VAANI_RAW_STT", "").strip().lower() in 
 }
 
 
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+
 def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     import re
     m = re.match(r"^\s*(Answer this|Only answer|Question)\b\s*[:,\-]?\s*(.*)$", text, re.I | re.S)
@@ -167,12 +177,45 @@ class Controller:
             except Exception as exc: self._fail(exc, "mic"); return False
             self.state = AppState.RECORDING; self._record_started = time.monotonic(); self._emit("recording")
             self._start_amplitude_monitor(self._audio.path)
+            self._start_warmup(token)
             self._start_chunker()
             self._feedback("start")
             threading.Thread(target=self._duration_guard, args=(token,), daemon=True).start()
             return True
 
     start = trigger
+
+    # Servers drop idle keep-alive sockets; refresh during long recordings.
+    WARM_REFRESH_S = 45.0
+
+    def _start_warmup(self, token: int) -> None:
+        """Handshake with Groq (and OpenRouter for assistant) while user speaks."""
+        assistant = self.mode == "assistant"
+
+        def run() -> None:
+            while True:
+                try:
+                    key = self.key_provider()
+                    warm = getattr(self.groq, "warm", None)
+                    if key and callable(warm):
+                        warm(key)
+                except Exception:
+                    pass
+                if assistant and self.jev is not None:
+                    try:
+                        warm_jev = getattr(self.jev, "warm", None)
+                        if callable(warm_jev):
+                            warm_jev()
+                    except Exception:
+                        pass
+                deadline = time.monotonic() + self.WARM_REFRESH_S
+                while time.monotonic() < deadline:
+                    time.sleep(0.5)
+                    with self._lock:
+                        if token != self._token or self.state is not AppState.RECORDING:
+                            return
+
+        threading.Thread(target=run, daemon=True, name="vaani-warm").start()
 
     def _start_chunker(self) -> None:
         self._abort_chunker()
@@ -597,9 +640,11 @@ class Controller:
                 except OSError:
                     pass
             elif callable(transcribe_h):
-                result = transcribe_h(
-                    audio.path, key, cancel=self._cancel, delete_audio=True
-                )
+                kwargs = {"cancel": self._cancel, "delete_audio": True}
+                if self.mode == "assistant" and _accepts_kwarg(transcribe_h, "parallel"):
+                    # Short, often-Hinglish commands: run en+hi concurrently.
+                    kwargs["parallel"] = True
+                result = transcribe_h(audio.path, key, **kwargs)
             else:
                 result = self.groq.transcribe(
                     audio.path, key, cancel=self._cancel, delete_audio=True, language="en"
