@@ -539,3 +539,110 @@ def test_media_sender_attempts_release_when_press_injection_fails():
         sender.play_pause()
 
     assert events == [X.KeyPress, X.KeyRelease]
+
+
+class _Clock:
+    def __init__(self):
+        self.t = 100.0
+
+    def __call__(self):
+        return self.t
+
+
+def _latch_manager(monkeypatch, recording):
+    from vaani.hotkeys import MiddleButtonHotkeyManager
+
+    clock = _Clock()
+    calls = []
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: calls.append(("hold", mode)) or True,
+        on_release=lambda mode: calls.append(("stop", mode)),
+        on_handsfree=lambda mode: (calls.append(("handsfree", mode)), recording.__setitem__(0, True))[1] is None,
+        is_recording=lambda: recording[0],
+        clock=clock,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: True)
+    monkeypatch.setattr(manager, "_trackpoint_middle_state_for_press", lambda: True)
+    return manager, clock, calls
+
+
+def _click(manager):
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._handle_button_event(X.ButtonRelease) is True
+
+
+def test_fn_click_latches_dictation_until_fn_click(monkeypatch):
+    recording = [False]
+    m, clock, calls = _latch_manager(monkeypatch, recording)
+    m.on_latch_key()
+    clock.t += 0.2
+    _click(m)
+    assert calls == []  # waiting to see if it's a double click
+    clock.t += 0.5
+    m.latch_tick()
+    assert calls == [("handsfree", "smart")]
+    # Plain clicks and long time don't stop it; release is swallowed.
+    clock.t += 30
+    _click(m)
+    m.latch_tick()
+    assert m._gesture.tick() is None
+    assert calls == [("handsfree", "smart")]
+    # Fn + click stops.
+    m.on_latch_key()
+    _click(m)
+    assert calls[-1] == ("stop", "smart")
+
+
+def test_fn_double_click_latches_assistant(monkeypatch):
+    recording = [False]
+    m, clock, calls = _latch_manager(monkeypatch, recording)
+    m.on_latch_key()
+    _click(m)
+    clock.t += 0.15
+    _click(m)
+    assert calls == [("handsfree", "assistant")]
+    clock.t += 1
+    m.latch_tick()
+    assert calls == [("handsfree", "assistant")]
+
+
+def test_fn_window_expires_back_to_normal_hold(monkeypatch):
+    recording = [False]
+    m, clock, calls = _latch_manager(monkeypatch, recording)
+    m.on_latch_key()
+    clock.t += 2.0  # past LATCH_ARM_S
+    assert m._handle_button_event(X.ButtonPress) is True
+    assert m._latch_clicks == 0 and m._gesture.down is True  # normal gesture path
+
+
+def test_stale_latch_cleared_when_session_ended_elsewhere(monkeypatch):
+    recording = [False]
+    m, clock, calls = _latch_manager(monkeypatch, recording)
+    m.on_latch_key()
+    _click(m)
+    clock.t += 0.5
+    m.latch_tick()
+    recording[0] = False  # pill ✓ / Esc / cap ended it
+    m.on_latch_key()
+    _click(m)
+    clock.t += 0.5
+    m.latch_tick()
+    # Treated as a fresh start, not a stop.
+    assert calls == [("handsfree", "smart"), ("handsfree", "smart")]
+
+
+def test_resolve_latch_keycode_env_and_xf86(monkeypatch):
+    from types import SimpleNamespace
+    from vaani.hotkeys import resolve_latch_keycode
+
+    seen = []
+    dpy = SimpleNamespace(keysym_to_keycode=lambda ks: seen.append(ks) or (151 if ks else 0))
+    monkeypatch.delenv("VAANI_LATCH_KEYCODE", raising=False)
+    monkeypatch.delenv("VAANI_LATCH_KEYSYM", raising=False)
+    assert resolve_latch_keycode(dpy) == 151  # XF86WakeUp needs the xf86 group
+    assert seen and seen[-1] == 0x1008FF2B
+    monkeypatch.setenv("VAANI_LATCH_KEYCODE", "135")
+    assert resolve_latch_keycode(dpy) == 135
+    monkeypatch.delenv("VAANI_LATCH_KEYCODE")
+    monkeypatch.setenv("VAANI_LATCH_KEYSYM", "off")
+    assert resolve_latch_keycode(dpy) is None

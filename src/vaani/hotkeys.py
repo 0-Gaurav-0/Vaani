@@ -470,8 +470,50 @@ class XTestMediaKeySender:
                     dpy.close()
 
 
+# Hands-free latch: tap Fn, then click the TrackPoint middle button.
+# ThinkPads report Fn pressed alone as KEY_WAKEUP → X keycode 151 (XF86WakeUp).
+LATCH_KEYSYM_DEFAULT = "XF86WakeUp"
+LATCH_ARM_S = 1.5  # Fn tap → click must follow within this window
+LATCH_DOUBLE_S = 0.4  # second click within this → assistant instead of dictation
+
+
+def resolve_latch_keycode(dpy: Any) -> int | None:
+    """X keycode for the hands-free latch key (default Fn → XF86WakeUp).
+
+    ``VAANI_LATCH_KEYCODE`` (int) wins; ``VAANI_LATCH_KEYSYM`` picks a keysym;
+    ``off`` disables. python-xlib only knows XF86 names after loading the
+    ``xf86`` group, and spells them ``XF86_WakeUp``.
+    """
+    import os as _os
+
+    raw_code = _os.environ.get("VAANI_LATCH_KEYCODE", "").strip()
+    if raw_code:
+        try:
+            return int(raw_code) or None
+        except ValueError:
+            pass
+    name = _os.environ.get("VAANI_LATCH_KEYSYM", LATCH_KEYSYM_DEFAULT).strip()
+    if not name or name.lower() in {"0", "off", "none"}:
+        return None
+    try:
+        XK.load_keysym_group("xf86")
+    except Exception:
+        pass
+    for candidate in (name, name.replace("XF86", "XF86_", 1) if "XF86_" not in name else name):
+        keysym = XK.string_to_keysym(candidate)
+        if keysym:
+            code = dpy.keysym_to_keycode(keysym)
+            if code:
+                return int(code)
+    return None
+
+
 class MiddleButtonHotkeyManager:
-    """ThinkPad middle-button hold-to-talk (owns button 2 while Vaani runs)."""
+    """ThinkPad middle-button hold-to-talk (owns button 2 while Vaani runs).
+
+    Hands-free: Fn + click → dictation, Fn + double-click → assistant; the
+    session stays open without holding until Fn + click again (or pill ✓ / Esc).
+    """
 
     TRACKPOINT_NAMES = (
         "Elan TrackPoint",
@@ -489,6 +531,9 @@ class MiddleButtonHotkeyManager:
         *,
         hold_ms: float = 150.0,
         double_ms: float = 500.0,
+        on_handsfree: Callable[[str], bool] | None = None,
+        is_recording: Callable[[], bool] | None = None,
+        clock: Callable[[], float] | None = None,
     ):
         self.on_trigger = on_trigger
         self.on_release = on_release
@@ -506,6 +551,16 @@ class MiddleButtonHotkeyManager:
         self._held_mode: str | None = None
         self._ignore_until_up = False
         self._button_source: str | None = None
+        # Hands-free latch state.
+        self.on_handsfree = on_handsfree
+        self.is_recording = is_recording
+        self._clock = clock or time.monotonic
+        self._latch_keycode: int | None = None
+        self._fn_armed_until = -1.0
+        self._latched: str | None = None
+        self._latch_clicks = 0
+        self._latch_first_at = 0.0
+        self._swallow_release = False
 
     def _xinput(self, *args: str) -> str:
         return subprocess.check_output(["xinput", *args], text=True, stderr=subprocess.DEVNULL)
@@ -539,6 +594,9 @@ class MiddleButtonHotkeyManager:
             code = dpy.keysym_to_keycode(XK.string_to_keysym("Escape"))
             if code:
                 self._escape = int(code)
+            import os as _os
+
+            self._latch_keycode = resolve_latch_keycode(dpy)
             dpy.close()
         except Exception:
             self._escape = 9
@@ -659,6 +717,9 @@ class MiddleButtonHotkeyManager:
                 pass
         self._session_active = False
         self._held_mode = None
+        self._latched = None
+        self._latch_clicks = 0
+        self._fn_armed_until = -1.0
         # Only arm ignore-until-up when button 2 is physically held. Esc while
         # Idle used to set this forever: press was ignored (gesture.down stayed
         # False) so the matching release never cleared the flag → dead hotkey
@@ -720,6 +781,83 @@ class MiddleButtonHotkeyManager:
             return False
         return self._finish_trackpoint_release()
 
+    # ---- hands-free latch -------------------------------------------------
+
+    def on_latch_key(self) -> None:
+        """Fn tapped: the next TrackPoint click(s) within LATCH_ARM_S latch."""
+        self._fn_armed_until = self._clock() + LATCH_ARM_S
+        try:
+            import logging
+
+            logging.getLogger("vaani").info("event=latch_key_armed window_s=%.1f", LATCH_ARM_S)
+        except Exception:
+            pass
+
+    def _fn_armed(self) -> bool:
+        return self._clock() <= self._fn_armed_until
+
+    def _latched_live(self) -> bool:
+        """Drop a stale latch when the session ended elsewhere (✓, Esc, cap)."""
+        if self._latched is None:
+            return False
+        if self.is_recording is not None:
+            try:
+                if not self.is_recording():
+                    self._latched = None
+                    return False
+            except Exception:
+                pass
+        return True
+
+    def _latch_press(self) -> bool | None:
+        """Handle a TrackPoint press for the latch; None = not a latch press."""
+        if self._latched_live():
+            self._swallow_release = True
+            if self._fn_armed():
+                self._fn_armed_until = -1.0
+                mode, self._latched = self._latched, None
+                if self.on_release:
+                    try:
+                        self.on_release(mode)
+                    except Exception:
+                        pass
+            # Plain click while hands-free is ignored (no accidental stop).
+            return True
+        if self._latch_clicks == 1:
+            # Second click inside the window → assistant.
+            self._swallow_release = True
+            self._latch_clicks = 0
+            self._fn_armed_until = -1.0
+            self._start_latched(ASSISTANT)
+            return True
+        if self._fn_armed() and not self._session_active:
+            self._swallow_release = True
+            self._latch_clicks = 1
+            self._latch_first_at = self._clock()
+            return True
+        return None
+
+    def latch_tick(self) -> None:
+        """Single Fn+click resolves to dictation once the double window passes."""
+        if self._latch_clicks == 1 and self._clock() - self._latch_first_at >= LATCH_DOUBLE_S:
+            self._latch_clicks = 0
+            self._fn_armed_until = -1.0
+            self._start_latched(SMART)
+
+    def _start_latched(self, mode: str) -> None:
+        fn = self.on_handsfree or self.on_trigger
+        try:
+            started = bool(fn(mode))
+        except Exception:
+            started = False
+        self._latched = mode if started else None
+        try:
+            import logging
+
+            logging.getLogger("vaani").info("event=handsfree_latch mode=%s started=%s", mode, started)
+        except Exception:
+            pass
+
     def _handle_button_event(self, event_type: int) -> bool:
         """Route button 2 to TrackPoint dictation or verified touchpad media."""
         press_type = getattr(X, "ButtonPress", 4)
@@ -738,6 +876,9 @@ class MiddleButtonHotkeyManager:
                 return True
             if trackpoint_down is not True:
                 return False
+            latch = self._latch_press()
+            if latch is not None:
+                return latch
             self._button_source = "trackpoint"
             mode = self._gesture.on_down()
             if mode:
@@ -745,6 +886,10 @@ class MiddleButtonHotkeyManager:
             return True
         if event_type != release_type:
             return False
+        if self._swallow_release:
+            self._swallow_release = False
+            self._ignore_until_up = False
+            return True
         if self._button_source == "touchpad":
             self._button_source = None
             if self.on_touchpad_middle:
@@ -802,6 +947,17 @@ class MiddleButtonHotkeyManager:
                 grabbed_mods.append(mods)
             except Exception:
                 continue
+        latch_mods: list[int] = []
+        if self._latch_keycode:
+            for mods in (0, getattr(Xconst, "AnyModifier", 1 << 15)):
+                try:
+                    root.grab_key(
+                        self._latch_keycode, mods, False,
+                        Xconst.GrabModeAsync, Xconst.GrabModeAsync,
+                    )
+                    latch_mods.append(mods)
+                except Exception:
+                    continue
         try:
             dpy.sync()
         except Exception:
@@ -811,6 +967,7 @@ class MiddleButtonHotkeyManager:
         try:
             while not self._stop.is_set():
                 try:
+                    self.latch_tick()
                     self._sync_trackpoint_release()
                     if not self._ignore_until_up:
                         mode = self._gesture.tick()
@@ -830,6 +987,13 @@ class MiddleButtonHotkeyManager:
                     while dpy.pending_events():
                         ev = dpy.next_event()
                         detail = getattr(ev, "detail", None)
+                        if (
+                            self._latch_keycode
+                            and detail == self._latch_keycode
+                            and ev.type == getattr(Xconst, "KeyPress", 2)
+                        ):
+                            self.on_latch_key()
+                            continue
                         if detail != 2:
                             continue
                         self._handle_button_event(ev.type)
@@ -840,6 +1004,11 @@ class MiddleButtonHotkeyManager:
             for mods in grabbed_mods:
                 try:
                     root.ungrab_button(2, mods)
+                except Exception:
+                    pass
+            for mods in latch_mods:
+                try:
+                    root.ungrab_key(self._latch_keycode, mods)
                 except Exception:
                     pass
             try:
@@ -877,5 +1046,9 @@ class MiddleButtonHotkeyManager:
         self._escape_seen = False
         self._ignore_until_up = False
         self._button_source = None
+        self._latched = None
+        self._latch_clicks = 0
+        self._fn_armed_until = -1.0
+        self._swallow_release = False
 
     stop = unregister

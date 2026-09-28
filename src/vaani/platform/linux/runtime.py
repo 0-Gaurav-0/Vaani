@@ -221,6 +221,15 @@ def _run_x11(settings: Settings) -> int:
             return False
         return bool(controller.trigger(mode))
 
+    def on_handsfree(mode: str) -> bool:
+        """Fn + TrackPoint click: recording stays open without holding."""
+        from ...types import AppState
+
+        if controller.state is not AppState.IDLE:
+            logger.info("event=handsfree_blocked state=%s", controller.state.value)
+            return False
+        return bool(controller.trigger(mode, handsfree=True))
+
     def on_hotkey_release(_mode: str) -> None:
         from ...types import AppState
 
@@ -254,12 +263,16 @@ def _run_x11(settings: Settings) -> int:
                 "event=media_play_pause_failed detail=%s", type(exc).__name__
             )
 
+    from ...types import AppState as _AppState
+
     # Middle button owns hold-to-talk on ThinkPads; Ctrl+Space stays with the desktop.
     hotkeys = MiddleButtonHotkeyManager(
         on_hotkey_press,
         on_release=on_hotkey_release,
         on_cancel=controller.cancel,
         on_touchpad_middle=on_touchpad_middle,
+        on_handsfree=on_handsfree,
+        is_recording=lambda: controller.state is _AppState.RECORDING,
     )
     controller.hotkeys = hotkeys
     snap_listener = None
@@ -348,6 +361,8 @@ def _run_x11(settings: Settings) -> int:
             "  Hold middle button              → smart dictation\n"
             "  Double-press + hold middle      → assistant\n"
             "  Esc                             → cancel while pill is up\n"
+            "  Fn, then click middle           → hands-free dictation (Fn+click again stops)\n"
+            "  Fn, then double-click middle    → hands-free assistant\n"
             + (
                 "  Finger snap near mic            → toggle assistant recording\n"
                 if snap_listener is not None and snap_on

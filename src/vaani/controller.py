@@ -146,12 +146,16 @@ class Controller:
         self._snap_watcher: Any = None
         # Long dictation: packets transcribed while still recording.
         self._chunker: ChunkedTranscriber | None = None
+        self.handsfree = False
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))
         self.logger.info("event=%s state=%s category=%s", name, self.state.value, category or "")
 
-    def trigger(self, mode: str = DictationMode.SMART.value) -> bool:
+    # Warn this long before the max-duration auto-stop (pill + sound).
+    WARN_BEFORE_MAX_S = 60.0
+
+    def trigger(self, mode: str = DictationMode.SMART.value, *, handsfree: bool = False) -> bool:
         with self._lock:
             if self._shutdown:
                 return False
@@ -179,6 +183,21 @@ class Controller:
             try: self._audio = self.recorder.start()
             except Exception as exc: self._fail(exc, "mic"); return False
             self.state = AppState.RECORDING; self._record_started = time.monotonic(); self._emit("recording")
+            self.handsfree = bool(handsfree)
+            if handsfree:
+                self.logger.info("event=handsfree_start mode=%s", self.mode)
+            set_session = getattr(self.feedback, "set_session", None)
+            if callable(set_session):
+                try:
+                    set_session(
+                        mode=self.mode,
+                        handsfree=self.handsfree,
+                        started=time.time(),
+                        max_s=float(self.max_duration),
+                        warn_s=max(0.0, float(self.max_duration) - self.WARN_BEFORE_MAX_S),
+                    )
+                except Exception:
+                    pass
             self._start_amplitude_monitor(self._audio.path)
             self._start_warmup(token)
             self._start_chunker()
@@ -558,9 +577,20 @@ class Controller:
         self._amplitude_thread = threading.Thread(target=monitor, daemon=True); self._amplitude_thread.start()
 
     def _duration_guard(self, token: int) -> None:
-        time.sleep(max(0.0, self.max_duration))
+        warn_at = self.max_duration - self.WARN_BEFORE_MAX_S
+        if warn_at >= self.WARN_BEFORE_MAX_S:
+            time.sleep(warn_at)
+            with self._lock:
+                if token != self._token or self.state is not AppState.RECORDING: return
+            # Pill shows the countdown from the session file; this is the audible nudge.
+            self.logger.info("event=recording_cap_warning remaining_s=%.0f", self.WARN_BEFORE_MAX_S)
+            self._feedback("warn")
+            time.sleep(self.WARN_BEFORE_MAX_S)
+        else:
+            time.sleep(max(0.0, self.max_duration))
         with self._lock:
             if token != self._token or self.state is not AppState.RECORDING: return
+        self.logger.info("event=recording_cap_reached seconds=%.0f", self.max_duration)
         self.stop()
 
     def _process(self, token: int, audio: Any) -> None:

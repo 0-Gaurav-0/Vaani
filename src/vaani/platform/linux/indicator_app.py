@@ -15,14 +15,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-WIDTH = 176
-HEIGHT = 40
+WIDTH = 204
+HEIGHT = 42
 ANSWER_MIN_WIDTH = 200
 ANSWER_MAX_WIDTH = 480
 ANSWER_TEXT_MIN_HEIGHT = 44
 MARGIN_BOTTOM = 48
-BAR_COUNT = 15
-HIT_PAD = 34
+BAR_COUNT = 22
+HIT_PAD = 36
 # Ignore clicks right after the pill maps — Mutter/GTK sometimes delivers a
 # ghost press on the left cancel pad ~1s after spawn (kills snap sessions).
 CLICK_GRACE_S = 0.75
@@ -40,6 +40,18 @@ ANSWER_TOP = 16.0
 ANSWER_TEXT_BOTTOM_PAD = 16.0
 ANSWER_RADIUS = 16.0
 ANSWER_ANIM_MS = 280
+# ---- look (Wispr-Flow-like capsule) ----
+FONT = "Ubuntu"
+MONO_FONT = "Ubuntu Mono"
+CAPSULE_FILL = (0.047, 0.047, 0.055, 0.94)
+CAPSULE_BORDER = (1.0, 1.0, 1.0, 0.11)
+DICTATION_ACCENT = (0.96, 0.96, 0.97)
+ASSISTANT_ACCENT = (0.66, 0.55, 0.98)  # violet
+WARN_ACCENT = (0.98, 0.75, 0.14)  # amber, last minute
+DANGER_ACCENT = (0.97, 0.33, 0.33)  # red, last 15s
+APPEAR_MS = 170
+TIMER_AFTER_S = 20.0
+
 # Button press feedback: quick squeeze + halo ring.
 PRESS_ANIM_MS = 220
 # Hidden (idle) pill parks here: mapped but invisible and click-through.
@@ -152,7 +164,7 @@ def _measure_answer_size(
         try:
             surface = cairo_mod.ImageSurface(cairo_mod.FORMAT_ARGB32, 8, 8)
             cr = cairo_mod.Context(surface)
-            cr.select_font_face("Sans", cairo_mod.FONT_SLANT_NORMAL, cairo_mod.FONT_WEIGHT_NORMAL)
+            cr.select_font_face(FONT, cairo_mod.FONT_SLANT_NORMAL, cairo_mod.FONT_WEIGHT_NORMAL)
         except Exception:
             cr = None
     if cr is None:
@@ -162,7 +174,7 @@ def _measure_answer_size(
             surface = cairo_mod.ImageSurface(cairo_mod.FORMAT_ARGB32, 8, 8)
             cr = cairo_mod.Context(surface)
             cr.select_font_face(
-                "Sans", cairo_mod.FONT_SLANT_NORMAL, cairo_mod.FONT_WEIGHT_NORMAL
+                FONT, cairo_mod.FONT_SLANT_NORMAL, cairo_mod.FONT_WEIGHT_NORMAL
             )
         except Exception:
             cr = None
@@ -473,13 +485,21 @@ def run_gtk(
     gi.require_version("Gdk", "4.0")
     from gi.repository import Gdk, GLib, Gtk
 
-    from ...indicator_protocol import read_answer, read_phase, resolve_answer_path, write_command
+    from ...indicator_protocol import (
+        read_answer,
+        read_phase,
+        read_session,
+        resolve_answer_path,
+        resolve_session_path,
+        write_command,
+    )
     from ...waveform import WaveformBuffer
 
     x11 = _x11()
     wave = WaveformBuffer(bars=BAR_COUNT)
     t0 = time.monotonic()
     answer_file = answer_path if answer_path is not None else resolve_answer_path()
+    session_file = resolve_session_path()
     app = Gtk.Application(application_id="com.vaani.RecordingIndicator")
 
     def activate(application: Gtk.Application) -> None:
@@ -543,6 +563,8 @@ def run_gtk(
             "hidden_phase": None,
             "press": None,  # (button, monotonic t) — "left" | "right" | ("option", i)
             "hover_btn": None,
+            "session": read_session(session_file),
+            "shown_at": time.monotonic(),
         }
 
         def size() -> tuple[int, int]:
@@ -668,6 +690,8 @@ def run_gtk(
                 return
             state["hidden"] = False
             state["hidden_phase"] = None
+            state["shown_at"] = time.monotonic()
+            state["session"] = read_session(session_file)
             state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S
             # Mutter can ignore the first configure — same retries as startup.
             for delay in (0, 40, 120):
@@ -811,73 +835,212 @@ def run_gtk(
             cr.stroke()
             return 1.0 - 0.2 * math.sin(math.pi * k)
 
+        def _accent() -> tuple[float, float, float]:
+            sess = state.get("session") or {}
+            return ASSISTANT_ACCENT if sess.get("mode") == "assistant" else DICTATION_ACCENT
+
+        def _elapsed() -> float:
+            sess = state.get("session") or {}
+            started = float(sess.get("started") or 0.0)
+            return max(0.0, time.time() - started) if started > 0 else 0.0
+
+        def _warn_level() -> int:
+            """0 normal, 1 last minute, 2 last 15s."""
+            sess = state.get("session") or {}
+            max_s = float(sess.get("max_s") or 0.0)
+            warn_s = float(sess.get("warn_s") or 0.0)
+            if max_s <= 0 or warn_s <= 0:
+                return 0
+            el = _elapsed()
+            if el >= max_s - 15.0:
+                return 2
+            if el >= warn_s:
+                return 1
+            return 0
+
+        def _rounded_rect(cr, x: float, y: float, w: float, h: float, r: float) -> None:
+            r = max(0.0, min(r, h / 2.0, w / 2.0))
+            cr.new_sub_path()
+            cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+            cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+            cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+            cr.arc(x + r, y + r, r, math.pi, 1.5 * math.pi)
+            cr.close_path()
+
+        def _draw_capsule(cr, x: float, y: float, w: float, h: float, a: float, border=None) -> None:
+            _rounded_rect(cr, x, y, w, h, h / 2.0)
+            cr.set_source_rgba(*CAPSULE_FILL[:3], CAPSULE_FILL[3] * a)
+            cr.fill_preserve()
+            # Soft top sheen.
+            grad = cairo.LinearGradient(0, y, 0, y + h)
+            grad.add_color_stop_rgba(0.0, 1, 1, 1, 0.07 * a)
+            grad.add_color_stop_rgba(0.5, 1, 1, 1, 0.0)
+            cr.set_source(grad)
+            cr.fill_preserve()
+            bc = border or CAPSULE_BORDER
+            cr.set_source_rgba(bc[0], bc[1], bc[2], (bc[3] if len(bc) > 3 else 0.6) * a)
+            cr.set_line_width(1.0)
+            cr.stroke()
+
+        def _press_progress(button: Any) -> float | None:
+            """0..1 through the press animation for ``button``, else None."""
+            press = state.get("press")
+            if not press or press[0] != button:
+                return None
+            k = (time.monotonic() - float(press[1])) / (PRESS_ANIM_MS / 1000.0)
+            if k >= 1.0:
+                return None
+            return max(0.0, k)
+
+        def _draw_button_feedback(cr, bx: float, cy: float, r: float, button: str, a: float) -> float:
+            """Hover glow + press halo. Returns the squeeze scale for the icon."""
+            k = _press_progress(button)
+            if state.get("hover_btn") == button and k is None:
+                cr.set_source_rgba(1, 1, 1, 0.08 * a)
+                cr.arc(bx, cy, r + 3.0, 0, 2 * math.pi)
+                cr.fill()
+            if k is None:
+                return 1.0
+            cr.set_source_rgba(1, 1, 1, 0.40 * (1.0 - k) * a)
+            cr.set_line_width(1.6)
+            cr.arc(bx, cy, r + 1.5 + 7.0 * k, 0, 2 * math.pi)
+            cr.stroke()
+            return 1.0 - 0.18 * math.sin(math.pi * k)
+
+        def _fmt(seconds: float) -> str:
+            seconds = max(0, int(seconds))
+            return f"{seconds // 60}:{seconds % 60:02d}"
+
         def _draw_control_strip(
             cr, width: int, height: int, *, phase: str, alpha: float = 1.0
         ) -> None:
-            """X / bars-or-dots / check row along the bottom."""
+            """Capsule: ✕ · waveform/shimmer (+ timer) · stop."""
             if alpha <= 0.01:
                 return
             a = max(0.0, min(1.0, float(alpha)))
-            cy = height - HEIGHT / 2.0
+            now = time.monotonic()
+            # Appear: spring the capsule open from the centre.
+            k = min(1.0, (now - float(state.get("shown_at") or 0.0)) / (APPEAR_MS / 1000.0))
+            grow = 1.0 - (1.0 - k) ** 3
+            a *= 0.35 + 0.65 * grow
+            full_w = width - 4.0
+            cap_w = full_w * (0.72 + 0.28 * grow)
+            cap_h = HEIGHT - 4.0
+            cap_x = (width - cap_w) / 2.0
+            cap_y = height - HEIGHT + 2.0
+            cy = cap_y + cap_h / 2.0
+            accent = _accent()
+            warn = _warn_level() if phase == "recording" else 0
+            border = None
+            if warn:
+                col = DANGER_ACCENT if warn == 2 else WARN_ACCENT
+                pulse = 0.55 + 0.45 * abs(math.sin(now * (5.0 if warn == 2 else 2.4)))
+                border = (col[0], col[1], col[2], pulse)
+            _draw_capsule(cr, cap_x, cap_y, cap_w, cap_h, a, border)
+            if grow < 0.6:
+                return
+            ca = a * min(1.0, (grow - 0.6) / 0.4)
+
+            # Left: cancel.
             btn_r = 12.0
-            cx = 18.0
-            sq = _draw_button_feedback(cr, cx, cy, btn_r, "left", a)
+            lx = cap_x + 4.0 + btn_r
+            sq = _draw_button_feedback(cr, lx, cy, btn_r, "left", ca)
             pressed = _press_progress("left") is not None
-            shade = 0.34 if pressed else 0.18
-            cr.set_source_rgba(shade, shade + 0.01, shade + 0.04, 0.88 * a)
-            cr.arc(cx, cy, btn_r * sq, 0, 2 * math.pi)
+            cr.set_source_rgba(1, 1, 1, (0.18 if pressed else 0.09) * ca)
+            cr.arc(lx, cy, btn_r * sq, 0, 2 * math.pi)
             cr.fill()
-            cr.set_source_rgba(0.95, 0.96, 0.98, 0.95 * a)
-            cr.set_line_width(1.7)
+            cr.set_source_rgba(0.92, 0.92, 0.94, 0.9 * ca)
+            cr.set_line_width(1.6)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            d = 4.0 * sq
-            cr.move_to(cx - d, cy - d)
-            cr.line_to(cx + d, cy + d)
-            cr.move_to(cx + d, cy - d)
-            cr.line_to(cx - d, cy + d)
+            d = 3.6 * sq
+            cr.move_to(lx - d, cy - d)
+            cr.line_to(lx + d, cy + d)
+            cr.move_to(lx + d, cy - d)
+            cr.line_to(lx - d, cy + d)
             cr.stroke()
 
-            if phase == "processing":
-                t = time.monotonic() - t0
-                for i in range(3):
-                    pulse = 0.35 + 0.65 * abs(math.sin(t * 2.6 + i * 0.9))
-                    cr.set_source_rgba(0.9, 0.92, 0.95, (0.35 + 0.55 * pulse) * a)
-                    dx = width / 2 - 16 + i * 16
-                    pr = 2.4 + 1.1 * pulse
-                    cr.arc(dx, cy, pr, 0, 2 * math.pi)
-                    cr.fill()
-            else:
-                samples = wave.bars_now()
-                inner_left, inner_right = 40.0, width - 40.0
-                span = max(1.0, inner_right - inner_left)
-                max_h = HEIGHT - 14.0
-                for i, level in enumerate(samples):
-                    bx = inner_left + (i + 0.5) * span / BAR_COUNT
-                    bar_h = max(2.5, float(level) * max_h)
-                    half = 1.45
-                    y0 = cy - bar_h / 2
-                    cr.set_source_rgba(0.92, 0.94, 0.97, 0.92 * a)
-                    cr.new_sub_path()
-                    cr.arc(bx, y0 + half, half, math.pi, 0)
-                    cr.arc(bx, y0 + bar_h - half, half, 0, math.pi)
-                    cr.close_path()
-                    cr.fill()
-
-            # Always show the confirm/stop control — including during processing.
-            kx = width - 18.0
-            sq = _draw_button_feedback(cr, kx, cy, btn_r, "right", a)
+            # Right: stop (recording) / cancel-able spinner (processing).
+            rx = cap_x + cap_w - 4.0 - btn_r
+            sq = _draw_button_feedback(cr, rx, cy, btn_r, "right", ca)
             pressed = _press_progress("right") is not None
-            fill = 0.78 if pressed else 0.95
-            cr.set_source_rgba(fill, fill + 0.01, fill + 0.03, 0.95 * a)
-            cr.arc(kx, cy, btn_r * sq, 0, 2 * math.pi)
-            cr.fill()
-            cr.set_source_rgba(0.14, 0.15, 0.18, 0.95 * a)
-            cr.set_line_width(1.8)
-            cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.move_to(kx - 4.2 * sq, cy)
-            cr.line_to(kx - 1.0 * sq, cy + 3.4 * sq)
-            cr.line_to(kx + 4.6 * sq, cy - 3.4 * sq)
-            cr.stroke()
+            if phase == "processing":
+                cr.set_source_rgba(1, 1, 1, 0.09 * ca)
+                cr.arc(rx, cy, btn_r * sq, 0, 2 * math.pi)
+                cr.fill()
+                start = (now * 5.0) % (2 * math.pi)
+                cr.set_source_rgba(accent[0], accent[1], accent[2], 0.95 * ca)
+                cr.set_line_width(2.0)
+                cr.arc(rx, cy, 6.0 * sq, start, start + math.pi * 1.25)
+                cr.stroke()
+            else:
+                fill = 0.78 if pressed else 1.0
+                btn_col = accent
+                if warn:
+                    btn_col = DANGER_ACCENT if warn == 2 else WARN_ACCENT
+                cr.set_source_rgba(btn_col[0] * fill, btn_col[1] * fill, btn_col[2] * fill, 0.98 * ca)
+                cr.arc(rx, cy, btn_r * sq, 0, 2 * math.pi)
+                cr.fill()
+                cr.set_source_rgba(0.06, 0.06, 0.07, 0.92 * ca)
+                side = 7.0 * sq
+                _rounded_rect(cr, rx - side / 2, cy - side / 2, side, side, 1.8)
+                cr.fill()
+
+            # Timer: hands-free always; otherwise after TIMER_AFTER_S; countdown when warning.
+            inner_left = lx + btn_r + 9.0
+            inner_right = rx - btn_r - 9.0
+            sess = state.get("session") or {}
+            elapsed = _elapsed()
+            label = None
+            label_col = (0.72, 0.72, 0.76)
+            if phase == "recording" and elapsed > 0:
+                if warn:
+                    remaining = float(sess.get("max_s") or 0.0) - elapsed
+                    label = f"{_fmt(remaining)} left"
+                    label_col = DANGER_ACCENT if warn == 2 else WARN_ACCENT
+                elif sess.get("handsfree") or elapsed >= TIMER_AFTER_S:
+                    label = _fmt(elapsed)
+            if label:
+                cr.select_font_face(MONO_FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if warn else cairo.FONT_WEIGHT_NORMAL)
+                cr.set_font_size(11.5)
+                ext = cr.text_extents(label)
+                tx = inner_right - ext.x_advance
+                cr.set_source_rgba(label_col[0], label_col[1], label_col[2], 0.95 * ca)
+                cr.move_to(tx, cy + ext.height / 2.0 - 0.5)
+                cr.show_text(label)
+                inner_right = tx - 7.0
+                if sess.get("handsfree") and not warn:
+                    # Small "locked" dot = hands-free.
+                    cr.set_source_rgba(accent[0], accent[1], accent[2], 0.9 * ca)
+                    cr.arc(inner_right + 1.5, cy, 2.2, 0, 2 * math.pi)
+                    cr.fill()
+                    inner_right -= 7.0
+
+            span = max(10.0, inner_right - inner_left)
+            n = BAR_COUNT
+            step = span / n
+            bar_w = min(2.4, step * 0.55)
+            max_h = cap_h - 16.0
+            if phase == "processing":
+                t = now * 1.6
+                levels = []
+                for i in range(n):
+                    x = i / max(1, n - 1)
+                    phase_x = (t % 1.6) / 1.6 * 1.4 - 0.2
+                    bump = math.exp(-((x - phase_x) ** 2) / 0.012)
+                    levels.append(0.14 + 0.5 * bump)
+            else:
+                levels = wave.bars_now()
+                if len(levels) != n:
+                    levels = (levels + [0.1] * n)[:n]
+            for i, level in enumerate(levels):
+                bx = inner_left + (i + 0.5) * step
+                edge = 1.0 - abs((i / max(1, n - 1)) * 2.0 - 1.0)
+                alpha_i = (0.35 + 0.65 * (edge ** 0.6)) * ca
+                # Gentle curve: speech stays lively without every bar pinned at max.
+                bar_h = max(2.6, (max(0.0, min(1.0, float(level))) ** 1.35) * max_h)
+                cr.set_source_rgba(accent[0], accent[1], accent[2], 0.95 * alpha_i)
+                _rounded_rect(cr, bx - bar_w / 2, cy - bar_h / 2, bar_w, bar_h, bar_w / 2)
+                cr.fill()
 
         def draw(_area, cr, width: int, height: int) -> None:
             cr.set_operator(cairo.OPERATOR_SOURCE)
@@ -902,20 +1065,18 @@ def run_gtk(
                     fill_a = 0.92 * (0.25 + 0.75 * progress)
                     radius = 12.0 + (ANSWER_RADIUS - 12.0) * progress
 
-                cr.set_source_rgba(0.12, 0.13, 0.16, fill_a)
-                cr.new_sub_path()
-                cr.arc(radius, radius, radius, math.pi, 1.5 * math.pi)
-                cr.arc(width - radius, radius, radius, 1.5 * math.pi, 2 * math.pi)
-                cr.arc(width - radius, height - radius, radius, 0, 0.5 * math.pi)
-                cr.arc(radius, height - radius, radius, 0.5 * math.pi, math.pi)
-                cr.close_path()
-                cr.fill()
+                _rounded_rect(cr, 1.0, 1.0, width - 2.0, height - 2.0, radius)
+                cr.set_source_rgba(*CAPSULE_FILL[:3], fill_a)
+                cr.fill_preserve()
+                cr.set_source_rgba(*CAPSULE_BORDER[:3], CAPSULE_BORDER[3] * (fill_a / 0.92))
+                cr.set_line_width(1.0)
+                cr.stroke()
 
                 if text_a > 0.02:
                     text_left = ANSWER_TEXT_LEFT
                     text_width = max(40.0, width - text_left - ANSWER_PAD_RIGHT)
                     cr.select_font_face(
-                        "Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL
+                        FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL
                     )
                     cr.set_font_size(ANSWER_Q_SIZE)
                     cr.set_source_rgba(0.72, 0.74, 0.78, 0.95 * text_a)
@@ -1182,7 +1343,11 @@ def run_gtk(
                     return True
                 _show()
             prev = state.get("last_phase")
+            if phase != prev or state["ticks"] % 15 == 0:
+                state["session"] = read_session(session_file)
             if phase != prev:
+                if prev in (None, "idle") and phase == "recording":
+                    state["shown_at"] = time.monotonic()
                 state["last_phase"] = phase
                 if phase in {"recording", "processing"}:
                     state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S
