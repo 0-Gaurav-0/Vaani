@@ -49,6 +49,7 @@ from .assistant_route import (
 from .indicator_protocol import clear_command, read_command
 from .delivery import DeliveryStatus
 from .memory import append_turn, load_context
+from .stt_chunks import ChunkedTranscriber, chunked_stt_enabled
 
 # Temporary diagnostic: set VAANI_RAW_STT=1 to paste Whisper output with zero
 # transcript post-processing (no guard, romanize/pick, cleanup, or answer-prefix).
@@ -125,6 +126,8 @@ class Controller:
         # (so TrackPoint press can complete it — gesture manager has no session).
         self._snap_armed_session = False
         self._snap_watcher: Any = None
+        # Long dictation: packets transcribed while still recording.
+        self._chunker: ChunkedTranscriber | None = None
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))
@@ -159,11 +162,42 @@ class Controller:
             except Exception as exc: self._fail(exc, "mic"); return False
             self.state = AppState.RECORDING; self._record_started = time.monotonic(); self._emit("recording")
             self._start_amplitude_monitor(self._audio.path)
+            self._start_chunker()
             self._feedback("start")
             threading.Thread(target=self._duration_guard, args=(token,), daemon=True).start()
             return True
 
     start = trigger
+
+    def _start_chunker(self) -> None:
+        self._abort_chunker()
+        if self.mode == "assistant" or RAW_STT_NO_POSTPROCESS or not chunked_stt_enabled():
+            return
+        transcribe_h = getattr(self.groq, "transcribe_hinglish", None)
+        path = getattr(self._audio, "path", None)
+        if not callable(transcribe_h) or path is None or not Path(path).is_file():
+            return
+        cancel = self._cancel
+
+        def transcribe(chunk: Path) -> str:
+            key = self.key_provider()
+            if not key:
+                raise RuntimeError("API key required")
+            return transcribe_h(chunk, key, cancel=cancel, delete_audio=False).text
+
+        try:
+            self._chunker = ChunkedTranscriber(path, transcribe, logger=self.logger).start()
+        except Exception as exc:
+            self.logger.warning("event=stt_chunker_start_failed detail=%s", type(exc).__name__)
+            self._chunker = None
+
+    def _abort_chunker(self) -> None:
+        chunker, self._chunker = self._chunker, None
+        if chunker is not None:
+            try:
+                chunker.abort()
+            except Exception:
+                pass
 
     def trigger_assistant(self) -> bool:
         """Start an assistant request using the same recorder lifecycle."""
@@ -348,6 +382,7 @@ class Controller:
         )
         self._cancel.set()
         self._amplitude_stop.set()
+        self._abort_chunker()
         self._clear_clarify()
         self._snap_armed_session = False
         self._stop_snap_watcher()
@@ -484,7 +519,10 @@ class Controller:
                 float(getattr(audio, "duration_seconds", 0) or 0),
                 size,
             )
+            chunker, self._chunker = self._chunker, None
             if is_silent_wav(Path(audio.path)):
+                if chunker is not None:
+                    chunker.abort()
                 self.logger.info("event=transcription_rejected reason=silence")
                 try:
                     Path(audio.path).unlink(missing_ok=True)
@@ -538,7 +576,22 @@ class Controller:
                 return
             # Gemini (or Groq hinglish) transcription.
             transcribe_h = getattr(self.groq, "transcribe_hinglish", None)
-            if callable(transcribe_h):
+            chunked_text = None
+            if chunker is not None:
+                if RAW_STT_NO_POSTPROCESS:
+                    chunker.abort()
+                else:
+                    chunked_text = chunker.finish(audio.path)
+            if chunked_text:
+                # Packets were transcribed during recording; only the tail waited.
+                from .groq import TranscriptResult
+
+                result = TranscriptResult(chunked_text, "en")
+                try:
+                    Path(audio.path).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            elif callable(transcribe_h):
                 result = transcribe_h(
                     audio.path, key, cancel=self._cancel, delete_audio=True
                 )
