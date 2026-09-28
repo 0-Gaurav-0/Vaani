@@ -15,8 +15,10 @@ from ...indicator_protocol import (
     clear_phase,
     resolve_answer_path,
     resolve_phase_path,
+    resolve_session_path,
     write_answer,
     write_phase,
+    write_session,
 )
 
 SOUNDS = {
@@ -28,6 +30,8 @@ SOUNDS = {
     "failure": "/usr/share/sounds/freedesktop/stereo/dialog-error.oga",
     "processing": "/usr/share/sounds/freedesktop/stereo/button-pressed.oga",
     "paste": None,
+    # 1 minute before the recording cap.
+    "warn": "/usr/share/sounds/freedesktop/stereo/dialog-information.oga",
 }
 
 CATEGORIES = {"key", "mic", "Groq", "quota", "cleanup", "target", "paste", "shortcut"}
@@ -117,6 +121,7 @@ class LinuxFeedback:
         )
         self.phase_path = str(resolve_phase_path(cache_dir=cache_dir))
         self.answer_path = str(resolve_answer_path(cache_dir=cache_dir))
+        self.session_path = str(resolve_session_path(cache_dir=cache_dir))
         self.log_dir = Path(
             log_dir
             or os.environ.get("VAANI_LOG_DIR", Path.home() / ".local" / "state" / "vaani" / "logs")
@@ -161,6 +166,7 @@ class LinuxFeedback:
             env["VAANI_INDICATOR_CONTROL"] = self.control_path
         env["VAANI_INDICATOR_PHASE"] = self.phase_path
         env["VAANI_INDICATOR_ANSWER"] = self.answer_path
+        env["VAANI_INDICATOR_SESSION"] = self.session_path
         env["VAANI_DAEMON_PID"] = str(os.getpid())
         try:
             write_phase(self.phase_path, initial_phase)
@@ -235,6 +241,22 @@ class LinuxFeedback:
                 proc.terminate()
             except Exception:
                 pass
+
+    def set_session(
+        self, *, mode: str, handsfree: bool, started: float, max_s: float, warn_s: float
+    ) -> None:
+        """Tell the pill the mode, hands-free state and timer origin."""
+        try:
+            write_session(
+                self.session_path,
+                mode=mode,
+                handsfree=handsfree,
+                started=started,
+                max_s=max_s,
+                warn_s=warn_s,
+            )
+        except Exception:
+            pass
 
     def show_answer(self, question: str, answer: str) -> None:
         """Expand the live pill with Q&A. Does not stop the indicator or toast."""

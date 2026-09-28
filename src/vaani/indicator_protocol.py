@@ -211,3 +211,67 @@ def clear_answer(path: Path | str) -> None:
             target.write_text("{}", encoding="utf-8")
         except OSError:
             pass
+
+
+# ---- recording session (mode / hands-free / timer for the pill) -----------
+
+
+def resolve_session_path(
+    *,
+    explicit: str | os.PathLike[str] | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+) -> Path:
+    if explicit is not None:
+        return Path(explicit)
+    env = os.environ.get("VAANI_INDICATOR_SESSION")
+    if env:
+        return Path(env)
+    control = resolve_control_path(cache_dir=cache_dir)
+    return control.parent / "indicator_session.json"
+
+
+def write_session(
+    path: Path | str,
+    *,
+    mode: str,
+    handsfree: bool,
+    started: float,
+    max_s: float,
+    warn_s: float,
+) -> None:
+    """``started`` is wall-clock epoch seconds (shared by daemon + pill)."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "mode": str(mode),
+        "handsfree": bool(handsfree),
+        "started": float(started),
+        "max_s": float(max_s),
+        "warn_s": float(warn_s),
+    }
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, target)
+    try:
+        target.chmod(0o600)
+    except OSError:
+        pass
+
+
+def read_session(path: Path | str) -> dict:
+    empty = {"mode": "smart", "handsfree": False, "started": 0.0, "max_s": 0.0, "warn_s": 0.0}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    out = dict(empty)
+    out["mode"] = str(data.get("mode") or "smart")
+    out["handsfree"] = bool(data.get("handsfree"))
+    for key in ("started", "max_s", "warn_s"):
+        try:
+            out[key] = float(data.get(key) or 0.0)
+        except (TypeError, ValueError):
+            out[key] = 0.0
+    return out

@@ -17,6 +17,9 @@ Living handoff for the next session. Covers **what is running**, **what we built
 | Release lag | processing cue ran `paplay` synchronously before mic stop (~1.1s every clip). Mic now stops first; cues play off-thread. |
 | Pill startup | Pill was a fresh python→reexec→GTK4 process per press (~1s). Now prewarmed at daemon start, parked offscreen/click-through in phase `idle`, shown in ≤1 tick. Exits when daemon pid dies. |
 | Pill buttons | Hover glow, press squeeze + halo, clarify-row flash. Pill no longer closes on click — daemon phase drives it (1.5s local fallback hide). |
+| Hands-free (Fn latch) | Fn tap (X keycode 151 `XF86WakeUp`, grabbed by the middle-button loop) arms 1.5s. Then 1 click → dictation, 2 clicks (≤0.4s) → assistant; stays recording without holding. Fn+click stops; plain click ignored; pill ✓/Esc/10-min cap also end it. `VAANI_LATCH_KEYCODE=<n>` / `VAANI_LATCH_KEYSYM=off` to override/disable. |
+| Pill v2 | Wispr-Flow-style capsule: dark, hairline border, sheen, spring-in. White = dictation, violet = assistant. Timer for hands-free or after 20s; `indicator_session.json` carries mode/handsfree/start. |
+| 9-min warning | Controller plays `warn` cue at cap−60s; pill border + stop button amber with `m:ss left` countdown, red in last 15s; auto-stop + transcribe at 10:00. |
 | Chunked STT (`stt_chunks.py`) | Dictation >20s: cut at pauses, packets transcribed while recording; only tail waits after release. <20s unchanged. Failure → full-file path. `VAANI_CHUNKED_STT=0` off. |
 
 ---
