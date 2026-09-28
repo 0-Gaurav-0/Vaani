@@ -475,6 +475,8 @@ class XTestMediaKeySender:
 LATCH_KEYSYM_DEFAULT = "XF86WakeUp"
 LATCH_ARM_S = 1.5  # Fn tap → click must follow within this window
 LATCH_DOUBLE_S = 0.4  # second click within this → assistant instead of dictation
+GENERIC_EVENT_CODE = 35  # X11 GenericEvent (carries XInput2 events)
+XI_RAW_KEY_PRESS = 13
 
 
 def resolve_latch_keycode(dpy: Any) -> int | None:
@@ -947,17 +949,10 @@ class MiddleButtonHotkeyManager:
                 grabbed_mods.append(mods)
             except Exception:
                 continue
-        latch_mods: list[int] = []
-        if self._latch_keycode:
-            for mods in (0, getattr(Xconst, "AnyModifier", 1 << 15)):
-                try:
-                    root.grab_key(
-                        self._latch_keycode, mods, False,
-                        Xconst.GrabModeAsync, Xconst.GrabModeAsync,
-                    )
-                    latch_mods.append(mods)
-                except Exception:
-                    continue
+        # Watch the latch key with XInput2 *raw* events: a copy of every key
+        # press, no grab. (An XGrabKey on Fn turned into an active keyboard
+        # grab while Fn was held, swallowing Fn+F1/F2/F3 mute/volume.)
+        raw_opcode = self._select_raw_keys(dpy, root) if self._latch_keycode else None
         try:
             dpy.sync()
         except Exception:
@@ -987,12 +982,14 @@ class MiddleButtonHotkeyManager:
                     while dpy.pending_events():
                         ev = dpy.next_event()
                         detail = getattr(ev, "detail", None)
-                        if (
-                            self._latch_keycode
-                            and detail == self._latch_keycode
-                            and ev.type == getattr(Xconst, "KeyPress", 2)
-                        ):
-                            self.on_latch_key()
+                        if raw_opcode is not None and ev.type == GENERIC_EVENT_CODE:
+                            if (
+                                getattr(ev, "extension", None) == raw_opcode
+                                and getattr(ev, "evtype", None) == XI_RAW_KEY_PRESS
+                                and getattr(getattr(ev, "data", None), "detail", None)
+                                == self._latch_keycode
+                            ):
+                                self.on_latch_key()
                             continue
                         if detail != 2:
                             continue
@@ -1006,11 +1003,6 @@ class MiddleButtonHotkeyManager:
                     root.ungrab_button(2, mods)
                 except Exception:
                     pass
-            for mods in latch_mods:
-                try:
-                    root.ungrab_key(self._latch_keycode, mods)
-                except Exception:
-                    pass
             try:
                 dpy.sync()
             except Exception:
@@ -1019,6 +1011,31 @@ class MiddleButtonHotkeyManager:
                 dpy.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def _select_raw_keys(dpy: Any, root: Any) -> int | None:
+        """Subscribe to XI2 RawKeyPress on root; returns the XInput opcode."""
+        try:
+            from Xlib.ext import xinput
+            from Xlib.protocol import rq
+
+            ext = dpy.query_extension("XInputExtension")
+            if not ext or not ext.present:
+                return None
+            raw = rq.Struct(
+                rq.Card16("deviceid"),
+                rq.Card32("time"),
+                rq.Card32("detail"),
+                rq.Card16("sourceid"),
+                rq.Card16("valuators_len"),
+                rq.Card32("flags"),
+                rq.Pad(4),
+            )
+            dpy.ge_add_event_data(ext.major_opcode, XI_RAW_KEY_PRESS, raw)
+            root.xinput_select_events([(xinput.AllMasterDevices, xinput.RawKeyPressMask)])
+            return int(ext.major_opcode)
+        except Exception:
+            return None
 
     def register(self) -> None:
         self._resolve_devices()
