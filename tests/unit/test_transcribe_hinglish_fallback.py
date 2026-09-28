@@ -1,4 +1,4 @@
-"""Unit tests for Gemini cooldown + dual Whisper en/hi hinglish fallback."""
+"""Unit tests for Gemini cooldown + English-first hinglish fallback."""
 from __future__ import annotations
 
 from threading import Event
@@ -61,7 +61,8 @@ def test_quota_strikes_trip_cooldown_then_skip(tmp_path, caplog, gemini_stt_on):
             out = client.transcribe_hinglish(wav, "groq-key")
         assert gem.call_count == GEMINI_QUOTA_STRIKES
         assert any("event=gemini_cooldown_skip" in r.message for r in caplog.records)
-        assert sorted(langs) == ["en", "hi"]
+        # Clear English → no Hindi second call.
+        assert langs == ["en"]
         assert "information" in out.text.casefold()
 
 
@@ -114,7 +115,7 @@ def test_non_quota_gemini_fail_does_not_trip_cooldown(tmp_path, gemini_stt_on):
     assert client._gemini_quota_strikes == 0
     assert not client._gemini_in_cooldown()
     assert langs.count("en") == 5
-    assert langs.count("hi") == 5
+    assert langs.count("hi") == 0  # clear English → en only
 
 
 def test_default_skips_gemini_even_with_key(tmp_path, monkeypatch):
@@ -134,11 +135,11 @@ def test_default_skips_gemini_even_with_key(tmp_path, monkeypatch):
     with patch("vaani.gemini_stt.transcribe_with_gemini") as gem:
         out = client.transcribe_hinglish(wav, "groq-key")
     gem.assert_not_called()
-    assert sorted(seen) == ["en", "hi"]
+    assert seen == ["en"]
     assert "hello" in out.text.casefold()
 
 
-def test_fallback_invokes_en_and_hi(tmp_path):
+def test_fallback_invokes_hi_when_en_is_weak(tmp_path):
     wav = tmp_path / "a.wav"
     wav.write_bytes(b"RIFF")
     client = _client()
@@ -149,13 +150,14 @@ def test_fallback_invokes_en_and_hi(tmp_path):
         assert language in ("en", "hi")
         assert language is not None  # never auto
         if language == "en":
-            return TranscriptResult("Please open Chrome for me I am in a hurry right now", "en")
+            # Short / unclear English so Hindi is required.
+            return TranscriptResult("bhai", "en")
         return TranscriptResult("bhai chrome kholo jaldi", "hi")
 
     client.transcribe = fake_transcribe  # type: ignore[method-assign]
 
     out = client.transcribe_hinglish(wav, "groq-key")
-    assert sorted(seen) == ["en", "hi"]
+    assert seen == ["en", "hi"]
     assert "kholo" in out.text.casefold()
 
 
@@ -204,16 +206,17 @@ def test_delete_audio_in_finally(tmp_path):
     assert not wav.exists()
 
 
-def test_en_fast_does_not_wait_for_slow_hi(tmp_path, monkeypatch, caplog):
-    """Clear English must not block on a multi-second Whisper-hi call."""
+def test_en_only_skips_hi_for_clear_english(tmp_path, caplog):
+    """Clear English must use a single Whisper call (no Hindi)."""
     import time
 
-    monkeypatch.setattr("vaani.groq.HI_WAIT_FOR_ENGLISH_S", 0.15)
     wav = tmp_path / "a.wav"
     wav.write_bytes(b"RIFF")
     client = _client()
+    seen: list[str | None] = []
 
     def fake_transcribe(audio, key, *, cancel=None, delete_audio=False, language=None, prompt=None):
+        seen.append(language)
         if language == "en":
             return TranscriptResult(
                 "Okay, so the transcription is working but it is way too slow. "
@@ -229,5 +232,6 @@ def test_en_fast_does_not_wait_for_slow_hi(tmp_path, monkeypatch, caplog):
         out = client.transcribe_hinglish(wav, "groq-key")
     elapsed = time.monotonic() - t0
     assert elapsed < 1.0
+    assert seen == ["en"]
     assert "transcription is working" in out.text.casefold()
-    assert any("reason=en_fast" in r.message for r in caplog.records)
+    assert any("reason=en_only" in r.message for r in caplog.records)

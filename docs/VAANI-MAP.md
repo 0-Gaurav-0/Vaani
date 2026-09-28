@@ -133,10 +133,11 @@ All under `~/.local/share/vaani/` unless noted.
 |----------|---------|
 | `VAANI_ASSISTANT_CWD` | Hermes working dir (default `~/vaani-agent/vani-task`). |
 | `VAANI_AGENT_BIN` | Override agent CLI (default `hermes`). |
-| `VAANI_WAKE_ASSISTANT` | `0` disables always-on “hey Vaani” listening. |
-| `VAANI_SNAP_ASSISTANT` | `0` disables double clap/snap assistant. |
-| `VAANI_SNAP_DOUBLE_WINDOW_S` | Max gap between the two claps (default `0.75`). |
+| `VAANI_WAKE_ASSISTANT` | `1` enables always-on “hey Vaani” listening (default **off**). |
+| `VAANI_SNAP_ASSISTANT` | `1` enables double clap/snap assistant (default **off**). |
+| `VAANI_SNAP_DOUBLE_WINDOW_S` | Max gap between the two claps (default `1.2`). |
 | `VAANI_WAKE_END_SILENCE_S` | Silence before wake STT (default `0.30`). |
+| `VAANI_WAKE_GAIN` | Digital mic boost for far-field wake (default `4.0`). |
 | `VAANI_HANDOFF_TIMEOUT` | Max seconds for a Hermes handoff job. |
 
 ---

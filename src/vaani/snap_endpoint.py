@@ -60,6 +60,8 @@ class SnapSessionWatcher:
         self._speech_floor = _env_float("VAANI_SNAP_SPEECH_FLOOR", 0.018)
         self._abs_threshold = _env_float("VAANI_SNAP_THRESHOLD", 0.07)
         self._ratio = _env_float("VAANI_SNAP_RATIO", 9.0)
+        # After intentional double-clap, give time to start speaking before Esc.
+        self._no_speech_cancel_s = _env_float("VAANI_SNAP_NO_SPEECH_S", 3.5)
         self._baseline = 0.002
         self._heard_speech = False
         self._speech_run = 0
@@ -197,9 +199,10 @@ class SnapSessionWatcher:
                 if not silence_on:
                     continue
                 # No speech ever + quiet for a bit → cancel false start.
+                # Double-clap is intentional; wait longer than a single tap false start.
                 if (
                     not self._heard_speech
-                    and elapsed >= 1.15
+                    and elapsed >= self._no_speech_cancel_s
                     and self._silent_frames * self._frame_s >= 0.55
                 ):
                     # Only if we've been mostly quiet (not mid-tap train).

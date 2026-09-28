@@ -277,10 +277,21 @@ def _run_x11(settings: Settings) -> int:
                     key = effective_key(store).value
                     if not key:
                         return ""
+                    # English only + background flag: Hindi fallback doubled
+                    # Groq spend and competed with dictation for free-tier quota.
                     result = groq.transcribe(
-                        path, key, delete_audio=False, language="en", prompt=None
+                        path,
+                        key,
+                        delete_audio=False,
+                        language="en",
+                        prompt=None,
+                        background=True,
                     )
-                    return getattr(result, "text", "") or ""
+                    from ...wake_phrase import normalize_wake_transcript
+
+                    return normalize_wake_transcript(
+                        getattr(result, "text", "") or ""
+                    )
 
                 snap_listener = WakeListener(
                     on_snap=controller.snap_assistant_toggle if snap_on else None,

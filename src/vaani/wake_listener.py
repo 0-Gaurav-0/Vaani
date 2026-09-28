@@ -22,13 +22,19 @@ from .snap_listener import (
     detect_snap_frames,
     frame_impulse_features,
 )
-from .wake_phrase import extract_wake_assistant
+from .wake_phrase import (
+    extract_wake_assistant,
+    is_wake_hallucination,
+    normalize_wake_transcript,
+)
 
 logger = logging.getLogger("vaani.wake")
 
 
 def wake_assistant_enabled() -> bool:
-    raw = os.environ.get("VAANI_WAKE_ASSISTANT", "1").strip().lower()
+    # Off by default: continuous wake STT burns Groq free-tier quota and makes
+    # dictation fail ("stuck"). Re-enable with VAANI_WAKE_ASSISTANT=1.
+    raw = os.environ.get("VAANI_WAKE_ASSISTANT", "0").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -49,6 +55,63 @@ def _write_wav(path: Path, pcm: bytes) -> None:
         wf.setsampwidth(2)
         wf.setframerate(_SAMPLE_RATE)
         wf.writeframes(pcm[: n * 2])
+
+
+def _boost_pcm(pcm: bytes, gain: float) -> bytes:
+    """Digital gain so far-field speech reaches STT / energy gates."""
+    if gain <= 1.01 or len(pcm) < 4:
+        return pcm
+    n = len(pcm) // 2
+    samples = struct.unpack(f"<{n}h", pcm[: n * 2])
+    out: list[int] = []
+    for sample in samples:
+        v = int(sample * gain)
+        if v > 32767:
+            v = 32767
+        elif v < -32768:
+            v = -32768
+        out.append(v)
+    return struct.pack(f"<{n}h", *out)
+
+
+def _pcm_metrics(samples: list[int]) -> tuple[float, float]:
+    """Return ``(peak_frame_rms, core_rms)`` over 10ms frames.
+
+    End/pre-roll silence dilutes a full-clip average; wake decisions use the
+    loudest frames so real speech is not mistaken for near-silence.
+    """
+    frame = _FRAME_SAMPLES
+    if len(samples) < frame:
+        return 0.0, 0.0
+    energies: list[float] = []
+    for i in range(0, len(samples) - frame + 1, frame):
+        chunk = samples[i : i + frame]
+        energies.append((sum(s * s for s in chunk) / frame) ** 0.5 / 32768.0)
+    peak = max(energies)
+    top_n = max(1, len(energies) // 3)
+    core = sum(sorted(energies, reverse=True)[:top_n]) / top_n
+    return peak, core
+
+
+def _trim_pcm_speech(pcm: bytes, *, floor: float = 0.015) -> bytes:
+    """Drop leading/trailing quiet frames so STT sees the spoken core."""
+    n = len(pcm) // 2
+    if n < _FRAME_SAMPLES:
+        return pcm
+    samples = list(struct.unpack(f"<{n}h", pcm[: n * 2]))
+    frame = _FRAME_SAMPLES
+    energies: list[float] = []
+    for i in range(0, len(samples) - frame + 1, frame):
+        chunk = samples[i : i + frame]
+        energies.append((sum(s * s for s in chunk) / frame) ** 0.5 / 32768.0)
+    loud = [i for i, e in enumerate(energies) if e >= floor]
+    if not loud:
+        return pcm
+    pad = 8  # 80ms
+    start = max(0, loud[0] - pad) * frame
+    end = min(len(samples), (loud[-1] + 1 + pad) * frame)
+    core = samples[start:end]
+    return struct.pack(f"<{len(core)}h", *core)
 
 
 class WakeListener:
@@ -79,18 +142,24 @@ class WakeListener:
         self._abs_threshold = _env_float("VAANI_SNAP_THRESHOLD", 0.07)
         self._ratio = _env_float("VAANI_SNAP_RATIO", 9.0)
         self._gate = DoubleClapGate(
-            window_s=_env_float("VAANI_SNAP_DOUBLE_WINDOW_S", 0.75),
-            settle_s=_env_float("VAANI_SNAP_SETTLE_S", 0.18),
-            min_gap_s=_env_float("VAANI_SNAP_MIN_GAP_S", 0.12),
+            window_s=_env_float("VAANI_SNAP_DOUBLE_WINDOW_S", 1.2),
+            settle_s=_env_float("VAANI_SNAP_SETTLE_S", 0.12),
+            min_gap_s=_env_float("VAANI_SNAP_MIN_GAP_S", 0.08),
             cooldown_s=_env_float("VAANI_SNAP_COOLDOWN", 2.8),
         )
-        self._speech_floor = _env_float("VAANI_WAKE_SPEECH_FLOOR", 0.02)
-        self._end_silence_s = _env_float("VAANI_WAKE_END_SILENCE_S", 0.30)
-        self._min_utt_s = _env_float("VAANI_WAKE_MIN_S", 0.30)
-        self._max_utt_s = _env_float("VAANI_WAKE_MAX_S", 6.0)
-        self._wake_cooldown_s = _env_float("VAANI_WAKE_COOLDOWN", 2.0)
+        self._speech_floor = _env_float("VAANI_WAKE_SPEECH_FLOOR", 0.020)
+        self._end_silence_s = _env_float("VAANI_WAKE_END_SILENCE_S", 0.40)
+        self._min_utt_s = _env_float("VAANI_WAKE_MIN_S", 0.40)
+        self._max_utt_s = _env_float("VAANI_WAKE_MAX_S", 3.5)
+        # Post-gain thresholds: 4× boost means levels 4× higher after boost.
+        self._min_peak = _env_float("VAANI_WAKE_MIN_PEAK", 0.055)
+        self._min_core_rms = _env_float("VAANI_WAKE_MIN_CORE_RMS", 0.030)
+        self._gain = _env_float("VAANI_WAKE_GAIN", 4.0)
+        self._wake_cooldown_s = _env_float("VAANI_WAKE_COOLDOWN", 3.0)
         self._last_snap = 0.0
         self._last_wake = 0.0
+        self._last_error = 0.0
+        self._error_backoff_s = 0.0
         self._baseline = 0.002
         self._transcribe_lock = threading.Lock()
 
@@ -167,10 +236,26 @@ class WakeListener:
         now = time.monotonic()
         if now - self._last_wake < self._wake_cooldown_s:
             return
+        if self._error_backoff_s > 0 and now - self._last_error < self._error_backoff_s:
+            return
         if now - self._last_snap < 1.0:
             return  # don't STT the snap itself
         dur = len(pcm) / (2 * _SAMPLE_RATE)
         if dur < self._min_utt_s or dur > self._max_utt_s:
+            return
+        n = len(pcm) // 2
+        if n < 8:
+            return
+        boosted = _boost_pcm(pcm, self._gain)
+        n_b = len(boosted) // 2
+        samples = list(struct.unpack(f"<{n_b}h", boosted[: n_b * 2]))
+        peak, core = _pcm_metrics(samples)
+        if peak < self._min_peak or core < self._min_core_rms:
+            logger.debug(
+                "event=wake_skip reason=low_energy peak=%.3f core=%.3f",
+                peak,
+                core,
+            )
             return
         if not self._transcribe_lock.acquire(blocking=False):
             return
@@ -179,11 +264,20 @@ class WakeListener:
             os.close(fd)
             path = Path(name)
             try:
-                _write_wav(path, pcm)
+                trim_floor = max(0.008, self._speech_floor * 0.5)
+                trimmed = _trim_pcm_speech(boosted, floor=trim_floor)
+                _write_wav(path, trimmed)
                 text = (self.transcribe(path) or "").strip()
             finally:
                 path.unlink(missing_ok=True)
             if not text:
+                return
+            text = normalize_wake_transcript(text)
+            if is_wake_hallucination(text):
+                logger.info(
+                    "event=wake_hallucination preview=%r",
+                    (text[:80] + "…") if len(text) > 80 else text,
+                )
                 return
             payload = extract_wake_assistant(text)
             if payload is None:
@@ -201,7 +295,14 @@ class WakeListener:
             )
             self.on_wake(payload)
         except Exception:
-            logger.exception("wake transcribe failed")
+            self._last_error = time.monotonic()
+            self._error_backoff_s = min(60.0, max(5.0, self._error_backoff_s * 2 or 5.0))
+            logger.warning(
+                "event=wake_transcribe_error backoff=%.0fs",
+                self._error_backoff_s,
+            )
+        else:
+            self._error_backoff_s = 0.0
         finally:
             self._transcribe_lock.release()
 
@@ -216,8 +317,6 @@ class WakeListener:
         in_speech = False
         silent_frames = 0
         end_silence_frames = max(1, int(self._end_silence_s / 0.01))
-        # Short wake phrases can close a bit sooner than long commands.
-        short_end_silence_frames = max(1, int(0.22 / 0.01))
 
         while not self._stop.is_set():
             if not self.should_listen():
@@ -332,13 +431,7 @@ class WakeListener:
                     if in_speech:
                         speech_pcm.extend(frame)
                         silent_frames += 1
-                        utt_s = len(speech_pcm) / (2 * _SAMPLE_RATE)
-                        need_silence = (
-                            short_end_silence_frames
-                            if utt_s <= 1.6
-                            else end_silence_frames
-                        )
-                        if silent_frames >= need_silence:
+                        if silent_frames >= end_silence_frames:
                             pcm = bytes(speech_pcm)
                             in_speech = False
                             speech_pcm.clear()

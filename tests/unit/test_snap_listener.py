@@ -91,9 +91,9 @@ def test_frame_impulse_features_impulse_like():
 
 def test_snap_enabled_default(monkeypatch):
     monkeypatch.delenv("VAANI_SNAP_ASSISTANT", raising=False)
-    assert snap_assistant_enabled()
-    monkeypatch.setenv("VAANI_SNAP_ASSISTANT", "0")
     assert not snap_assistant_enabled()
+    monkeypatch.setenv("VAANI_SNAP_ASSISTANT", "1")
+    assert snap_assistant_enabled()
 
 
 def test_double_clap_gate_ignores_single_and_fires_on_pair():

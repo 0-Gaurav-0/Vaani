@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
-import re, select, subprocess, threading
+import re, select, subprocess, threading, time
 
 try:
     from Xlib import X, XK, error
@@ -556,6 +556,27 @@ class MiddleButtonHotkeyManager:
             return None
         return match.group(1) == "down"
 
+    def _trackpoint_middle_state_for_press(self) -> bool | None:
+        """Classify a button-2 press; prefer TrackPoint when xinput lags the X event.
+
+        A TrackPoint click can deliver X ButtonPress a few ms before
+        ``xinput query-state`` shows button[2]=down. Treating that race as a
+        touchpad middle-click fires play/pause instead of dictation.
+        """
+        state = self._trackpoint_middle_state()
+        if state is True:
+            return True
+        if state is None:
+            return None
+        for _ in range(3):
+            time.sleep(0.008)
+            again = self._trackpoint_middle_state()
+            if again is True:
+                return True
+            if again is None:
+                continue
+        return False
+
     def _media_topology_is_verified(self) -> bool:
         try:
             listing = self._xinput("list")
@@ -711,7 +732,7 @@ class MiddleButtonHotkeyManager:
                 self._sync_trackpoint_release()
             if self._button_source is not None:
                 return False
-            trackpoint_down = self._trackpoint_middle_state()
+            trackpoint_down = self._trackpoint_middle_state_for_press()
             if trackpoint_down is False and self._media_topology_is_verified():
                 self._button_source = "touchpad"
                 return True
