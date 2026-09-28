@@ -231,6 +231,7 @@ def test_middle_button_short_click_expires_without_second_press():
 
 
 def test_middle_button_manager_routes_verified_touchpad_button_2_to_media(monkeypatch):
+    import vaani.hotkeys as hotkeys_mod
     from vaani.hotkeys import MiddleButtonHotkeyManager
 
     presses = []
@@ -244,6 +245,7 @@ def test_middle_button_manager_routes_verified_touchpad_button_2_to_media(monkey
     )
     monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
     monkeypatch.setattr(manager, "_media_topology_is_verified", lambda: True)
+    monkeypatch.setattr(hotkeys_mod.time, "sleep", lambda _s: None)
 
     assert manager._handle_button_event(X.ButtonPress) is True
     assert manager._handle_button_event(X.ButtonRelease) is True
@@ -254,6 +256,7 @@ def test_middle_button_manager_routes_verified_touchpad_button_2_to_media(monkey
 
 
 def test_middle_button_media_requires_exact_physical_pointer_topology(monkeypatch):
+    import vaani.hotkeys as hotkeys_mod
     from vaani.hotkeys import MiddleButtonHotkeyManager
 
     media = []
@@ -262,6 +265,7 @@ def test_middle_button_media_requires_exact_physical_pointer_topology(monkeypatc
         on_touchpad_middle=lambda: media.append("play"),
     )
     monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
+    monkeypatch.setattr(hotkeys_mod.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
         manager,
         "_xinput",
@@ -278,17 +282,20 @@ def test_middle_button_media_requires_exact_physical_pointer_topology(monkeypatc
 
 
 def test_unknown_physical_pointer_disables_media_but_not_trackpoint(monkeypatch):
+    import vaani.hotkeys as hotkeys_mod
     from vaani.hotkeys import MiddleButtonHotkeyManager, SMART
 
     presses = []
     media = []
-    states = iter((False, True))
+    # First press: stay False across settle polls; second press: True.
+    states = iter((False, False, False, False, True))
     manager = MiddleButtonHotkeyManager(
         lambda mode: presses.append(mode) or True,
         on_touchpad_middle=lambda: media.append("play"),
         hold_ms=0,
     )
     monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: next(states))
+    monkeypatch.setattr(hotkeys_mod.time, "sleep", lambda _s: None)
     monkeypatch.setattr(
         manager,
         "_xinput",
@@ -305,7 +312,32 @@ def test_unknown_physical_pointer_disables_media_but_not_trackpoint(monkeypatch)
     assert media == []
 
 
+def test_trackpoint_press_not_media_when_xinput_lags(monkeypatch):
+    """X ButtonPress can arrive before query-state shows TrackPoint down."""
+    import vaani.hotkeys as hotkeys_mod
+    from vaani.hotkeys import MiddleButtonHotkeyManager, SMART
+
+    presses = []
+    media = []
+    states = iter((False, False, True))  # race, then settle to down
+    manager = MiddleButtonHotkeyManager(
+        lambda mode: presses.append(mode) or True,
+        on_touchpad_middle=lambda: media.append("play"),
+        hold_ms=0,
+    )
+    monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: next(states))
+    monkeypatch.setattr(manager, "_media_topology_is_verified", lambda: True)
+    monkeypatch.setattr(hotkeys_mod.time, "sleep", lambda _s: None)
+
+    assert manager._handle_button_event(X.ButtonPress) is True
+    assert manager._button_source == "trackpoint"
+    assert manager._gesture.tick() == SMART
+    assert media == []
+    assert presses == []
+
+
 def test_duplicate_touchpad_events_toggle_media_only_once(monkeypatch):
+    import vaani.hotkeys as hotkeys_mod
     from vaani.hotkeys import MiddleButtonHotkeyManager
 
     media = []
@@ -315,6 +347,7 @@ def test_duplicate_touchpad_events_toggle_media_only_once(monkeypatch):
     )
     monkeypatch.setattr(manager, "_trackpoint_middle_state", lambda: False)
     monkeypatch.setattr(manager, "_media_topology_is_verified", lambda: True)
+    monkeypatch.setattr(hotkeys_mod.time, "sleep", lambda _s: None)
 
     assert manager._handle_button_event(X.ButtonPress) is True
     assert manager._handle_button_event(X.ButtonPress) is False

@@ -1,4 +1,8 @@
-from vaani.wake_phrase import extract_wake_assistant, wake_name_matches
+from vaani.wake_phrase import (
+    extract_wake_assistant,
+    is_wake_hallucination,
+    wake_name_matches,
+)
 
 
 def test_wake_name_aliases_and_near_miss():
@@ -29,10 +33,35 @@ def test_extract_wake_variants():
     assert extract_wake_assistant("hey Barney") == ""
     assert extract_wake_assistant("hey bunny") == ""
     assert extract_wake_assistant("okay Rami") == ""
-    assert extract_wake_assistant("A Vani") == ""
-    assert extract_wake_assistant("a bani open youtube") == "open youtube"
+    assert extract_wake_assistant("Hey, honey") == ""
+    assert extract_wake_assistant("Hey, Vahey") == ""
+    assert extract_wake_assistant("Hey, onee") == ""
     assert extract_wake_assistant("OKAY VANI") == ""
     assert extract_wake_assistant("play a song") is None
     assert extract_wake_assistant("hey youtube play music") is None
-    # Bare name alone stays out of scope for v1.
-    assert extract_wake_assistant("Vaani") is None
+    # Loose single-letter prefixes removed (too many false wakes).
+    assert extract_wake_assistant("A Vani") is None
+    assert extract_wake_assistant("a bani open youtube") is None
+    # Bare name alone wakes (clear brand forms only).
+    assert extract_wake_assistant("Vaani") == ""
+    assert extract_wake_assistant("Vaani.") == ""
+    assert extract_wake_assistant("Vaani!") == ""
+    assert extract_wake_assistant("vani") == ""
+    assert extract_wake_assistant("Vaani play a song") == "play a song"
+    assert extract_wake_assistant("Hivani") == ""
+    assert extract_wake_assistant("HeyVaani") == ""
+    assert extract_wake_assistant("hey warning") == ""
+    # Loose STT mangling still needs hey/okay when used alone.
+    assert extract_wake_assistant("bunny") is None
+    assert extract_wake_assistant("Barney") is None
+
+
+def test_wake_hallucinations():
+    assert is_wake_hallucination("Thank you.")
+    assert is_wake_hallucination("you")
+    assert is_wake_hallucination("Okay.")
+    assert is_wake_hallucination("Bye.")
+    assert not is_wake_hallucination("Hey bunny!")
+    assert not is_wake_hallucination("okay Vaani")
+    assert not is_wake_hallucination("Vaani")
+

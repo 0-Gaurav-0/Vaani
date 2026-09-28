@@ -412,6 +412,8 @@ GEMINI_QUOTA_STRIKES = 1
 GEMINI_COOLDOWN_S = 20 * 60
 # When Whisper-en is clear English, don't block paste on a slow Whisper-hi call.
 HI_WAIT_FOR_ENGLISH_S = 1.25
+# After Groq 429/402, pause background STT (wake) so it stops burning the quota.
+GROQ_QUOTA_COOLDOWN_S = 3 * 60
 
 
 class GroqClient:
@@ -425,6 +427,7 @@ class GroqClient:
         self._client = httpx.Client(base_url=self.settings.base_url.rstrip("/"), timeout=self._transcription_timeout, transport=transport)
         self._gemini_quota_strikes = 0
         self._gemini_skip_until = 0.0
+        self._quota_skip_until = 0.0
 
     def _gemini_in_cooldown(self) -> bool:
         return self._clock() < self._gemini_skip_until
@@ -437,6 +440,19 @@ class GroqClient:
     def _note_gemini_success(self) -> None:
         self._gemini_quota_strikes = 0
         self._gemini_skip_until = 0.0
+
+    def _groq_in_quota_cooldown(self) -> bool:
+        return self._clock() < self._quota_skip_until
+
+    def _note_groq_quota_fail(self) -> None:
+        self._quota_skip_until = self._clock() + GROQ_QUOTA_COOLDOWN_S
+        self._logger.warning(
+            "event=groq_quota_cooldown seconds=%.0f",
+            GROQ_QUOTA_COOLDOWN_S,
+        )
+
+    def _note_groq_success(self) -> None:
+        self._quota_skip_until = 0.0
 
     def close(self) -> None: self._client.close()
 
@@ -472,7 +488,8 @@ class GroqClient:
                 if response.status_code == 429:
                     try: delay = float(response.headers.get("Retry-After", "-1"))
                     except ValueError: delay = -1
-                    if not 0 <= delay <= 3: return response
+                    # Free-tier RPM windows are often 5–10s; wait briefly once.
+                    if not 0 <= delay <= 10: return response
                 else: delay = 0.5
                 if cancel and cancel.is_set(): raise GroqError("cancelled", "request cancelled")
                 self._sleep(delay)
@@ -509,6 +526,7 @@ class GroqClient:
         delete_audio: bool = False,
         language: str | None = DEFAULT_TRANSCRIPTION_LANGUAGE,
         prompt: str | None = TRANSCRIPTION_PROMPT,
+        background: bool = False,
     ) -> TranscriptResult:
         from .audio_upload import prepare_transcription_upload
 
@@ -522,6 +540,9 @@ class GroqClient:
                 raise GroqError("audio_too_large", "audio exceeds size limit")
             if cancel and cancel.is_set():
                 raise GroqError("cancelled", "request cancelled")
+            # Wake/background must not keep hammering Groq after a 429.
+            if background and self._groq_in_quota_cooldown():
+                raise GroqError("quota", "Groq quota cooldown")
             upload_path, upload_name, content_type, temp_upload = prepare_transcription_upload(
                 Path(audio)
             )
@@ -559,7 +580,10 @@ class GroqClient:
                     timeout=timeout,
                 )
             if response.status_code >= 400:
-                raise GroqError("quota" if response.status_code in (402, 429) else "http")
+                if response.status_code in (402, 429):
+                    self._note_groq_quota_fail()
+                    raise GroqError("quota")
+                raise GroqError("http")
             try:
                 body = response.json()
                 raw = body["text"]
@@ -571,6 +595,7 @@ class GroqClient:
                 raise GroqError("malformed", "invalid transcription response")
             if not text:
                 raise GroqError("malformed", "empty transcription")
+            self._note_groq_success()
             self._logger.info(
                 "event=groq_transcribe_done chars=%s language=%s elapsed=%.2f",
                 len(text),
@@ -648,12 +673,11 @@ class GroqClient:
                             type(exc).__name__,
                         )
 
-            # Dual Whisper. English often finishes in <1s while hi can take many
-            # seconds — if en is clear prose, only wait briefly for hi.
-            pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+            # English first (1 API call). Hindi only when English is weak /
+            # Hinglish-ish — parallel en+hi was burning free-tier RPM and
+            # making dictation fail with quota after a few clips.
             try:
-                fut_en = pool.submit(
-                    self.transcribe,
+                en_res = self.transcribe(
                     path,
                     key,
                     cancel=cancel,
@@ -661,8 +685,32 @@ class GroqClient:
                     language="en",
                     prompt=None,
                 )
-                fut_hi = pool.submit(
-                    self.transcribe,
+            except GroqError:
+                # Don't spend a second quota slot on hi after en already 429'd.
+                raise
+
+            en_text = en_res.text or ""
+            en_latin, _ = _to_latin(en_text)
+            en_guarded = guard_transcription(en_latin) if en_latin else None
+            en_clear = bool(
+                en_guarded
+                and looks_like_english_prose(en_guarded)
+                and _hinglish_density(en_guarded) < 0.12
+            )
+            if en_clear:
+                self._logger.info(
+                    "event=groq_transcribe_pick provider=groq reason=en_only "
+                    "chars=%s elapsed=%.2f preview=%r",
+                    len(en_guarded or ""),
+                    self._clock() - started,
+                    ((en_guarded or "")[:80] + "…")
+                    if en_guarded and len(en_guarded) > 80
+                    else (en_guarded or ""),
+                )
+                return TranscriptResult(en_guarded or "", "en")
+
+            try:
+                hi_res = self.transcribe(
                     path,
                     key,
                     cancel=cancel,
@@ -670,92 +718,47 @@ class GroqClient:
                     language="hi",
                     prompt=None,
                 )
-                try:
-                    en_res = fut_en.result()
-                except GroqError:
-                    # Prefer hi if English call failed hard.
-                    hi_res = fut_hi.result()
-                    hi_text = hi_res.text or ""
-                    hi_latin, _ = _to_latin(hi_text)
-                    picked = guard_transcription(hi_latin) if hi_latin else None
-                    if not picked:
-                        raise
+            except GroqError:
+                if en_guarded:
                     self._logger.info(
-                        "event=groq_transcribe_pick provider=groq reason=hi_only "
+                        "event=groq_transcribe_pick provider=groq reason=en_fallback "
                         "chars=%s elapsed=%.2f preview=%r",
-                        len(picked),
+                        len(en_guarded),
                         self._clock() - started,
-                        (picked[:80] + "…") if len(picked) > 80 else picked,
+                        (en_guarded[:80] + "…") if len(en_guarded) > 80 else en_guarded,
                     )
-                    return TranscriptResult(picked, "hi")
+                    return TranscriptResult(en_guarded, "en")
+                raise
 
-                en_text = en_res.text or ""
-                en_latin, _ = _to_latin(en_text)
-                en_guarded = guard_transcription(en_latin) if en_latin else None
-                en_clear = bool(
-                    en_guarded
-                    and looks_like_english_prose(en_guarded)
-                    and _hinglish_density(en_guarded) < 0.12
-                )
+            hi_text = hi_res.text or ""
+            picked = pick_en_hi_transcript(en_text, hi_text)
+            if not picked:
+                return TranscriptResult("", None)
 
-                hi_text = ""
-                if en_clear:
-                    done, _not_done = concurrent.futures.wait(
-                        [fut_hi],
-                        timeout=HI_WAIT_FOR_ENGLISH_S,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
-                    )
-                    if fut_hi not in done:
-                        self._logger.info(
-                            "event=groq_transcribe_pick provider=groq reason=en_fast "
-                            "chars=%s hi_wait=%.2f elapsed=%.2f preview=%r",
-                            len(en_guarded or ""),
-                            HI_WAIT_FOR_ENGLISH_S,
-                            self._clock() - started,
-                            ((en_guarded or "")[:80] + "…")
-                            if en_guarded and len(en_guarded) > 80
-                            else (en_guarded or ""),
-                        )
-                        return TranscriptResult(en_guarded or "", "en")
-                    try:
-                        hi_res = fut_hi.result()
-                    except GroqError:
-                        return TranscriptResult(en_guarded or "", "en")
-                    hi_text = hi_res.text or ""
-                else:
-                    hi_res = fut_hi.result()
-                    hi_text = hi_res.text or ""
+            hi_latin, _ = _to_latin(hi_text)
+            if (
+                en_guarded
+                and looks_like_english_prose(en_guarded)
+                and _hinglish_density(hi_latin) < 0.12
+                and picked == en_guarded
+            ):
+                pick_reason = "en_prose"
+            else:
+                pick_reason = "latin_pick"
 
-                picked = pick_en_hi_transcript(en_text, hi_text)
-                if not picked:
-                    return TranscriptResult("", None)
-
-                hi_latin, _ = _to_latin(hi_text)
-                if (
-                    en_guarded
-                    and looks_like_english_prose(en_guarded)
-                    and _hinglish_density(hi_latin) < 0.12
-                    and picked == en_guarded
-                ):
-                    pick_reason = "en_prose"
-                else:
-                    pick_reason = "latin_pick"
-
-                self._logger.info(
-                    "event=groq_transcribe_pick provider=groq reason=%s chars=%s "
-                    "en_preview=%r hi_preview=%r elapsed=%.2f preview=%r",
-                    pick_reason,
-                    len(picked),
-                    (en_text[:80] + "…") if len(en_text) > 80 else en_text,
-                    (hi_text[:80] + "…") if len(hi_text) > 80 else hi_text,
-                    self._clock() - started,
-                    (picked[:80] + "…") if len(picked) > 80 else picked,
-                )
-                return TranscriptResult(
-                    picked, "en" if pick_reason == "en_prose" else "hi"
-                )
-            finally:
-                pool.shutdown(wait=False, cancel_futures=True)
+            self._logger.info(
+                "event=groq_transcribe_pick provider=groq reason=%s chars=%s "
+                "en_preview=%r hi_preview=%r elapsed=%.2f preview=%r",
+                pick_reason,
+                len(picked),
+                (en_text[:80] + "…") if len(en_text) > 80 else en_text,
+                (hi_text[:80] + "…") if len(hi_text) > 80 else hi_text,
+                self._clock() - started,
+                (picked[:80] + "…") if len(picked) > 80 else picked,
+            )
+            return TranscriptResult(
+                picked, "en" if pick_reason == "en_prose" else "hi"
+            )
         finally:
             if delete_audio:
                 try:

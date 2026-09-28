@@ -38,7 +38,8 @@ _FRAME_BYTES = _FRAME_SAMPLES * 2
 
 
 def snap_assistant_enabled() -> bool:
-    raw = os.environ.get("VAANI_SNAP_ASSISTANT", "1").strip().lower()
+    # Off by default — TrackPoint double-press+hold is the assistant trigger.
+    raw = os.environ.get("VAANI_SNAP_ASSISTANT", "0").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -269,9 +270,9 @@ class SnapListener:
         self._abs_threshold = _env_float("VAANI_SNAP_THRESHOLD", 0.07)
         self._ratio = _env_float("VAANI_SNAP_RATIO", 9.0)
         self._gate = DoubleClapGate(
-            window_s=_env_float("VAANI_SNAP_DOUBLE_WINDOW_S", 0.75),
-            settle_s=_env_float("VAANI_SNAP_SETTLE_S", 0.18),
-            min_gap_s=_env_float("VAANI_SNAP_MIN_GAP_S", 0.12),
+            window_s=_env_float("VAANI_SNAP_DOUBLE_WINDOW_S", 1.2),
+            settle_s=_env_float("VAANI_SNAP_SETTLE_S", 0.12),
+            min_gap_s=_env_float("VAANI_SNAP_MIN_GAP_S", 0.08),
             cooldown_s=_env_float("VAANI_SNAP_COOLDOWN", 2.8),
         )
         self._baseline = 0.002

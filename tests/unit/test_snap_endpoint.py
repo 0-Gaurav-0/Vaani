@@ -84,6 +84,7 @@ def test_no_speech_timeout_cancels(tmp_path, monkeypatch):
     monkeypatch.setenv("VAANI_SNAP_STOP_GRACE", "0.2")
     monkeypatch.setenv("VAANI_SNAP_SILENCE_END", "1")
     monkeypatch.setenv("VAANI_SNAP_SPEECH_FLOOR", "0.05")
+    monkeypatch.setenv("VAANI_SNAP_NO_SPEECH_S", "1.0")
     path = tmp_path / "quiet.wav"
     _write_wav(path, [0] * 32000)  # 2s silence
     cancelled: list[str] = []
