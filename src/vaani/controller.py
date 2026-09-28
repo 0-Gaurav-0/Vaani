@@ -51,6 +51,8 @@ from .delivery import DeliveryStatus
 from .memory import append_turn, load_context
 from .stt_chunks import ChunkedTranscriber, chunked_stt_enabled
 
+JEV_UNAVAILABLE = "Jev is unavailable right now (OpenRouter). Try again in a bit."
+
 # Temporary diagnostic: set VAANI_RAW_STT=1 to paste Whisper output with zero
 # transcript post-processing (no guard, romanize/pick, cleanup, or answer-prefix).
 RAW_STT_NO_POSTPROCESS = os.environ.get("VAANI_RAW_STT", "").strip().lower() in {
@@ -85,7 +87,8 @@ class Controller:
                  browser_launcher: Any | None = None,
                  app_launcher: Any | None = None,
                  media_keys: Any | None = None,
-                 jev: Any | None = None, jev_first: bool = False):
+                 jev: Any | None = None, jev_first: bool = False,
+                 jev_groq_fallback: bool = False):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self.codex, self.result_window = codex, result_window
@@ -95,6 +98,8 @@ class Controller:
         # Jev (OpenRouter tool-calling brain). None → Groq router only.
         self.jev = jev
         self.jev_first = bool(jev_first)
+        # With Jev on, Groq is STT only unless this opt-in backup is set.
+        self.jev_groq_fallback = bool(jev_groq_fallback)
         self.amplitude_path = str(
             amplitude_path
             or os.environ.get("VAANI_AMPLITUDE_PATH")
@@ -646,7 +651,7 @@ class Controller:
             answered_via_prefix = False
             prefix, question = normalize_answer_prefix(raw)
             if prefix:
-                answer = getattr(self.groq, "answer", None)
+                answer = self._answer_fn()
                 if answer is None: raise RuntimeError("answer mode unavailable")
                 final = answer(question, key, cancel=self._cancel).text
                 history_mode = "answer"
@@ -789,6 +794,8 @@ class Controller:
         if self.jev is not None and not self.jev_first:
             decision = self._jev_route(raw)
         route_fn = getattr(self.groq, "route", None)
+        if self.jev is not None and not self.jev_groq_fallback:
+            route_fn = None
         if decision is None and callable(route_fn):
             try:
                 decision = route_fn(raw, key, cancel=self._cancel)
@@ -822,6 +829,12 @@ class Controller:
             return
 
         self._dispatch_decision(token, audio, key, raw, result, decision)
+
+    def _answer_fn(self) -> Any:
+        """Q&A LLM: Jev on OpenRouter when configured, else Groq."""
+        if self.jev is not None and callable(getattr(self.jev, "answer", None)):
+            return self.jev.answer
+        return getattr(self.groq, "answer", None)
 
     def _jev_route(self, raw: str) -> RouteDecision | None:
         """Ask Jev; None on any failure so the Groq router takes over."""
@@ -1113,7 +1126,7 @@ class Controller:
         if answer:
             final = answer
         else:
-            answer_fn = getattr(self.groq, "answer", None)
+            answer_fn = self._answer_fn()
             if answer_fn is None:
                 raise RuntimeError("answer mode unavailable")
             prior = ""
@@ -1122,10 +1135,19 @@ class Controller:
             except Exception:
                 prior = ""
             try:
-                answered = answer_fn(raw, key, cancel=self._cancel, context=prior or None)
-            except TypeError:
-                answered = answer_fn(raw, key, cancel=self._cancel)
-            final = answered.text
+                try:
+                    answered = answer_fn(raw, key, cancel=self._cancel, context=prior or None)
+                except TypeError:
+                    answered = answer_fn(raw, key, cancel=self._cancel)
+                final = answered.text
+            except Exception as exc:
+                if self.jev is None or self._cancel.is_set():
+                    raise
+                # Jev (OpenRouter) down / out of free quota: say so in the pill.
+                self.logger.warning(
+                    "event=jev_answer_failed category=%s", getattr(exc, "category", "-")
+                )
+                final = JEV_UNAVAILABLE
         if self._cancel.is_set() or token != self._token:
             return
         try:

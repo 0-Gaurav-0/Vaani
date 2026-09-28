@@ -17,6 +17,8 @@ Config (env / ``.env``):
   VAANI_JEV_FIRST=1    ask Jev before the deterministic fast paths
   VAANI_JEV_MODELS     comma-separated model ids (first = primary)
   VAANI_JEV_TIMEOUT    seconds (default 6)
+  VAANI_JEV_GROQ_FALLBACK=1  if Jev fails, use Groq's LLM router (default off:
+                       Groq is STT only; OpenRouter is Jev's only LLM)
 """
 from __future__ import annotations
 
@@ -200,11 +202,28 @@ SYSTEM_PROMPT = (
 )
 
 
+ANSWER_PROMPT = (
+    "You are Jev, the voice assistant inside Vaani on the user's Linux laptop. "
+    "Answer the spoken question in at most 3 short sentences, no markdown, same "
+    "language/style as the user (Hinglish in Latin script if they spoke Hinglish)."
+)
+
+
+@dataclass(frozen=True)
+class JevAnswer:
+    text: str
+    used_fallback: bool = False
+
+
 def jev_enabled() -> bool:
     flag = os.environ.get("VAANI_JEV", "").strip().lower()
     if flag in {"0", "false", "no", "off"}:
         return False
     return bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
+
+
+def jev_groq_fallback() -> bool:
+    return os.environ.get("VAANI_JEV_GROQ_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def jev_first() -> bool:
@@ -428,13 +447,8 @@ class JevClient:
             {"role": "user", "content": utterance},
         ]
 
-    def route(
-        self,
-        utterance: str,
-        *,
-        cancel: Event | None = None,
-        context: str | None = None,
-    ) -> JevDecision:
+    def _post(self, payload: dict, *, cancel: Event | None = None) -> dict:
+        """One chat completion on OpenRouter; raises JevError on any failure."""
         key = self._key()
         if not key:
             raise JevError("key", "OPENROUTER_API_KEY missing")
@@ -445,14 +459,10 @@ class JevClient:
         payload = {
             "model": self.models[0],
             "models": list(self.models[:MAX_FALLBACK_MODELS]),
-            "messages": self._messages(utterance, context),
-            "tools": TOOLS,
-            "tool_choice": "auto",
             "temperature": 0,
-            "max_tokens": 300,
             "reasoning": {"enabled": False},
+            **payload,
         }
-        started = self._clock()
         try:
             response = self._client.post(
                 "/chat/completions",
@@ -484,8 +494,27 @@ class JevClient:
             body = response.json()
         except ValueError:
             raise JevError("malformed", "invalid json")
-        if isinstance(body, dict) and body.get("error"):
+        if not isinstance(body, dict) or body.get("error"):
             raise JevError("http", "error body")
+        return body
+
+    def route(
+        self,
+        utterance: str,
+        *,
+        cancel: Event | None = None,
+        context: str | None = None,
+    ) -> JevDecision:
+        started = self._clock()
+        body = self._post(
+            {
+                "messages": self._messages(utterance, context),
+                "tools": TOOLS,
+                "tool_choice": "auto",
+                "max_tokens": 300,
+            },
+            cancel=cancel,
+        )
         decision = parse_completion(body)
         self._logger.info(
             "event=jev_route_done intent=%s target=%s model=%s elapsed=%.2f",
@@ -495,3 +524,30 @@ class JevClient:
             self._clock() - started,
         )
         return decision
+
+    def answer(
+        self,
+        question: str,
+        key: str | None = None,
+        *,
+        cancel: Event | None = None,
+        context: str | None = None,
+    ) -> JevAnswer:
+        """Plain Q&A (no tools). ``key`` is ignored — kept for GroqClient.answer parity."""
+        started = self._clock()
+        messages = self._messages(question, context)
+        messages[0]["content"] = ANSWER_PROMPT + messages[0]["content"].split(SYSTEM_PROMPT, 1)[-1]
+        body = self._post({"messages": messages, "max_tokens": 300}, cancel=cancel)
+        try:
+            content = body["choices"][0]["message"].get("content")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            raise JevError("malformed", "no choices")
+        if isinstance(content, list):
+            content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        text = _clean_answer(content if isinstance(content, str) else "")
+        if not text:
+            raise JevError("malformed", "empty reply")
+        self._logger.info(
+            "event=jev_answer_done chars=%s elapsed=%.2f", len(text), self._clock() - started
+        )
+        return JevAnswer(text)
