@@ -27,17 +27,33 @@ def test_english_speech_is_one_auto_call(tmp_path):
     assert out.language == "en"
 
 
-def test_hindi_speech_is_romanized_latin_hinglish(tmp_path):
+def test_hindi_speech_redone_codemixed_then_romanized(tmp_path):
+    from vaani.groq import CODEMIX_PROMPT
+
     seen = []
 
-    def fake(audio, key, *, language=None, **_):
-        seen.append(language)
-        return TranscriptResult("प्ले बीड़ी जलाइले", "hindi")
+    def fake(audio, key, *, language=None, prompt=None, **_):
+        seen.append((language, prompt))
+        if language is None:
+            return TranscriptResult("बहुत है जो सेंटर है", "hindi")
+        return TranscriptResult("बहुत है जो center है", "hi")
 
     out = _client(fake).transcribe_hinglish(_wav(tmp_path), "k")
-    assert seen == [None]
-    assert out.text == "play beedi jalaaile"
+    assert seen == [(None, None), ("hi", CODEMIX_PROMPT)]
+    assert out.text == "bahut hai jo center hai"
     assert out.language == "hi"
+
+
+def test_codemix_prompt_echo_is_discarded(tmp_path):
+    from vaani.groq import CODEMIX_PROMPT
+
+    def fake(audio, key, *, language=None, prompt=None, **_):
+        if language is None:
+            return TranscriptResult("प्ले बीड़ी जलाइले", "hindi")
+        return TranscriptResult(CODEMIX_PROMPT, "hi")  # Whisper echoed the prompt
+
+    out = _client(fake).transcribe_hinglish(_wav(tmp_path), "k")
+    assert out.text == "play beedi jalaaile"
 
 
 def test_urdu_misdetect_retries_forced_hindi(tmp_path):
@@ -62,3 +78,15 @@ def test_assistant_parallel_keeps_both_candidates(tmp_path):
 
     out = _client(fake).transcribe_hinglish(_wav(tmp_path), "k", parallel=True)
     assert out.candidates == ("Play B.V", "play beedi jalaaile")
+
+
+def test_vocab_fixes_split_names(tmp_path, monkeypatch):
+    import json
+    import vaani.groq as g
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    g._VOCAB_CACHE = None
+    assert g.guard_transcription("mujhe sales handy ke mailbox issues") == "mujhe Saleshandy ke mailbox issues"
+    (tmp_path / "vaani").mkdir()
+    (tmp_path / "vaani" / "vocab.json").write_text(json.dumps({"jev": "Jev"}))
+    assert g.guard_transcription("ask jev about it") == "ask Jev about it"
