@@ -208,14 +208,21 @@ class _Feedback:
 
 
 class _Jev:
-    def __init__(self, decision=None, exc=None):
+    def __init__(self, decision=None, exc=None, answer_exc=None):
         self.decision, self.exc, self.calls = decision, exc, []
+        self.answer_exc, self.answered = answer_exc, []
 
     def route(self, utterance, *, cancel=None, context=None):
         self.calls.append(utterance)
         if self.exc:
             raise self.exc
         return self.decision
+
+    def answer(self, question, key=None, *, cancel=None, context=None):
+        self.answered.append(question)
+        if self.answer_exc:
+            raise self.answer_exc
+        return SimpleNamespace(text="jev answer")
 
 
 def _run(controller):
@@ -245,15 +252,56 @@ def test_controller_uses_jev_answer_without_groq(monkeypatch):
     assert h.rows[-1]["cleanup_status"] == "qa_answer"
 
 
-def test_controller_falls_back_to_groq_when_jev_fails(monkeypatch):
+def test_jev_failure_never_uses_groq_llm_by_default(monkeypatch):
     _no_fast_paths(monkeypatch)
     groq, fb, h = _Groq("what is the time in tokyo"), _Feedback(), _History()
     jev = _Jev(exc=JevError("quota"))
     c = Controller(recorder=_Rec(), groq=groq, delivery=None, history=h, feedback=fb,
                    key_provider=lambda: "key", jev=jev)
     _run(c)
-    assert jev.calls and groq.routed == ["what is the time in tokyo"]
-    assert fb.answers[-1][1] == "groq answer"
+    # Groq = STT only: heuristic says qa → answered by Jev (OpenRouter), not Groq.
+    assert groq.routed == [] and groq.answered == []
+    assert jev.answered == ["what is the time in tokyo"]
+    assert fb.answers[-1][1] == "jev answer"
+
+
+def test_jev_answer_failure_shows_unavailable_not_groq(monkeypatch):
+    from vaani.controller import JEV_UNAVAILABLE
+
+    _no_fast_paths(monkeypatch)
+    groq, fb, h = _Groq("what is the time in tokyo"), _Feedback(), _History()
+    jev = _Jev(exc=JevError("quota"), answer_exc=JevError("quota"))
+    c = Controller(recorder=_Rec(), groq=groq, delivery=None, history=h, feedback=fb,
+                   key_provider=lambda: "key", jev=jev)
+    _run(c)
+    assert groq.answered == []
+    assert fb.answers[-1][1] == JEV_UNAVAILABLE
+
+
+def test_opt_in_groq_fallback_router(monkeypatch):
+    _no_fast_paths(monkeypatch)
+    groq, fb, h = _Groq("what is the time in tokyo"), _Feedback(), _History()
+    jev = _Jev(exc=JevError("quota"))
+    c = Controller(recorder=_Rec(), groq=groq, delivery=None, history=h, feedback=fb,
+                   key_provider=lambda: "key", jev=jev, jev_groq_fallback=True)
+    _run(c)
+    assert groq.routed == ["what is the time in tokyo"]
+    # Answer still comes from Jev: Groq's LLM only ever routes in fallback mode.
+    assert jev.answered == ["what is the time in tokyo"]
+
+
+def test_jev_client_answer_uses_no_tools():
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_completion({"content": "Canberra."}))
+
+    out = _client(handler).answer("capital of australia", "ignored-groq-key", context="ctx")
+    assert out.text == "Canberra."
+    assert "tools" not in seen["body"]
+    assert seen["body"]["messages"][0]["content"].startswith("You are Jev")
+    assert "ctx" in seen["body"]["messages"][0]["content"]
 
 
 def test_controller_jev_media_uses_deterministic_resolver(monkeypatch):

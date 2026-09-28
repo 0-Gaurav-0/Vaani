@@ -11,6 +11,7 @@ Living handoff for the next session. Covers **what is running**, **what we built
 | Change | Detail |
 | --- | --- |
 | **Jev** (`src/vaani/jev.py`) | OpenRouter free-model tool-calling brain. Replaces the Groq router step: one call → play / open app·site·folder / media / volume / delegate to agent / type / clarify, or a direct answer (no 2nd answer call). Deterministic fast paths still run first. Any Jev failure → Groq router. |
+| Provider split | **Groq = STT only. OpenRouter = all of Jev's LLM work** (routing + every Q&A answer, incl. clarify picks and `Answer this:` prefix). Jev down/out of quota → heuristic intent + "Jev is unavailable" in the pill; Groq LLM never used unless `VAANI_JEV_GROQ_FALLBACK=1`. |
 | Jev config | `.env` `OPENROUTER_API_KEY` (gitignored). `VAANI_JEV=0` off, `VAANI_JEV_FIRST=1` Jev before fast paths, `VAANI_JEV_MODELS=a,b,c` (max 3 — OpenRouter 400s above), `VAANI_JEV_TIMEOUT` (6s) |
 | Free tier limits | 50 **successful** req/day (429s don't count). Single free models often 429 upstream → `models` fallback list. Daily-cap 429 → 1h cooldown, Groq takes over. |
 | Release lag | processing cue ran `paplay` synchronously before mic stop (~1.1s every clip). Mic now stops first; cues play off-thread. |

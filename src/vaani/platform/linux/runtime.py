@@ -23,7 +23,7 @@ from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
 from .browser import LinuxBrowserLauncher
 from .feedback import LinuxFeedback
-from ...jev import JevClient, jev_enabled, jev_first
+from ...jev import JevClient, jev_enabled, jev_first, jev_groq_fallback
 
 
 def _build_jev(logger):
@@ -193,6 +193,7 @@ def _run_x11(settings: Settings) -> int:
         media_keys=media_keys,
         jev=_build_jev(logger),
         jev_first=jev_first(),
+        jev_groq_fallback=jev_groq_fallback(),
     )
     assistant = CodexRunner()
 
