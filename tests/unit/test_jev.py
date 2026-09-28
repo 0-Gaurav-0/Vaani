@@ -376,3 +376,11 @@ def test_disagreeing_stt_passes_go_to_jev_with_both(monkeypatch):
     _run(c)
     assert seen["candidates"] == ("Play B.V", "play beedi jalaaile")
     assert youtube == []  # the "b.v" fast path never ran
+
+
+def test_repetitive_junk_candidate_is_dropped():
+    from vaani.controller import _is_junk_candidate
+
+    assert _is_junk_candidate("leb leb leb leb")
+    assert not _is_junk_candidate("play beedi jalaaile")
+    assert not _is_junk_candidate("chaiyya chaiyya")  # real titles repeat, but short
