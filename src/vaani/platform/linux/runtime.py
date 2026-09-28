@@ -39,7 +39,8 @@ def _build_jev(logger):
 def _reap_orphan_indicators() -> None:
     """Kill pills left by a previous crash/restart; visual-only, safe to kill."""
     patterns = (
-        r"python -m vaani\.platform\.linux\.indicator_app",
+        # python or the reexec'd /usr/bin/python3 (persistent pill).
+        r"python3? -m vaani\.platform\.linux\.indicator_app",
         r"python -m vaani\.indicator",
     )
     for pattern in patterns:

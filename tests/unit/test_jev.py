@@ -282,3 +282,23 @@ def test_jev_first_skips_fast_paths(monkeypatch):
                    key_provider=lambda: "key", jev=jev, jev_first=True)
     _run(c)
     assert jev.calls == ["mute karo"]
+
+
+def test_jev_brief_cannot_launder_mutating_utterance(monkeypatch):
+    _no_fast_paths(monkeypatch)
+    started = []
+
+    class Runner:
+        def start_handoff(self, *a, **k):
+            started.append(a)
+
+        def run(self, prompt):
+            started.append(prompt)
+
+    groq, fb, h = _Groq("delete all my old emails"), _Feedback(), _History()
+    jev = _Jev(JevDecision("codex", "Review the inbox and summarize old emails", "", 0.9))
+    c = Controller(recorder=_Rec(), groq=groq, delivery=None, history=h, feedback=fb,
+                   key_provider=lambda: "key", jev=jev, codex=Runner())
+    _run(c)
+    assert started == []
+    assert h.rows[-1]["cleanup_status"] == "agent_read_only"
