@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .types import AppState, DictationMode
 from .observability import exception_category, sanitize
-from .groq import GroqError, guard_transcription, light_local_cleanup
+from .groq import GroqError, candidates_agree, guard_transcription, light_local_cleanup
 from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
 from .folders import launch_folder, resolve_folder, resolve_folder_name
@@ -870,6 +870,26 @@ class Controller:
             return
         if self._assistant_try_folder(token, audio, raw):
             return
+        # App/folder names survive the English pass; titles and sites don't.
+        # English and Hindi passes disagree on the content ("Play B.V" vs
+        # "play beedi jalaaile"): a fast path would act on the wrong words.
+        # Let Jev reconcile both; fall through to fast paths if Jev fails.
+        candidates = tuple(getattr(result, "candidates", ()) or ())
+        if (
+            self.jev is not None
+            and len(candidates) >= 2
+            and not candidates_agree(candidates[0], candidates[1])
+        ):
+            self.logger.info(
+                "event=stt_candidates_disagree en=%r hi=%r",
+                candidates[0][:60],
+                candidates[1][:60],
+            )
+            decision = self._jev_route(raw, candidates=candidates)
+            if decision is not None:
+                self._dispatch_decision(token, audio, key, raw, result, decision)
+                return
+
         if self._assistant_try_browser(token, audio, raw):
             return
         if self._assistant_try_skill(token, audio, raw):
@@ -921,7 +941,7 @@ class Controller:
             return self.jev.answer
         return getattr(self.groq, "answer", None)
 
-    def _jev_route(self, raw: str) -> RouteDecision | None:
+    def _jev_route(self, raw: str, *, candidates: tuple[str, ...] = ()) -> RouteDecision | None:
         """Ask Jev; None on any failure so the Groq router takes over."""
         context = None
         try:
@@ -929,6 +949,8 @@ class Controller:
         except Exception:
             context = None
         try:
+            if candidates:
+                return self.jev.route(raw, cancel=self._cancel, context=context, candidates=candidates)
             return self.jev.route(raw, cancel=self._cancel, context=context)
         except Exception as exc:
             self.logger.warning(

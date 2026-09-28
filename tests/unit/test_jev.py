@@ -350,3 +350,29 @@ def test_jev_brief_cannot_launder_mutating_utterance(monkeypatch):
     _run(c)
     assert started == []
     assert h.rows[-1]["cleanup_status"] == "agent_read_only"
+
+
+def test_disagreeing_stt_passes_go_to_jev_with_both(monkeypatch):
+    from vaani.groq import TranscriptResult
+
+    _no_fast_paths(monkeypatch)
+    youtube = []
+    monkeypatch.setattr("vaani.controller.resolve_youtube", lambda text: youtube.append(text))
+
+    class HiGroq(_Groq):
+        def transcribe_hinglish(self, *a, **k):
+            return TranscriptResult("Play B.V", "en", ("Play B.V", "play beedi jalaaile"))
+
+    seen = {}
+
+    class CandJev(_Jev):
+        def route(self, utterance, *, cancel=None, context=None, candidates=()):
+            seen["candidates"] = candidates
+            return JevDecision("qa", "", "", 0.9, answer="ok")
+
+    groq, fb, h = HiGroq("unused"), _Feedback(), _History()
+    c = Controller(recorder=_Rec(), groq=groq, delivery=None, history=h, feedback=fb,
+                   key_provider=lambda: "key", jev=CandJev())
+    _run(c)
+    assert seen["candidates"] == ("Play B.V", "play beedi jalaaile")
+    assert youtube == []  # the "b.v" fast path never ran
