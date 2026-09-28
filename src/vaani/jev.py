@@ -42,11 +42,15 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # tool call); the rest were upstream-429 at that moment but are tool-capable.
 # OpenRouter rejects a ``models`` list longer than 3 (HTTP 400).
 MAX_FALLBACK_MODELS = 3
+# Fallbacks must be *fast*: nemotron-3.5-lightning took >12s (2026-09-28) and
+# nemotron-super 9s, which blows the deadline — worse than failing over to the
+# heuristic. Gemma answers (or 429s) in <1s.
 DEFAULT_MODELS: tuple[str, ...] = (
     "inclusionai/ling-3.0-flash-sante:free",
-    "nvidia/nemotron-3.5-lightning:free",
     "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
 )
+KEEPALIVE_S = 120.0
 DEFAULT_TIMEOUT_S = 6.0
 # After the daily free quota is gone, stop calling (each call would just 429).
 DAILY_QUOTA_COOLDOWN_S = 60 * 60
@@ -198,7 +202,22 @@ SYSTEM_PROMPT = (
     "Rules: prefer play_media for play/watch/chalao/bajao/suno. Prefer open_app for desktop "
     "apps, open_website for web services and domains. Use delegate_to_agent only for real "
     "multi-step work. Never invent an action for filler, noise or a single stray word — reply "
-    "briefly instead. Do not explain which tool you chose."
+    "briefly instead. Do not explain which tool you chose.\n"
+    "Examples (utterance → call):\n"
+    "'arijit ka koi sad gaana bajao' → play_media(query='Arijit Singh sad songs')\n"
+    "'pushpa 2 trailer dikhao' → play_media(query='Pushpa 2 trailer')\n"
+    "'netflix pe stranger things lagao' → play_media(query='Stranger Things', platform='netflix')\n"
+    "'vs code kholo' / 'open code' → open_app(name='VS Code')\n"
+    "'terminal khol do' → open_app(name='Terminal')\n"
+    "'gmail pe jao' → open_website(query='gmail')\n"
+    "'stackoverflow dot com kholo' → open_website(query='stackoverflow.com')\n"
+    "'downloads folder kholo' → open_folder(name='Downloads')\n"
+    "'agla gaana' / 'skip karo' → media_control(action='next')\n"
+    "'ruko' / 'band karo gaana' → media_control(action='pause')\n"
+    "'awaaz badhao' → set_volume(action='up')\n"
+    "'is repo me failing test fix karo' → delegate_to_agent(task='Fix the failing tests in the current repo')\n"
+    "'kal ka weather kaisa rahega' → delegate_to_agent(task='Check tomorrow's weather forecast for the user's city')\n"
+    "'python me list sort kaise karte hain' → reply: 'sorted(my_list) ya my_list.sort() use karo.'"
 )
 
 
@@ -416,7 +435,24 @@ class JevClient:
             base_url=OPENROUTER_BASE_URL,
             timeout=httpx.Timeout(self.timeout, connect=min(3.0, self.timeout)),
             transport=self._transport,
+            # Default 5s idle expiry meant a fresh TLS handshake per request.
+            limits=httpx.Limits(max_keepalive_connections=2, keepalive_expiry=KEEPALIVE_S),
         )
+
+    def warm(self) -> None:
+        """Open the pooled connection while the user is still speaking.
+
+        ``GET /key`` is free (does not count against the daily request quota).
+        """
+        key = self._key()
+        if not key:
+            return
+        started = self._clock()
+        try:
+            self._client.get("/key", headers={"Authorization": f"Bearer {key}"}, timeout=5.0)
+        except Exception:
+            pass
+        self._logger.info("event=jev_warm elapsed=%.2f", self._clock() - started)
 
     def _key(self) -> str:
         key = self._api_key() if callable(self._api_key) else self._api_key

@@ -90,3 +90,42 @@ def test_chunk_failure_falls_back(tmp_path):
     while c.chunks < 1 and time.monotonic() < deadline:
         time.sleep(0.01)
     assert c.finish(path) is None
+
+
+def test_trim_edge_silence_keeps_speech_with_padding():
+    import numpy as np
+    from vaani.audio_upload import trim_edge_silence
+
+    rng = np.random.default_rng(0)
+    sil = (rng.standard_normal(32000) * 50).astype("int16")
+    speech = (np.sin(np.arange(16000) * 0.3) * 8000).astype("int16")
+    out = trim_edge_silence(np.concatenate([sil, speech, sil]), 16000)
+    assert 1.5 <= len(out) / 16000 <= 1.7  # 1s speech + 0.3s pad each side
+    assert len(trim_edge_silence(speech, 16000)) == len(speech)  # nothing to trim
+    quiet = (rng.standard_normal(48000) * 50).astype("int16")
+    assert len(trim_edge_silence(quiet, 16000)) == len(quiet)  # no speech → untouched
+
+
+def test_parallel_hinglish_starts_hi_without_waiting(tmp_path):
+    import threading
+    from types import SimpleNamespace
+
+    from vaani.groq import GroqClient, TranscriptResult
+
+    path = _wav(tmp_path / "a.wav", _tone(1.0))
+    started, gate = [], threading.Event()
+    client = GroqClient()
+
+    def fake(p, key, *, language=None, **_k):
+        started.append(language)
+        if language == "en":
+            gate.wait(2)  # en blocks until hi has started
+            return TranscriptResult("mera gaana chalao yaar", "en")
+        gate.set()
+        return TranscriptResult("मेरा गाना चलाओ यार", "hi")
+
+    client.transcribe = fake
+    out = client.transcribe_hinglish(path, "k", parallel=True)
+    assert set(started) == {"en", "hi"}
+    assert out.text
+    client.close()
