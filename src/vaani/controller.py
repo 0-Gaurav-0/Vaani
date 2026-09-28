@@ -62,6 +62,14 @@ RAW_STT_NO_POSTPROCESS = os.environ.get("VAANI_RAW_STT", "").strip().lower() in 
 }
 
 
+def _is_junk_candidate(text: str) -> bool:
+    """Whisper loop noise like 'leb leb leb leb' — never act on it."""
+    words = [w for w in (text or "").casefold().split() if w.strip(".,!?")]
+    if len(words) < 3:
+        return False
+    return len(set(words)) / len(words) <= 0.34
+
+
 def _accepts_kwarg(fn: Any, name: str) -> bool:
     import inspect
 
@@ -874,7 +882,9 @@ class Controller:
         # English and Hindi passes disagree on the content ("Play B.V" vs
         # "play beedi jalaaile"): a fast path would act on the wrong words.
         # Let Jev reconcile both; fall through to fast paths if Jev fails.
-        candidates = tuple(getattr(result, "candidates", ()) or ())
+        candidates = tuple(
+            c for c in (getattr(result, "candidates", ()) or ()) if not _is_junk_candidate(c)
+        )
         if (
             self.jev is not None
             and len(candidates) >= 2

@@ -221,7 +221,13 @@ SYSTEM_PROMPT = (
     "When given two speech-to-text passes of the same audio: the English pass turns Hindi words "
     "into English-sounding junk, the Hindi pass (romanized) garbles English words. Combine "
     "them into what was really said — song/movie titles are usually right in the Hindi pass. "
-    "E.g. English 'Play B.V' + Hindi 'play beedi jalaaile' → play_media(query='Beedi Jalaile')."
+    "The English pass may even TRANSLATE the Hindi ('beedi jalaile' → 'I have a cigarette'). "
+    "In the Hindi pass 'play' often appears garbled as 'le', 'ple', 'lo' or 'log'. If the "
+    "Hindi pass reads like a song or film title, the user wants it played.\n"
+    "E.g. English 'Play B.V' + Hindi 'play beedi jalaaile' → play_media(query='Beedi Jalaile'); "
+    "English 'I have a cigarette' + Hindi 'log beedi jale le' → play_media(query='Beedi Jalaile'); "
+    "English 'Play Chaiya' + Hindi 'le chal chaiyya chaiyya' → play_media(query='Chaiyya Chaiyya'). "
+    "If both passes are noise, reply briefly that you didn't catch it."
 )
 
 
