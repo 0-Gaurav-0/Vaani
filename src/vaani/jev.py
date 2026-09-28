@@ -217,7 +217,11 @@ SYSTEM_PROMPT = (
     "'awaaz badhao' → set_volume(action='up')\n"
     "'is repo me failing test fix karo' → delegate_to_agent(task='Fix the failing tests in the current repo')\n"
     "'kal ka weather kaisa rahega' → delegate_to_agent(task='Check tomorrow's weather forecast for the user's city')\n"
-    "'python me list sort kaise karte hain' → reply: 'sorted(my_list) ya my_list.sort() use karo.'"
+    "'python me list sort kaise karte hain' → reply: 'sorted(my_list) ya my_list.sort() use karo.'\n"
+    "When given two speech-to-text passes of the same audio: the English pass turns Hindi words "
+    "into English-sounding junk, the Hindi pass (romanized) garbles English words. Combine "
+    "them into what was really said — song/movie titles are usually right in the Hindi pass. "
+    "E.g. English 'Play B.V' + Hindi 'play beedi jalaaile' → play_media(query='Beedi Jalaile')."
 )
 
 
@@ -473,14 +477,23 @@ class JevClient:
     def in_cooldown(self) -> bool:
         return self._clock() < self._skip_until
 
-    def _messages(self, utterance: str, context: str | None) -> list[dict]:
+    def _messages(
+        self, utterance: str, context: str | None, candidates: tuple[str, ...] = ()
+    ) -> list[dict]:
         now = datetime.now().strftime("%A %d %B %Y, %H:%M")
         system = f"{SYSTEM_PROMPT}\nNow: {now}."
         if context:
             system += "\nEarlier today (for follow-ups):\n" + context[-MAX_CONTEXT_CHARS:]
+        user = utterance
+        if len(candidates) >= 2:
+            user = (
+                "Two speech-to-text passes of the same audio:\n"
+                f"English pass: {candidates[0]}\n"
+                f"Hindi pass (romanized): {candidates[1]}"
+            )
         return [
             {"role": "system", "content": system},
-            {"role": "user", "content": utterance},
+            {"role": "user", "content": user},
         ]
 
     def _post(self, payload: dict, *, cancel: Event | None = None) -> dict:
@@ -540,11 +553,12 @@ class JevClient:
         *,
         cancel: Event | None = None,
         context: str | None = None,
+        candidates: tuple[str, ...] = (),
     ) -> JevDecision:
         started = self._clock()
         body = self._post(
             {
-                "messages": self._messages(utterance, context),
+                "messages": self._messages(utterance, context, candidates),
                 "tools": TOOLS,
                 "tool_choice": "auto",
                 "max_tokens": 300,

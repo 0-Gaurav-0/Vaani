@@ -23,6 +23,12 @@ def _client(*, clock=None) -> GroqClient:
     return c
 
 
+@pytest.fixture(autouse=True)
+def _legacy_en_first(monkeypatch):
+    # These cover the legacy English-first flow; auto mode is tested in test_stt_auto_lang.
+    monkeypatch.setenv("VAANI_STT_LANG_MODE", "en_first")
+
+
 @pytest.fixture
 def gemini_stt_on(monkeypatch):
     monkeypatch.setenv("VAANI_USE_GEMINI", "1")

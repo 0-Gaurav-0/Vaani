@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import re
 import threading
 import time
@@ -206,6 +207,17 @@ def _cleanup_too_divergent(raw: str, cleaned: str) -> bool:
 class TranscriptResult:
     text: str
     language: str | None = None
+    # Assistant mode: (english_pass, hindi_pass_romanized) for the router to
+    # reconcile when they disagree (en mangles Hindi words, hi mangles English).
+    candidates: tuple[str, ...] = ()
+
+
+def stt_lang_mode() -> str:
+    """``auto`` (default): Whisper detects language per clip, Hindi is romanized.
+    ``en_first``: legacy — force English, fall back to Hindi when English is weak.
+    """
+    mode = os.environ.get("VAANI_STT_LANG_MODE", "auto").strip().lower()
+    return mode if mode in {"auto", "en_first"} else "auto"
 
 @dataclass(frozen=True)
 class CleanupResult:
@@ -401,6 +413,40 @@ def pick_en_hi_transcript(en: str, hi: str) -> str | None:
     if picked and _weak_silence_hallucination(picked, en_raw=en_raw):
         return None
     return picked
+
+
+_AGREE_STOP = frozenset(
+    "play plays played open can could you please the a an on in of to for me my is it "
+    "karo kar do de dena chalao bajao lagao kholo dikhao suno youtube song gaana gana "
+    "video hai hain ka ki ke ko se pe par please pls ek koi yaar".split()
+)
+
+
+def _content_tokens(text: str) -> list[str]:
+    words = re.findall(r"[a-z0-9]+", (text or "").casefold())
+    return [w for w in words if w not in _AGREE_STOP and len(w) > 1]
+
+
+def candidates_agree(en: str, hi: str, *, threshold: float = 0.6) -> bool:
+    """Do the English and (romanized) Hindi passes name the same content?
+
+    True when most English content words have a close match in the Hindi pass
+    (so the deterministic fast path is safe). "Play B.V" vs "play beedi
+    jalaaile" → False: route through Jev with both.
+    """
+    import difflib
+
+    en_t = _content_tokens(en)
+    hi_t = _content_tokens(hi)
+    if not en_t or not hi_t:
+        # Nothing but command words: agreement is about the verb, fine either way.
+        return not en_t and not hi_t
+    hits = 0
+    for word in en_t:
+        best = max(difflib.SequenceMatcher(None, word, h).ratio() for h in hi_t)
+        if best >= 0.72:
+            hits += 1
+    return hits / len(en_t) >= threshold
 
 
 def _fallback(text: str) -> str:
@@ -709,6 +755,9 @@ class GroqClient:
                             type(exc).__name__,
                         )
 
+            if not parallel and stt_lang_mode() == "auto":
+                return self._transcribe_auto(path, key, cancel=cancel, started=started)
+
             # English first (1 API call). Hindi only when English is weak /
             # Hinglish-ish — parallel en+hi was burning free-tier RPM and
             # making dictation fail with quota after a few clips.
@@ -743,7 +792,7 @@ class GroqClient:
                 and looks_like_english_prose(en_guarded)
                 and _hinglish_density(en_guarded) < 0.12
             )
-            if en_clear:
+            if en_clear and hi_future is None:
                 self._logger.info(
                     "event=groq_transcribe_pick provider=groq reason=en_only "
                     "chars=%s elapsed=%.2f preview=%r",
@@ -780,11 +829,15 @@ class GroqClient:
                 raise
 
             hi_text = hi_res.text or ""
+            hi_latin, _ = _to_latin(hi_text)
+            candidates: tuple[str, ...] = ()
+            if hi_future is not None:
+                hi_guarded = guard_transcription(hi_latin) if hi_latin else None
+                candidates = tuple(c for c in (en_guarded or "", hi_guarded or "") if c)
             picked = pick_en_hi_transcript(en_text, hi_text)
             if not picked:
-                return TranscriptResult("", None)
+                return TranscriptResult("", None, candidates)
 
-            hi_latin, _ = _to_latin(hi_text)
             if (
                 en_guarded
                 and looks_like_english_prose(en_guarded)
@@ -806,7 +859,7 @@ class GroqClient:
                 (picked[:80] + "…") if len(picked) > 80 else picked,
             )
             return TranscriptResult(
-                picked, "en" if pick_reason == "en_prose" else "hi"
+                picked, "en" if pick_reason == "en_prose" else "hi", candidates
             )
         finally:
             if delete_audio:
@@ -814,6 +867,52 @@ class GroqClient:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
+
+    def _transcribe_auto(
+        self, path: Path, key: str, *, cancel: Event | None, started: float
+    ) -> TranscriptResult:
+        """One Whisper call with language auto-detect.
+
+        Forcing ``language=en`` turned Hindi speech into English-sounding junk
+        ("beedi jalaile" → "Play B.V") that still passed the English check, so
+        Hindi never won. Detected Hindi comes back in Devanagari and is
+        romanized to everyday Latin Hinglish. Whisper often labels Hinglish as
+        Urdu (Arabic script) or another language — retry forced Hindi then.
+        """
+        res = self.transcribe(path, key, cancel=cancel, delete_audio=False, language=None, prompt=None)
+        text = (res.text or "").strip()
+        lang = _normalize_lang(res.language)
+        reason = f"auto_{lang or 'unknown'}"
+        if lang not in {"en", "hi"}:
+            try:
+                hi_res = self.transcribe(
+                    path, key, cancel=cancel, delete_audio=False, language="hi", prompt=None
+                )
+            except GroqError as exc:
+                if exc.category == "cancelled" or _ARABIC_SCRIPT_RE.search(text) or not text:
+                    raise
+                hi_res = None
+            if hi_res is not None:
+                if _ARABIC_SCRIPT_RE.search(text) or not text:
+                    text, lang, reason = (hi_res.text or "").strip(), "hi", f"auto_{lang}_retry_hi"
+                else:
+                    # Latin text under an odd label: let the en/hi picker decide.
+                    picked = pick_en_hi_transcript(text, hi_res.text or "")
+                    text, lang, reason = picked or text, "hi", f"auto_{lang}_pick"
+        latin, romanized = _to_latin(text)
+        guarded = guard_transcription(latin) if latin else None
+        final = guarded or ""
+        self._logger.info(
+            "event=groq_transcribe_pick provider=groq reason=%s romanized=%s chars=%s "
+            "elapsed=%.2f raw_preview=%r preview=%r",
+            reason,
+            romanized,
+            len(final),
+            self._clock() - started,
+            (text[:60] + "…") if len(text) > 60 else text,
+            (final[:80] + "…") if len(final) > 80 else final,
+        )
+        return TranscriptResult(final, "en" if lang == "en" else "hi")
 
     def _polish_romanized(
         self, text: str, key: str, *, cancel: Event | None = None
