@@ -98,7 +98,8 @@ class Controller:
                  app_launcher: Any | None = None,
                  media_keys: Any | None = None,
                  jev: Any | None = None, jev_first: bool = False,
-                 jev_groq_fallback: bool = False):
+                 jev_groq_fallback: bool = False,
+                 warm_web: bool = False):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self.codex, self.result_window = codex, result_window
@@ -110,6 +111,8 @@ class Controller:
         self.jev_first = bool(jev_first)
         # With Jev on, Groq is STT only unless this opt-in backup is set.
         self.jev_groq_fallback = bool(jev_groq_fallback)
+        # Pre-open youtube.com on assistant press (runtime only; tests stay offline).
+        self.warm_web = bool(warm_web)
         self.amplitude_path = str(
             amplitude_path
             or os.environ.get("VAANI_AMPLITUDE_PATH")
@@ -201,6 +204,13 @@ class Controller:
                         warm(key)
                 except Exception:
                     pass
+                if assistant and self.warm_web:
+                    try:
+                        from .sites import warm_youtube
+
+                        warm_youtube()
+                    except Exception:
+                        pass
                 if assistant and self.jev is not None:
                     try:
                         warm_jev = getattr(self.jev, "warm", None)

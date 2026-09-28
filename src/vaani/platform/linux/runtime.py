@@ -194,6 +194,7 @@ def _run_x11(settings: Settings) -> int:
         jev=_build_jev(logger),
         jev_first=jev_first(),
         jev_groq_fallback=jev_groq_fallback(),
+        warm_web=True,
     )
     assistant = CodexRunner()
 

@@ -72,6 +72,7 @@ def run_wayland(settings: Settings) -> int:
     controller.jev = _build_jev(logger)
     controller.jev_first = jev_first()
     controller.jev_groq_fallback = jev_groq_fallback()
+    controller.warm_web = True
     assistant = CodexRunner()
 
     def show_assistant_result(text: str) -> None:

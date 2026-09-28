@@ -83,20 +83,60 @@ def _looks_like_rickroll(text: str) -> bool:
     return bool(re.search(r"\b(rick|reck|wreck|ric)\b.{0,16}\broll\b", normalized))
 
 
-def _youtube_search_html(query: str, *, sp: str | None = None, timeout: float = 2.5) -> str | None:
-    from urllib.parse import quote_plus
-    from urllib.request import Request, urlopen
+_YT_CLIENT = None
+_YT_LOCK = __import__("threading").Lock()
+_YT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+# Enough of ytInitialData to hold the first ~20 results; stop reading there.
+_YT_EARLY_STOP_IDS = 12
 
-    url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
-    if sp:
-        url = f"{url}&sp={sp}"
-    req = Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Vaani/0.1"},
-    )
+
+def _yt_client():
+    """Pooled gzip client: the results page is ~1MB raw / ~150KB gzipped, and a
+    kept-alive socket skips the TLS handshake (urllib paid both every time)."""
+    global _YT_CLIENT
+    with _YT_LOCK:
+        if _YT_CLIENT is None:
+            import httpx
+
+            _YT_CLIENT = httpx.Client(
+                headers=_YT_HEADERS,
+                follow_redirects=True,
+                limits=httpx.Limits(max_keepalive_connections=2, keepalive_expiry=120.0),
+            )
+        return _YT_CLIENT
+
+
+def warm_youtube() -> None:
+    """Open the YouTube connection while the user is still speaking."""
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "ignore")
+        _yt_client().head("https://www.youtube.com/", timeout=3.0)
+    except Exception:
+        pass
+
+
+def _youtube_search_html(query: str, *, sp: str | None = None, timeout: float = 2.5) -> str | None:
+    params = {"search_query": query}
+    if sp:
+        from urllib.parse import unquote
+
+        params["sp"] = unquote(sp)
+    try:
+        chunks: list[str] = []
+        seen = 0
+        with _yt_client().stream(
+            "GET", "https://www.youtube.com/results", params=params, timeout=timeout
+        ) as resp:
+            if resp.status_code >= 400:
+                return None
+            for text in resp.iter_text():
+                chunks.append(text)
+                seen += text.count('"videoId":"')
+                if seen >= _YT_EARLY_STOP_IDS:
+                    break
+        return "".join(chunks)
     except Exception:
         return None
 
