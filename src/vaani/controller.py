@@ -83,13 +83,17 @@ class Controller:
                  indicator_control_path: str | os.PathLike[str] | None = None,
                  browser_launcher: Any | None = None,
                  app_launcher: Any | None = None,
-                 media_keys: Any | None = None):
+                 media_keys: Any | None = None,
+                 jev: Any | None = None, jev_first: bool = False):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
         self.codex, self.result_window = codex, result_window
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
         self.media_keys = media_keys
+        # Jev (OpenRouter tool-calling brain). None → Groq router only.
+        self.jev = jev
+        self.jev_first = bool(jev_first)
         self.amplitude_path = str(
             amplitude_path
             or os.environ.get("VAANI_AMPLITUDE_PATH")
@@ -373,11 +377,12 @@ class Controller:
                         self.codex.cancel()
                 except Exception:
                     pass
-                try:
-                    if self.groq is not None and hasattr(self.groq, "reset"):
-                        self.groq.reset()
-                except Exception:
-                    pass
+                for client in (self.groq, self.jev):
+                    try:
+                        if client is not None and hasattr(client, "reset"):
+                            client.reset()
+                    except Exception:
+                        pass
                 self.state = AppState.IDLE
                 self._feedback("busy"); self._emit("cancelled")
                 worker = self._worker
@@ -695,6 +700,13 @@ class Controller:
             self._assistant_codex(token, audio, handoff, confirmed=True)
             return
 
+        # VAANI_JEV_FIRST: let Jev decide everything (A/B vs fast paths).
+        if self.jev is not None and self.jev_first:
+            decision = self._jev_route(raw)
+            if decision is not None:
+                self._dispatch_decision(token, audio, key, raw, result, decision)
+                return
+
         # Same-session follow-up ("continue…", "update on that…") — resume or clarify.
         # Fast path: deterministic resolvers (no LLM).
         # Media before session-continue so "resume" / "continue playing"
@@ -720,9 +732,11 @@ class Controller:
         if self._assistant_try_skill(token, audio, raw):
             return
 
-        route_fn = getattr(self.groq, "route", None)
         decision: RouteDecision | None = None
-        if callable(route_fn):
+        if self.jev is not None and not self.jev_first:
+            decision = self._jev_route(raw)
+        route_fn = getattr(self.groq, "route", None)
+        if decision is None and callable(route_fn):
             try:
                 decision = route_fn(raw, key, cancel=self._cancel)
             except Exception as exc:
@@ -754,6 +768,34 @@ class Controller:
             )
             return
 
+        self._dispatch_decision(token, audio, key, raw, result, decision)
+
+    def _jev_route(self, raw: str) -> RouteDecision | None:
+        """Ask Jev; None on any failure so the Groq router takes over."""
+        context = None
+        try:
+            context = load_context() or None
+        except Exception:
+            context = None
+        try:
+            return self.jev.route(raw, cancel=self._cancel, context=context)
+        except Exception as exc:
+            self.logger.warning(
+                "event=jev_route_failed category=%s detail=%s",
+                getattr(exc, "category", "-"),
+                type(exc).__name__,
+            )
+            return None
+
+    def _dispatch_decision(
+        self,
+        token: int,
+        audio: Any,
+        key: str,
+        raw: str,
+        result: Any,
+        decision: RouteDecision,
+    ) -> None:
         self.logger.info(
             "event=assistant_intent kind=%s target=%s confidence=%.2f chars=%s",
             decision.intent,
@@ -868,6 +910,16 @@ class Controller:
     ) -> None:
         intent = decision.intent
         query = decision.query or raw
+        if intent == "qa" and getattr(decision, "answer", ""):
+            # Jev already answered in the routing call — no second LLM hop.
+            self._assistant_qa(token, audio, key, raw, result, answer=decision.answer)
+            return
+        if intent in {"media", "volume"}:
+            try_fn = self._assistant_try_media if intent == "media" else self._assistant_try_volume
+            if try_fn(token, audio, query):
+                return
+            self._assistant_qa(token, audio, key, raw, result, answer="Couldn't do that here.")
+            return
         if (decision.target or "").casefold() == "cancel":
             with self._lock:
                 if self._cancel.is_set() or token != self._token:
@@ -1001,21 +1053,25 @@ class Controller:
         )
 
     def _assistant_qa(
-        self, token: int, audio: Any, key: str, raw: str, result: Any
+        self, token: int, audio: Any, key: str, raw: str, result: Any,
+        *, answer: str | None = None,
     ) -> None:
-        answer_fn = getattr(self.groq, "answer", None)
-        if answer_fn is None:
-            raise RuntimeError("answer mode unavailable")
-        prior = ""
-        try:
-            prior = load_context()
-        except Exception:
+        if answer:
+            final = answer
+        else:
+            answer_fn = getattr(self.groq, "answer", None)
+            if answer_fn is None:
+                raise RuntimeError("answer mode unavailable")
             prior = ""
-        try:
-            answered = answer_fn(raw, key, cancel=self._cancel, context=prior or None)
-        except TypeError:
-            answered = answer_fn(raw, key, cancel=self._cancel)
-        final = answered.text
+            try:
+                prior = load_context()
+            except Exception:
+                prior = ""
+            try:
+                answered = answer_fn(raw, key, cancel=self._cancel, context=prior or None)
+            except TypeError:
+                answered = answer_fn(raw, key, cancel=self._cancel)
+            final = answered.text
         if self._cancel.is_set() or token != self._token:
             return
         try:
