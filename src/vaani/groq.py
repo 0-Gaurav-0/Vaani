@@ -130,7 +130,49 @@ def guard_transcription(text: str, prompt: str | None = None) -> str | None:
         cleaned = nxt
     if not cleaned or _JUNK_ONLY_RE.fullmatch(cleaned):
         return None
-    return cleaned
+    return apply_vocab(cleaned)
+
+
+# Names Whisper splits or mis-cases. Extend in ~/.config/vaani/vocab.json:
+# {"sales handy": "Saleshandy", "jev": "Jev"} (keys matched case-insensitively,
+# on word boundaries).
+DEFAULT_VOCAB = {"sales handy": "Saleshandy", "sales handi": "Saleshandy"}
+_VOCAB_CACHE: tuple[float, list[tuple[re.Pattern, str]]] | None = None
+
+
+def _vocab_rules() -> list[tuple[re.Pattern, str]]:
+    global _VOCAB_CACHE
+    from pathlib import Path as _Path
+    import json as _json
+
+    path = _Path(os.environ.get("XDG_CONFIG_HOME") or _Path.home() / ".config") / "vaani" / "vocab.json"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if _VOCAB_CACHE is not None and _VOCAB_CACHE[0] == mtime:
+        return _VOCAB_CACHE[1]
+    vocab = dict(DEFAULT_VOCAB)
+    if mtime:
+        try:
+            extra = _json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(extra, dict):
+                vocab.update({str(k): str(v) for k, v in extra.items() if str(k).strip()})
+        except (OSError, ValueError):
+            pass
+    rules = [
+        (re.compile(r"(?<![\w])" + re.escape(k) + r"(?![\w])", re.IGNORECASE), v)
+        for k, v in sorted(vocab.items(), key=lambda kv: -len(kv[0]))
+    ]
+    _VOCAB_CACHE = (mtime, rules)
+    return rules
+
+
+def apply_vocab(text: str) -> str:
+    out = text
+    for pattern, repl in _vocab_rules():
+        out = pattern.sub(repl, out)
+    return out
 
 
 _FILLER_RE = re.compile(
@@ -210,6 +252,25 @@ class TranscriptResult:
     # Assistant mode: (english_pass, hindi_pass_romanized) for the router to
     # reconcile when they disagree (en mangles Hindi words, hi mangles English).
     candidates: tuple[str, ...] = ()
+
+
+# Hindi pass prompt written the way people code-mix: Hindi in Devanagari,
+# English words in Latin. Biases Whisper-hi to keep "meeting", "play",
+# "YouTube" in English instead of मीटिंग/प्ले/यूट्यूब (which romanize to
+# "meetinga"/"sentar"). Never used on the English/auto pass.
+CODEMIX_PROMPT = (
+    "मैं कल की meeting के लिए report भेज दूँगा, फिर dashboard check करना "
+    "और YouTube पे song play कर देना।"
+)
+
+
+def echoes_prompt(text: str, prompt: str = CODEMIX_PROMPT) -> bool:
+    """Whisper sometimes returns (part of) the prompt instead of the audio."""
+    words = [w for w in re.findall(r"[\w\u0900-\u097F]+", prompt.casefold()) if len(w) > 1]
+    got = set(re.findall(r"[\w\u0900-\u097F]+", (text or "").casefold()))
+    if not words or not got:
+        return False
+    return sum(1 for w in words if w in got) / len(words) >= 0.5
 
 
 def stt_lang_mode() -> str:
@@ -768,7 +829,7 @@ class GroqClient:
                 pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaani-stt-hi")
                 hi_future = pool.submit(
                     self.transcribe, path, key, cancel=cancel, delete_audio=False,
-                    language="hi", prompt=None,
+                    language="hi", prompt=CODEMIX_PROMPT,
                 )
                 pool.shutdown(wait=False)
             try:
@@ -829,6 +890,9 @@ class GroqClient:
                 raise
 
             hi_text = hi_res.text or ""
+            if hi_future is not None and echoes_prompt(hi_text):
+                self._logger.info("event=stt_prompt_echo pass=hi")
+                hi_text = ""
             hi_latin, _ = _to_latin(hi_text)
             candidates: tuple[str, ...] = ()
             if hi_future is not None:
@@ -886,8 +950,10 @@ class GroqClient:
         if lang not in {"en", "hi"}:
             try:
                 hi_res = self.transcribe(
-                    path, key, cancel=cancel, delete_audio=False, language="hi", prompt=None
+                    path, key, cancel=cancel, delete_audio=False, language="hi", prompt=CODEMIX_PROMPT
                 )
+                if echoes_prompt(hi_res.text or ""):
+                    hi_res = TranscriptResult("", "hi")
             except GroqError as exc:
                 if exc.category == "cancelled" or _ARABIC_SCRIPT_RE.search(text) or not text:
                     raise
@@ -899,6 +965,20 @@ class GroqClient:
                     # Latin text under an odd label: let the en/hi picker decide.
                     picked = pick_en_hi_transcript(text, hi_res.text or "")
                     text, lang, reason = picked or text, "hi", f"auto_{lang}_pick"
+        if lang == "hi" and text and reason == "auto_hi":
+            # Hindi detected: redo as code-mixed Hindi so English words stay English.
+            try:
+                cm = self.transcribe(
+                    path, key, cancel=cancel, delete_audio=False, language="hi", prompt=CODEMIX_PROMPT
+                )
+                cm_text = (cm.text or "").strip()
+                if cm_text and not echoes_prompt(cm_text):
+                    text, reason = cm_text, reason + "_codemix"
+                elif cm_text:
+                    self._logger.info("event=stt_prompt_echo pass=codemix")
+            except GroqError as exc:
+                if exc.category == "cancelled":
+                    raise
         latin, romanized = _to_latin(text)
         guarded = guard_transcription(latin) if latin else None
         final = guarded or ""
