@@ -1084,13 +1084,14 @@ class Controller:
                 query or raw,
                 confirmed=True,
                 resume_session=resume,
+                utterance=raw,
             )
             return
 
         if intent == "skill":
             if self._assistant_try_skill(token, audio, query or raw):
                 return
-            self._assistant_codex(token, audio, query or raw, confirmed=True)
+            self._assistant_codex(token, audio, query or raw, confirmed=True, utterance=raw)
             return
 
         # paste / unknown
@@ -1231,6 +1232,7 @@ class Controller:
         prompt: str | None = None,
         skill_id: str | None = None,
         resume_session: str | None = None,
+        utterance: str | None = None,
     ) -> None:
         if self.codex is None:
             raise RuntimeError("assistant runner unavailable")
@@ -1238,7 +1240,11 @@ class Controller:
         # Hard gate: Hermes via Vaani is read-only (no confirm override).
         # Scan only the user utterance — skill markdown documents write CLIs
         # and must not trip the gate. Local open/play/media never reach here.
-        if looks_like_agent_mutation(raw):
+        # ``raw`` may be a router-written brief (Jev/Groq); also scan what the
+        # user actually said so a rewrite can't launder a mutation request.
+        if looks_like_agent_mutation(raw) or (
+            utterance is not None and looks_like_agent_mutation(utterance)
+        ):
             self.logger.info(
                 "event=agent_mutation_rejected chars=%s preview=%r",
                 len(raw or ""),

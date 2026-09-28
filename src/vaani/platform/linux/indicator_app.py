@@ -654,8 +654,10 @@ def run_gtk(
             state["hidden_phase"] = until_phase_changes
             if state.get("hidden"):
                 return
-            _reset_to_pill()
+            # Mark hidden first: _reset_to_pill() calls place(), which must
+            # park offscreen rather than flash the pill for one frame.
             state["hidden"] = True
+            _reset_to_pill()
             state["press"] = None
             state["hover_btn"] = None
             place()
