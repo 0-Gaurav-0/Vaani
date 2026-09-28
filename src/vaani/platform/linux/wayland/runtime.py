@@ -66,6 +66,11 @@ def run_wayland(settings: Settings) -> int:
         browser_launcher=browser,
         app_launcher=apps,
     )
+    from ..runtime import _build_jev
+    from ...jev import jev_first
+
+    controller.jev = _build_jev(logger)
+    controller.jev_first = jev_first()
     assistant = CodexRunner()
 
     def show_assistant_result(text: str) -> None:

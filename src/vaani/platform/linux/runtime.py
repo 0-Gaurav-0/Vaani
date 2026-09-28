@@ -23,6 +23,17 @@ from ..protocol import PlatformBundle, PlatformId
 from .apps import LinuxAppLauncher
 from .browser import LinuxBrowserLauncher
 from .feedback import LinuxFeedback
+from ...jev import JevClient, jev_enabled, jev_first
+
+
+def _build_jev(logger):
+    """Jev brain on OpenRouter when OPENROUTER_API_KEY is set (else None)."""
+    if not jev_enabled():
+        logger.info("event=jev_disabled")
+        return None
+    client = JevClient()
+    logger.info("event=jev_enabled models=%s first=%s", ",".join(client.models), jev_first())
+    return client
 
 
 def _reap_orphan_indicators() -> None:
@@ -179,6 +190,8 @@ def _run_x11(settings: Settings) -> int:
         browser_launcher=browser,
         app_launcher=apps,
         media_keys=media_keys,
+        jev=_build_jev(logger),
+        jev_first=jev_first(),
     )
     assistant = CodexRunner()
 
