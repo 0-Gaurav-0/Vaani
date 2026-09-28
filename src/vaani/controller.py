@@ -312,9 +312,9 @@ class Controller:
             token = self._token; self.state = AppState.PROCESSING; self._emit("processing"); self._cancel.clear()
             self._snap_armed_session = False
         self._stop_snap_watcher()
-        # Keep the session monitor alive during PROCESSING so the pill can
-        # cancel, and so we can show a processing phase. Mic is released below.
-        self._feedback("processing")
+        # Release the mic first: the processing cue used to run (and block on)
+        # paplay here, adding ~1.1s of dead air before upload. The session
+        # monitor stays alive during PROCESSING so the pill can still cancel.
         try: audio = self.recorder.stop()
         except Exception as exc:
             self._amplitude_stop.set()
@@ -332,6 +332,7 @@ class Controller:
                 return False
             self._fail(exc, "mic")
             return False
+        self._feedback("processing")
         worker = threading.Thread(target=self._process, args=(token, audio), daemon=True)
         self._worker = worker; worker.start(); return True
 

@@ -40,6 +40,12 @@ ANSWER_TOP = 16.0
 ANSWER_TEXT_BOTTOM_PAD = 16.0
 ANSWER_RADIUS = 16.0
 ANSWER_ANIM_MS = 280
+# Button press feedback: quick squeeze + halo ring.
+PRESS_ANIM_MS = 220
+# Hidden (idle) pill parks here: mapped but invisible and click-through.
+OFFSCREEN = (-4000, -4000)
+# If the daemon never answers a pill click, hide locally after this.
+REQUEST_FALLBACK_HIDE_MS = 1500
 
 
 def _ease_smooth(t: float) -> float:
@@ -531,6 +537,12 @@ def run_gtk(
             "anim_to": None,
             "anim_progress": 1.0,
             "anim_mode": "expand",
+            # Persistent pill: hidden while the daemon phase is "idle", or after a
+            # local dismiss until the daemon moves to a different phase.
+            "hidden": read_phase(phase_path) == "idle",
+            "hidden_phase": None,
+            "press": None,  # (button, monotonic t) — "left" | "right" | ("option", i)
+            "hover_btn": None,
         }
 
         def size() -> tuple[int, int]:
@@ -545,13 +557,26 @@ def run_gtk(
                 pass
             try:
                 if hasattr(surface, "set_input_region"):
-                    surface.set_input_region(
-                        cairo.Region(cairo.RectangleInt(0, 0, w, h))
+                    region = (
+                        cairo.Region()
+                        if state.get("hidden")
+                        else cairo.Region(cairo.RectangleInt(0, 0, w, h))
                     )
+                    surface.set_input_region(region)
             except Exception:
                 pass
 
         def place(x: int | None = None, y: int | None = None) -> bool:
+            if state.get("hidden"):
+                surface = win.get_surface()
+                if surface is None:
+                    return False
+                apply_chrome(surface)
+                xid = _surface_xid(surface)
+                if xid is None:
+                    return False
+                x11.prepare(xid)
+                return x11.move(xid, OFFSCREEN[0], OFFSCREEN[1])
             ox_, oy_, sw_, sh_ = _screen_geometry(display)
             w, h = size()
             px_ = int(state["x"] if x is None else x)
@@ -608,13 +633,47 @@ def run_gtk(
                     pass
                 state["dismiss_id"] = None
 
+        def _reset_to_pill() -> None:
+            """Drop any answer-card state and snap back to pill geometry."""
+            _cancel_dismiss_timer()
+            state["options"] = []
+            state["option_hit"] = None
+            state["anim_t0"] = 0.0
+            state["anim_from"] = state["anim_to"] = None
+            anchor = state.get("record_anchor")
+            if state.get("answer_active") and isinstance(anchor, tuple) and len(anchor) == 2:
+                state["x"], state["y"] = int(anchor[0]), int(anchor[1])
+            _finish_collapse_to_recording()
+
+        def _hide(until_phase_changes: str | None = None) -> None:
+            if state.get("answer_active"):
+                try:
+                    persist_position()
+                except Exception:
+                    pass
+            state["hidden_phase"] = until_phase_changes
+            if state.get("hidden"):
+                return
+            _reset_to_pill()
+            state["hidden"] = True
+            state["press"] = None
+            state["hover_btn"] = None
+            place()
+            area.queue_draw()
+
+        def _show() -> None:
+            if not state.get("hidden"):
+                return
+            state["hidden"] = False
+            state["hidden_phase"] = None
+            state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S
+            # Mutter can ignore the first configure — same retries as startup.
+            for delay in (0, 40, 120):
+                GLib.timeout_add(delay, lambda: (place(), False)[1])
+
         def _dismiss_answer_ui() -> None:
             _cancel_dismiss_timer()
-            try:
-                persist_position()
-            except Exception:
-                pass
-            win.close()
+            _hide(until_phase_changes=read_phase(phase_path))
 
         def _dismiss_answer() -> bool:
             state["dismiss_id"] = None
@@ -725,6 +784,31 @@ def run_gtk(
                 )
                 _schedule_dismiss(dismiss_ms + ANSWER_ANIM_MS)
 
+        def _press_progress(button: Any) -> float | None:
+            """0..1 through the press animation for ``button``, else None."""
+            press = state.get("press")
+            if not press or press[0] != button:
+                return None
+            k = (time.monotonic() - float(press[1])) / (PRESS_ANIM_MS / 1000.0)
+            if k >= 1.0:
+                return None
+            return max(0.0, k)
+
+        def _draw_button_feedback(cr, bx: float, cy: float, r: float, button: str, a: float) -> float:
+            """Hover glow + press halo. Returns the squeeze scale for the icon."""
+            k = _press_progress(button)
+            if state.get("hover_btn") == button and k is None:
+                cr.set_source_rgba(1, 1, 1, 0.10 * a)
+                cr.arc(bx, cy, r + 3.0, 0, 2 * math.pi)
+                cr.fill()
+            if k is None:
+                return 1.0
+            cr.set_source_rgba(1, 1, 1, 0.45 * (1.0 - k) * a)
+            cr.set_line_width(2.0)
+            cr.arc(bx, cy, r + 2.0 + 8.0 * k, 0, 2 * math.pi)
+            cr.stroke()
+            return 1.0 - 0.2 * math.sin(math.pi * k)
+
         def _draw_control_strip(
             cr, width: int, height: int, *, phase: str, alpha: float = 1.0
         ) -> None:
@@ -735,16 +819,20 @@ def run_gtk(
             cy = height - HEIGHT / 2.0
             btn_r = 12.0
             cx = 18.0
-            cr.set_source_rgba(0.18, 0.19, 0.22, 0.88 * a)
-            cr.arc(cx, cy, btn_r, 0, 2 * math.pi)
+            sq = _draw_button_feedback(cr, cx, cy, btn_r, "left", a)
+            pressed = _press_progress("left") is not None
+            shade = 0.34 if pressed else 0.18
+            cr.set_source_rgba(shade, shade + 0.01, shade + 0.04, 0.88 * a)
+            cr.arc(cx, cy, btn_r * sq, 0, 2 * math.pi)
             cr.fill()
             cr.set_source_rgba(0.95, 0.96, 0.98, 0.95 * a)
             cr.set_line_width(1.7)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.move_to(cx - 4, cy - 4)
-            cr.line_to(cx + 4, cy + 4)
-            cr.move_to(cx + 4, cy - 4)
-            cr.line_to(cx - 4, cy + 4)
+            d = 4.0 * sq
+            cr.move_to(cx - d, cy - d)
+            cr.line_to(cx + d, cy + d)
+            cr.move_to(cx + d, cy - d)
+            cr.line_to(cx - d, cy + d)
             cr.stroke()
 
             if phase == "processing":
@@ -775,15 +863,18 @@ def run_gtk(
 
             # Always show the confirm/stop control — including during processing.
             kx = width - 18.0
-            cr.set_source_rgba(0.95, 0.96, 0.98, 0.95 * a)
-            cr.arc(kx, cy, btn_r, 0, 2 * math.pi)
+            sq = _draw_button_feedback(cr, kx, cy, btn_r, "right", a)
+            pressed = _press_progress("right") is not None
+            fill = 0.78 if pressed else 0.95
+            cr.set_source_rgba(fill, fill + 0.01, fill + 0.03, 0.95 * a)
+            cr.arc(kx, cy, btn_r * sq, 0, 2 * math.pi)
             cr.fill()
             cr.set_source_rgba(0.14, 0.15, 0.18, 0.95 * a)
             cr.set_line_width(1.8)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.move_to(kx - 4.2, cy)
-            cr.line_to(kx - 1.0, cy + 3.4)
-            cr.line_to(kx + 4.6, cy - 3.4)
+            cr.move_to(kx - 4.2 * sq, cy)
+            cr.line_to(kx - 1.0 * sq, cy + 3.4 * sq)
+            cr.line_to(kx + 4.6 * sq, cy - 3.4 * sq)
             cr.stroke()
 
         def draw(_area, cr, width: int, height: int) -> None:
@@ -792,6 +883,8 @@ def run_gtk(
             cr.paint()
             cr.set_operator(cairo.OPERATOR_OVER)
 
+            if state.get("hidden"):
+                return
             phase = read_phase(phase_path)
             if phase == "answer" or state.get("answer_active"):
                 progress = _answer_progress()
@@ -847,6 +940,17 @@ def run_gtk(
                     )
                     y += ANSWER_GAP
                     option_y0 = y
+                    press = state.get("press")
+                    if press and isinstance(press[0], tuple):
+                        k = _press_progress(press[0])
+                        if k is not None:
+                            row = int(press[0][1])
+                            ry = option_y0 - ANSWER_A_LINE * 0.78 + row * ANSWER_A_LINE
+                            cr.set_source_rgba(1, 1, 1, 0.16 * (1.0 - 0.5 * k) * text_a)
+                            cr.rectangle(
+                                text_left - 6, ry, text_width + 12, ANSWER_A_LINE
+                            )
+                            cr.fill()
                     for line in a_lines[:7]:
                         cr.move_to(text_left, y)
                         cr.show_text(line)
@@ -893,9 +997,24 @@ def run_gtk(
                 persist_position()
             except Exception:
                 pass
-            win.close()
+            # Stay visible: the daemon's next phase (processing / idle) drives the
+            # pill. Only hide locally if the daemon never reacts.
+            clicked_phase = read_phase(phase_path)
+
+            def _fallback() -> bool:
+                if not state.get("hidden") and read_phase(phase_path) == clicked_phase:
+                    _hide(until_phase_changes=clicked_phase)
+                return False
+
+            GLib.timeout_add(REQUEST_FALLBACK_HIDE_MS, _fallback)
+
+        def _press(button: Any) -> None:
+            state["press"] = (button, time.monotonic())
+            area.queue_draw()
 
         def on_click_pressed(_gesture, _n, x: float, y: float) -> None:
+            if state.get("hidden"):
+                return
             armed_at = float(state.get("click_armed_at") or 0.0)
             if time.monotonic() < armed_at:
                 return
@@ -919,15 +1038,22 @@ def run_gtk(
                                     f"[vaani] indicator: option_{idx} failed: {exc!r}",
                                     flush=True,
                                 )
-                            _dismiss_answer_ui()
+                            # Flash the picked row, then dismiss.
+                            _press(("option", idx))
+                            GLib.timeout_add(
+                                PRESS_ANIM_MS,
+                                lambda: (_dismiss_answer_ui(), False)[1],
+                            )
                             return
                 # No option hit — dismiss card.
                 _dismiss_answer_ui()
                 return
             if x < HIT_PAD:
+                _press("left")
                 _request("cancel")
                 return
             if x > size()[0] - HIT_PAD:
+                _press("right")
                 # Recording: stop. Processing: cancel wait. Same visible control.
                 if phase == "processing":
                     _request("cancel")
@@ -987,6 +1113,7 @@ def run_gtk(
 
         def on_leave(*_args) -> None:
             state["hover"] = False
+            state["hover_btn"] = None
             if state["answer_active"] and state.get("anim_mode") != "collapse":
                 leave_ms = (
                     ANSWER_CLARIFY_DISMISS_MS
@@ -995,8 +1122,20 @@ def run_gtk(
                 )
                 _schedule_dismiss(leave_ms)
 
+        def on_motion(_ctl, x: float, _y: float) -> None:
+            if state.get("answer_active") or state.get("hidden"):
+                state["hover_btn"] = None
+                return
+            if x < HIT_PAD:
+                state["hover_btn"] = "left"
+            elif x > size()[0] - HIT_PAD:
+                state["hover_btn"] = "right"
+            else:
+                state["hover_btn"] = None
+
         motion.connect("enter", on_enter)
         motion.connect("leave", on_leave)
+        motion.connect("motion", on_motion)
         area.add_controller(motion)
 
         def on_close(*_args):
@@ -1007,8 +1146,39 @@ def run_gtk(
                 pass
             return False
 
+        daemon_pid = int(os.environ.get("VAANI_DAEMON_PID") or 0)
+
         def tick() -> bool:
             phase = read_phase(phase_path)
+            # Persistent pill must not outlive its daemon.
+            state["ticks"] = int(state.get("ticks") or 0) + 1
+            if daemon_pid > 1 and state["ticks"] % 60 == 0:
+                try:
+                    os.kill(daemon_pid, 0)
+                except ProcessLookupError:
+                    application.quit()
+                    return False
+                except OSError:
+                    pass
+            if phase == "idle":
+                press = state.get("press")
+                if (
+                    not state.get("hidden")
+                    and press
+                    and time.monotonic() - float(press[1]) < PRESS_ANIM_MS / 1000.0
+                ):
+                    # Let the click animation finish before hiding.
+                    area.queue_draw()
+                    return True
+                if not state.get("hidden"):
+                    _hide()
+                state["hidden_phase"] = None
+                state["last_phase"] = phase
+                return True
+            if state.get("hidden"):
+                if phase == state.get("hidden_phase"):
+                    return True
+                _show()
             prev = state.get("last_phase")
             if phase != prev:
                 state["last_phase"] = phase
@@ -1049,6 +1219,7 @@ def run_gtk(
         win.connect("close-request", on_close)
         GLib.timeout_add(33, tick)
         state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S
+        # Starts hidden (offscreen, click-through) when prewarmed with phase=idle.
         win.present()
         # Re-apply after map; Mutter/GTK can ignore the first configure.
         for delay in (0, 50, 120, 250):

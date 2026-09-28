@@ -16,7 +16,8 @@ Phase = Literal["recording", "processing", "answer"]
 ALLOWED: frozenset[str] = frozenset(
     {"stop", "cancel", "option_0", "option_1", "option_2", "option_3", "option_4"}
 )
-ALLOWED_PHASES: frozenset[str] = frozenset({"recording", "processing", "answer"})
+# "idle" = persistent pill process stays alive but hidden (instant next show).
+ALLOWED_PHASES: frozenset[str] = frozenset({"recording", "processing", "answer", "idle"})
 
 
 def control_path(cache_dir: Path | str) -> Path:

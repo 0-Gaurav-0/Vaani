@@ -157,6 +157,11 @@ def _run_x11(settings: Settings) -> int:
         control_path=settings.indicator_control_path,
         log_dir=settings.log_dir,
     )
+    # Warm, hidden pill: first press shows instantly (no python+GTK spawn).
+    try:
+        feedback.prewarm()
+    except Exception:
+        pass
     groq = GroqClient()
     store = SecretServiceKeyStore()
     apps = LinuxAppLauncher()
@@ -387,6 +392,10 @@ def _run_x11(settings: Settings) -> int:
             pass
         try:
             _reap_orphan_mic()
+        except Exception:
+            pass
+        try:
+            feedback.shutdown()
         except Exception:
             pass
         try:
