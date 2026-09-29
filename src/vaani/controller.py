@@ -6,6 +6,7 @@ hotkey path usable with real or test implementations.
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 import struct, math, os
@@ -20,6 +21,8 @@ from .groq import GroqError, candidates_agree, guard_transcription, light_local_
 from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
 from .folders import launch_folder, resolve_folder, resolve_folder_name
+from .projects import EditorRequest, default_editor, open_in_editor, parse_editor_request, project_index, resolve_editor
+from .app_typing import TypeRequest, WindowWatcher, class_hints, parse_type_request, wait_for_app_window
 from .volume import resolve_volume_action, run_volume_action
 from .media import resolve_media_action, run_media_action
 from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
@@ -874,6 +877,12 @@ class Controller:
             )
             return
 
+        # Multi-step and project opens run before the plain app launcher, which
+        # would otherwise just open "VS Code" / "Text Editor" and drop the rest.
+        if self._assistant_try_type(token, audio, raw):
+            return
+        if self._assistant_try_project(token, audio, raw):
+            return
         if self._assistant_try_app(token, audio, raw):
             return
         if self._assistant_try_folder(token, audio, raw):
@@ -1096,6 +1105,16 @@ class Controller:
         if intent == "qa" and getattr(decision, "answer", ""):
             # Jev already answered in the routing call — no second LLM hop.
             self._assistant_qa(token, audio, key, raw, result, answer=decision.answer)
+            return
+        if intent == "project":
+            editor = resolve_editor(decision.target or "") if decision.target else None
+            req = EditorRequest(query, editor)
+            if self._assistant_try_project(token, audio, raw, request=req):
+                return
+        if intent == "type_in_app" and getattr(decision, "text", ""):
+            if self._assistant_try_type(token, audio, raw, request=TypeRequest(query, decision.text)):
+                return
+            self._assistant_qa(token, audio, key, raw, result, answer=f"Couldn't find an app called “{query}”.")
             return
         if intent in {"media", "volume"}:
             try_fn = self._assistant_try_media if intent == "media" else self._assistant_try_volume
@@ -1712,6 +1731,116 @@ class Controller:
             self.state = AppState.IDLE
             self._emit("assistant_complete")
             self._feedback("success")
+        return True
+
+    def _finish_action(self, token: int, audio: Any, raw: str, answer: str, status: str) -> None:
+        if self.result_window is not None and hasattr(self.result_window, "show_text"):
+            self.result_window.show_text(answer)
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return
+            self.history.insert(
+                raw_text=raw,
+                final_text=answer,
+                mode="assistant",
+                delivery_status="displayed",
+                cleanup_status=status,
+                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+            )
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
+            self._feedback("success")
+
+    def _assistant_try_project(
+        self, token: int, audio: Any, raw: str, *, request: EditorRequest | None = None
+    ) -> bool:
+        """"open vaani in cursor" / "flow repo vs code mein kholo"."""
+        req = request or parse_editor_request(raw)
+        if req is None:
+            return False
+        match = project_index().find(req.project)
+        if match is None:
+            if req.editor is None and request is None:
+                # "open slack workspace" — not a project; let the app path try.
+                return False
+            answer = f"Couldn't find a project called “{req.project}”."
+            self.logger.info("event=project_not_found spoken=%r", req.project[:60])
+            self._finish_action(token, audio, raw, answer, "project_not_found")
+            return True
+        editor = req.editor or default_editor()
+        self.logger.info("event=assistant_route kind=project path=%s editor=%s", match.path, editor.key)
+        answer = open_in_editor(match, editor)
+        self._finish_action(token, audio, raw, answer, "project_action")
+        return True
+
+    # Tests inject a fake; runtime lazily opens an X11 connection.
+    window_watcher_factory: Callable[[], Any] | None = None
+
+    def _assistant_try_type(
+        self, token: int, audio: Any, raw: str, *, request: TypeRequest | None = None
+    ) -> bool:
+        """"open text editor and write buy milk": launch, wait for its window, paste."""
+        req = request or parse_type_request(raw)
+        if req is None:
+            return False
+        target = resolve_app_name(req.app)
+        if target is None:
+            return False
+        exe = next((path for name in target.executables if (path := shutil.which(name))), "")
+        if os.path.basename(exe) in {"gedit", "gnome-text-editor"} and "--new-document" not in target.arguments:
+            # Fresh document so we never type into an existing file.
+            target = type(target)(target.name, target.executables, (*target.arguments, "--new-document"), target.desktop_id)
+        watcher = None
+        before = None
+        try:
+            factory = self.window_watcher_factory or WindowWatcher
+            watcher = factory()
+            before, _cls = watcher.active()
+        except Exception:
+            watcher = None
+        self.logger.info("event=assistant_route kind=app_type name=%s chars=%s", target.name, len(req.text))
+        launched = (
+            self.app_launcher.launch(target) if self.app_launcher is not None else launch_app(target)
+        )
+        if launched.startswith("Unable"):
+            self._finish_action(token, audio, raw, launched, "app_type_failed")
+            return True
+        focused = False
+        if watcher is not None:
+            try:
+                focused = wait_for_app_window(
+                    watcher, class_hints(exe or target.executables[0], target.name), before=before
+                )
+            finally:
+                close = getattr(watcher, "close", None)
+                if callable(close):
+                    close()
+        if self._cancel.is_set() or token != self._token:
+            return True
+        status = None
+        if focused and self.delivery is not None:
+            try:
+                status = self.delivery.deliver(req.text)
+            except Exception:
+                status = None
+        if status == DeliveryStatus.PASTE_DISPATCHED:
+            answer = f"Opened {target.name} and wrote it."
+        else:
+            clip = getattr(getattr(self.delivery, "clipboard", None), "set_text", None)
+            copied = False
+            if callable(clip):
+                try:
+                    clip(req.text)
+                    copied = True
+                except Exception:
+                    copied = False
+            answer = (
+                f"Opened {target.name}. Text copied — press Ctrl+V."
+                if copied
+                else f"Opened {target.name}, but couldn't type the text."
+            )
+            self.logger.info("event=app_type_fallback focused=%s status=%s", focused, getattr(status, "value", status))
+        self._finish_action(token, audio, raw, answer, "app_type_action")
         return True
 
     def _assistant_try_folder(self, token: int, audio: Any, raw: str) -> bool:

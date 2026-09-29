@@ -94,6 +94,8 @@ class JevDecision(RouteDecision):
 
     answer: str = ""
     model: str = ""
+    # intent "type_in_app": text to write once the app is focused.
+    text: str = ""
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -140,6 +142,28 @@ TOOLS: list[dict] = [
         "Open a local folder in the file manager (Downloads, Documents, Desktop, a project…).",
         {"name": _STR},
         ["name"],
+    ),
+    _fn(
+        "open_project",
+        "Open a code project / repo / folder in an editor or IDE (VS Code, Cursor, Zed, Antigravity).",
+        {
+            "project": {**_STR, "description": "Project or folder name as spoken, e.g. 'vaani', 'saleshandy brain'"},
+            "editor": {
+                "type": "string",
+                "enum": ["code", "cursor", "zed", "antigravity", "default"],
+                "description": "code = VS Code. Use default if the user named no editor.",
+            },
+        },
+        ["project"],
+    ),
+    _fn(
+        "open_app_and_type",
+        "Open an app (text editor/notes, Obsidian, LibreOffice Writer…) and type the given text into it.",
+        {
+            "app": {**_STR, "description": "App name, e.g. 'text editor', 'obsidian'"},
+            "text": {**_STR, "description": "Exact text to type, in the user's words"},
+        },
+        ["app", "text"],
     ),
     _fn(
         "media_control",
@@ -212,6 +236,8 @@ SYSTEM_PROMPT = (
     "'gmail pe jao' → open_website(query='gmail')\n"
     "'stackoverflow dot com kholo' → open_website(query='stackoverflow.com')\n"
     "'downloads folder kholo' → open_folder(name='Downloads')\n"
+    "'vaani wala project cursor mein khol do' → open_project(project='vaani', editor='cursor')\n"
+    "'notepad kholo aur likho kal 5 baje call hai' → open_app_and_type(app='text editor', text='kal 5 baje call hai')\n"
     "'agla gaana' / 'skip karo' → media_control(action='next')\n"
     "'ruko' / 'band karo gaana' → media_control(action='pause')\n"
     "'awaaz badhao' → set_volume(action='up')\n"
@@ -321,6 +347,19 @@ def decision_from_tool(name: str, args: dict, *, model: str = "") -> JevDecision
     if name == "open_folder":
         query = _clip(args.get("name"), 120)
         return JevDecision("open", query, "", 0.9, model=model) if query else None
+    if name == "open_project":
+        project = _clip(args.get("project"), 120)
+        editor = _clip(args.get("editor"), 16).casefold()
+        if not project:
+            return None
+        return JevDecision("project", project, "" if editor in {"", "default"} else editor, 0.9, model=model)
+    if name == "open_app_and_type":
+        app = _clip(args.get("app"), 120)
+        text = args.get("text")
+        text = text.strip() if isinstance(text, str) else ""
+        if not app or not text:
+            return None
+        return JevDecision("type_in_app", app, "", 0.9, model=model, text=text[:4000])
     if name == "media_control":
         action = _clip(args.get("action"), 16).casefold()
         phrase = MEDIA_PHRASES.get(action)
