@@ -158,6 +158,14 @@ class Controller:
         # Long dictation: packets transcribed while still recording.
         self._chunker: ChunkedTranscriber | None = None
         self.handsfree = False
+        # Action preview (assistant): card shows heard text + planned action,
+        # auto-runs after confirm_seconds unless cancelled. 0 disables.
+        try:
+            self.confirm_seconds = float(os.environ.get("VAANI_CONFIRM_S", "2.5"))
+        except ValueError:
+            self.confirm_seconds = 2.5
+        self._confirm_active = False
+        self._confirm_choice: str | None = None
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))
@@ -538,6 +546,14 @@ class Controller:
             self.stop()
         elif command == "cancel":
             self.cancel()
+        elif self._confirm_active and command in {"option_0", "option_1"}:
+            # Action preview card: 0 = do it now, 1 = cancel.
+            if command == "option_0":
+                self._confirm_choice = "go"
+            else:
+                self._confirm_choice = "cancel"
+                self.logger.info("event=action_preview_cancelled via=click")
+                self.cancel()
         elif isinstance(command, str) and command.startswith("option_"):
             try:
                 idx = int(command.split("_", 1)[1])
@@ -1452,6 +1468,11 @@ class Controller:
             skill_id or "-",
             resume_session or "-",
         )
+        brief = " ".join((raw or "").split())
+        if len(brief) > 90:
+            brief = brief[:87] + "…"
+        if not self._preview_action(token, raw, f"Ask agent: {brief}"):
+            return
         self._feedback("processing")
         start_handoff = getattr(self.codex, "start_handoff", None)
         if not callable(start_handoff):
@@ -1613,6 +1634,13 @@ class Controller:
             getattr(site, "name", "") or "blank",
         )
         url = site.url
+        name = getattr(site, "name", "") or url
+        if ("youtube" in (url or "").casefold() and "watch" in (url or "")) and name.startswith("YouTube: "):
+            action = f"Play “{name[len('YouTube: '):]}” on YouTube"
+        else:
+            action = f"Open {name}"
+        if not self._preview_action(token, raw, action):
+            return True
         requested = site.browser if getattr(site, "browser", None) else None
         prefer = "chrome" if requested == "chrome" else "brave"
         if self.browser_launcher is not None:
@@ -1710,6 +1738,8 @@ class Controller:
         if not app:
             return False
         self.logger.info("event=assistant_route kind=app name=%s", app.name)
+        if not self._preview_action(token, raw, f"Open {app.name}"):
+            return True
         answer = (
             self.app_launcher.launch(app)
             if self.app_launcher is not None
@@ -1732,6 +1762,36 @@ class Controller:
             self._emit("assistant_complete")
             self._feedback("success")
         return True
+
+    def _preview_action(self, token: int, raw: str, action: str) -> bool:
+        """Show what's about to run; False if the user cancelled in time.
+
+        Blocks this worker for up to ``confirm_seconds``. Cancel = pill Cancel,
+        pill ✕, or Esc (all route to ``cancel()``); "Do it now" skips the wait.
+        """
+        secs = float(getattr(self, "confirm_seconds", 0) or 0)
+        show = getattr(self.feedback, "show_confirm", None)
+        if secs <= 0 or not callable(show) or self.mode != "assistant":
+            return True
+        self._confirm_choice = None
+        self._confirm_active = True
+        self.logger.info("event=action_preview action=%r seconds=%.1f", action[:120], secs)
+        try:
+            show(raw, action, secs)
+            deadline = time.monotonic() + secs
+            while time.monotonic() < deadline:
+                if self._cancel.is_set() or token != self._token:
+                    return False
+                if self._confirm_choice == "go":
+                    self.logger.info("event=action_preview_go via=click")
+                    break
+                time.sleep(0.05)
+            if self._cancel.is_set() or token != self._token:
+                return False
+            return True
+        finally:
+            self._confirm_active = False
+            self._confirm_choice = None
 
     def _finish_action(self, token: int, audio: Any, raw: str, answer: str, status: str) -> None:
         if self.result_window is not None and hasattr(self.result_window, "show_text"):
@@ -1769,6 +1829,8 @@ class Controller:
             return True
         editor = req.editor or default_editor()
         self.logger.info("event=assistant_route kind=project path=%s editor=%s", match.path, editor.key)
+        if not self._preview_action(token, raw, f"Open {match.name} in {editor.name}"):
+            return True
         answer = open_in_editor(match, editor)
         self._finish_action(token, audio, raw, answer, "project_action")
         return True
@@ -1799,6 +1861,11 @@ class Controller:
         except Exception:
             watcher = None
         self.logger.info("event=assistant_route kind=app_type name=%s chars=%s", target.name, len(req.text))
+        preview_text = req.text if len(req.text) <= 60 else req.text[:57] + "…"
+        if not self._preview_action(token, raw, f"Open {target.name} and type “{preview_text}”"):
+            if watcher is not None and callable(getattr(watcher, "close", None)):
+                watcher.close()
+            return True
         launched = (
             self.app_launcher.launch(target) if self.app_launcher is not None else launch_app(target)
         )
@@ -1848,6 +1915,8 @@ class Controller:
         if folder is None:
             return False
         self.logger.info("event=assistant_route kind=folder name=%s", folder.name)
+        if not self._preview_action(token, raw, f"Open {folder.name} folder"):
+            return True
         answer = launch_folder(folder)
         if self.result_window is not None and hasattr(self.result_window, "show_text"):
             self.result_window.show_text(answer)
