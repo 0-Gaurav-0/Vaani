@@ -785,12 +785,53 @@ def run_gtk(
             state["answer_active"] = True  # keep drawing text until fade completes
             _apply_answer_geometry(0.0)
 
+        def _answer_mtime() -> float:
+            try:
+                return os.stat(answer_file).st_mtime_ns / 1e9
+            except OSError:
+                return 0.0
+
+        def _refresh_answer_payload() -> None:
+            """Card already open and its text changed (task progress, confirm step)."""
+            mtime = _answer_mtime()
+            if not mtime or mtime == state.get("answer_mtime"):
+                return
+            if state.get("anim_mode") == "collapse" or float(state.get("anim_progress") or 0) < 1.0:
+                return
+            state["answer_mtime"] = mtime
+            payload = read_answer(answer_file)
+            state["question"] = str(payload.get("question") or "")
+            state["answer"] = str(payload.get("answer") or "")
+            opts = payload.get("options") if isinstance(payload.get("options"), list) else []
+            state["options"] = [str(item) for item in opts[:5] if str(item).strip()]
+            state["countdown"] = (
+                (float(payload["deadline"]), float(payload["countdown_s"]))
+                if payload.get("deadline") and payload.get("countdown_s")
+                else None
+            )
+            anchor = state.get("record_anchor")
+            ax, ay = anchor if isinstance(anchor, tuple) and len(anchor) == 2 else (int(state["x"]), int(state["y"]))
+            aw, ah = _measure_answer_size(state["question"], state["answer"], cairo_mod=cairo)
+            nx, ny = _answer_anchor_pos(int(ax), int(ay), WIDTH, HEIGHT, aw, ah, display)
+            old_w, old_h = size()
+            state["anim_from"] = (old_w, old_h, int(state["x"]), int(state["y"]))
+            state["anim_to"] = (aw, ah, nx, ny)
+            state["anim_t0"] = time.monotonic()
+            state["anim_progress"] = 0.0
+            state["anim_mode"] = "resize"
+            _cancel_dismiss_timer()
+            if not state["hover"]:
+                _schedule_dismiss(
+                    (ANSWER_CLARIFY_DISMISS_MS if state["options"] else ANSWER_AUTO_DISMISS_MS) + ANSWER_ANIM_MS
+                )
+
         def _enter_answer_phase() -> None:
             if state["answer_active"] and state.get("anim_mode") != "collapse":
                 return
             if state.get("anim_mode") == "collapse":
                 return
             payload = read_answer(answer_file)
+            state["answer_mtime"] = _answer_mtime()
             state["question"] = str(payload.get("question") or "")
             state["answer"] = str(payload.get("answer") or "")
             opts = payload.get("options") if isinstance(payload.get("options"), list) else []
@@ -1067,7 +1108,10 @@ def run_gtk(
             if phase == "answer" or state.get("answer_active"):
                 progress = _answer_progress()
                 collapsing = state.get("anim_mode") == "collapse"
-                if collapsing:
+                if state.get("anim_mode") == "resize":
+                    # Card text changed in place: keep text solid while it resizes.
+                    chrome_a, text_a, fill_a, radius = 0.0, 1.0, 0.92, ANSWER_RADIUS
+                elif collapsing:
                     chrome_a = progress
                     text_a = max(0.0, 1.0 - progress)
                     fill_a = 0.92 * (1.0 - 0.75 * progress)
@@ -1379,6 +1423,7 @@ def run_gtk(
                     state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S
             if phase == "answer":
                 _enter_answer_phase()
+                _refresh_answer_payload()
                 if state.get("answer_active") and float(state.get("anim_progress") or 0) < 1.0:
                     _apply_answer_geometry(_answer_progress())
             elif phase == "recording":
