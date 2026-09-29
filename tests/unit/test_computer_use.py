@@ -187,7 +187,7 @@ def test_controller_routes_jev_computer_intent(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cu, "ComputerTask", Task)
     monkeypatch.setattr(cu, "A11yHelper", lambda: SimpleNamespace(close=lambda: None))
-    monkeypatch.setattr(cu, "NimBrain", lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(cu, "build_brain", lambda jev: SimpleNamespace(close=lambda: None))
     monkeypatch.setattr(cu, "XInput", lambda: SimpleNamespace())
     answers, previews = [], []
     fb = SimpleNamespace(play=lambda c: True, show_answer=lambda q, a: answers.append(a),
@@ -206,3 +206,45 @@ def test_controller_routes_jev_computer_intent(monkeypatch, tmp_path):
     assert previews == ["Do on screen: In Slack, send hi to Rahul"]
     assert ran == ["In Slack, send hi to Rahul"]
     assert answers[-1] == "Sent hi to Rahul." and rows[-1]["cleanup_status"] == "computer_task"
+
+
+def test_hybrid_uses_jev_for_text_steps_and_nvidia_for_screenshots(tmp_path):
+    from vaani.computer_use import DailyBudget, HybridBrain
+
+    class B:
+        def __init__(self, name, fail=False):
+            self.name, self.fail, self.calls = name, fail, 0
+
+        def next_actions(self, messages):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("quota")
+            return [Action("done", {"summary": self.name})]
+
+    jev, nim = B("jev"), B("nim")
+    h = HybridBrain(jev, nim)
+    text_msgs = [{"role": "user", "content": "elements..."}]
+    img_msgs = [{"role": "user", "content": [{"type": "text", "text": "x"}, {"type": "image_url", "image_url": {"url": "d"}}]}]
+    assert h.next_actions(text_msgs)[0].args["summary"] == "jev"
+    assert h.next_actions(img_msgs)[0].args["summary"] == "nim"
+    assert (jev.calls, nim.calls) == (1, 1)
+    h2 = HybridBrain(B("jev", fail=True), nim)
+    assert h2.next_actions(text_msgs)[0].args["summary"] == "nim"  # Jev failure → NVIDIA
+
+
+def test_daily_budget_caps_and_resets(tmp_path):
+    from vaani.computer_use import DailyBudget
+
+    day = ["2026-09-29"]
+    b = DailyBudget(2, tmp_path / "b.json", today=lambda: day[0])
+    assert b.available(); b.spend(); b.spend()
+    assert not b.available() and b.used() == 2
+    day[0] = "2026-09-30"
+    assert b.available() and b.used() == 0
+
+
+def test_repeating_the_same_action_stops_with_no_progress():
+    brain = FakeBrain([[Action("open_app", {"name": "Calculator"})]] * 6)
+    hooks, *_ = _hooks()
+    out = ComputerTask("x", hooks, brain=brain, helper=FakeHelper([GEDIT]), xinput=FakeX()).run()
+    assert out.startswith("Stopped: no progress")

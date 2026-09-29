@@ -1808,7 +1808,7 @@ class Controller:
 
     def _assistant_computer_task(self, token: int, audio: Any, raw: str, goal: str) -> None:
         """Multi-step GUI task (click/type inside apps) via the NVIDIA-hosted model."""
-        from .computer_use import A11yHelper, ComputerTask, Hooks, NimBrain, XInput, computer_use_enabled
+        from .computer_use import A11yHelper, ComputerTask, Hooks, XInput, build_brain, computer_use_enabled
 
         show = getattr(self.feedback, "show_answer", None)
         if not computer_use_enabled():
@@ -1864,7 +1864,7 @@ class Controller:
         helper = brain = xin = None
         summary = "Stopped."
         try:
-            helper, brain, xin = A11yHelper(), NimBrain(), XInput()
+            helper, brain, xin = A11yHelper(), build_brain(self.jev), XInput()
             task = ComputerTask(goal, Hooks(status, confirm, cancelled, type_text, open_app),
                                 brain=brain, helper=helper, xinput=xin)
             status("Starting…")
