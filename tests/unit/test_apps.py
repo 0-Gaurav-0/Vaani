@@ -25,16 +25,16 @@ def test_resolve_app_name_without_verb():
     assert resolve_app_name("spotify").name == "Spotify"
 
 
-def test_resolves_vaani_project_to_cursor_workspace():
+def test_vaani_project_phrases_go_to_project_finder_not_app_catalog():
     from pathlib import Path
+    from vaani.projects import parse_editor_request, project_index
 
-    target = resolve_app("open Vaani project")
-    assert target is not None
-    assert target.name == "Vaani project"
-    assert target.executables == ("cursor",)
-    assert target.arguments == (str(Path.home() / "Vaani"),)
-    assert resolve_app("initiate project Vani").name == "Vaani project"
-    assert resolve_app("resume vani session").name == "Vaani project"
+    assert resolve_app("open Vaani project") is None
+    for phrase in ("open Vaani project", "initiate project Vani", "resume vani session"):
+        req = parse_editor_request(phrase)
+        assert req is not None and req.editor is None
+        match = project_index().find(req.project)
+        assert match is not None and match.path == Path.home() / "Vaani"
 
 
 def test_resolves_installed_work_and_system_apps():
