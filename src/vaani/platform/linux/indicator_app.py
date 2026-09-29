@@ -135,6 +135,12 @@ def _answer_anchor_pos(
 
 
 def _wrap_cairo_text(cr, text: str, max_width: float) -> list[str]:
+    # Explicit newlines are hard breaks (clarify / confirm options are one per line).
+    if "\n" in (text or ""):
+        out: list[str] = []
+        for part in (text or "").split("\n"):
+            out.extend(_wrap_cairo_text(cr, part, max_width))
+        return out or [""]
     words = (text or "").split()
     if not words:
         return [""]
@@ -187,6 +193,8 @@ def _measure_answer_size(
         return float(cr.text_extents(blob).width)
 
     def _wrap(text: str, size: float, max_width: float) -> list[str]:
+        if cr is None and "\n" in (text or ""):
+            return [ln for part in text.split("\n") for ln in _wrap(part, size, max_width)]
         if cr is None:
             words = (text or "").split() or [""]
             lines: list[str] = []
@@ -787,6 +795,11 @@ def run_gtk(
             state["answer"] = str(payload.get("answer") or "")
             opts = payload.get("options") if isinstance(payload.get("options"), list) else []
             state["options"] = [str(item) for item in opts[:5] if str(item).strip()]
+            state["countdown"] = (
+                (float(payload["deadline"]), float(payload["countdown_s"]))
+                if payload.get("deadline") and payload.get("countdown_s")
+                else None
+            )
             old_w, old_h = size()
             old_x, old_y = int(state["x"]), int(state["y"])
             aw, ah = _measure_answer_size(
@@ -1127,6 +1140,19 @@ def run_gtk(
                         )
                     else:
                         state["option_hit"] = None
+                    countdown = state.get("countdown")
+                    if countdown:
+                        deadline, total = countdown
+                        frac = max(0.0, min(1.0, (deadline - time.time()) / max(0.1, total)))
+                        bar_x, bar_w = radius, max(0.0, width - 2 * radius)
+                        bar_y = height - 6.0
+                        cr.set_source_rgba(1, 1, 1, 0.10 * text_a)
+                        _rounded_rect(cr, bar_x, bar_y, bar_w, 3.0, 1.5)
+                        cr.fill()
+                        acc = _accent()
+                        cr.set_source_rgba(acc[0], acc[1], acc[2], 0.9 * text_a)
+                        _rounded_rect(cr, bar_x, bar_y, bar_w * frac, 3.0, 1.5)
+                        cr.fill()
 
                 if chrome_a > 0.02:
                     # Expand: chrome fades out. Collapse: chrome fades back in.

@@ -166,12 +166,19 @@ def write_answer(
     answer: str,
     *,
     options: list[str] | tuple[str, ...] | None = None,
+    countdown_s: float | None = None,
 ) -> None:
+    """``countdown_s``: show a shrinking bar (action preview auto-runs at 0)."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload: dict = {"question": str(question), "answer": str(answer)}
     if options:
         payload["options"] = [str(item) for item in list(options)[:5]]
+    if countdown_s and countdown_s > 0:
+        import time as _time
+
+        payload["countdown_s"] = float(countdown_s)
+        payload["deadline"] = _time.time() + float(countdown_s)
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.replace(tmp, target)
@@ -193,11 +200,18 @@ def read_answer(path: Path | str) -> dict:
     options: list[str] = []
     if isinstance(raw_opts, list):
         options = [str(item) for item in raw_opts[:5] if str(item).strip()]
-    return {
+    out = {
         "question": str(data.get("question") or ""),
         "answer": str(data.get("answer") or ""),
         "options": options,
     }
+    try:
+        if data.get("deadline") and data.get("countdown_s"):
+            out["deadline"] = float(data["deadline"])
+            out["countdown_s"] = float(data["countdown_s"])
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def clear_answer(path: Path | str) -> None:
