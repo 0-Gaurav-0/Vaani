@@ -11,6 +11,11 @@ Safety rails (this mutates other apps):
   * model failure mid-task stops the task; nothing is retried blindly
   * only the target window is captured; the pill says a screenshot was used
 
+Brains: NVIDIA kimi-k3 by default. Optional: text-only steps on Jev
+(OpenRouter) via VAANI_CU_JEV_DAILY=<cap>. Off by default — measured
+2026-09-29, Jev's free ling-flash was 1–2s/step but failed both Calculator
+tasks (wrong digits, Undo loops) where kimi-k3 succeeded.
+
 Config: NVIDIA_API_KEY (required), VAANI_COMPUTER_USE=1 (off by default),
 VAANI_CU_MODELS (comma list), VAANI_CU_MAX_STEPS, VAANI_CU_MAX_S.
 """
@@ -49,6 +54,15 @@ _COMMIT_RE = re.compile(
 _CLOSE_KEYS = {"alt+f4", "ctrl+w", "ctrl+q", "ctrl+shift+w"}
 
 
+def build_brain(jev: Any | None) -> "HybridBrain":
+    try:
+        cap = int(os.environ.get("VAANI_CU_JEV_DAILY", "0"))
+    except ValueError:
+        cap = 0
+    jev_brain = JevStepBrain(jev, DailyBudget(cap)) if jev is not None and cap > 0 else None
+    return HybridBrain(jev_brain, NimBrain())
+
+
 def computer_use_enabled() -> bool:
     flag = os.environ.get("VAANI_COMPUTER_USE", "").strip().lower() in {"1", "true", "yes", "on"}
     return flag and bool(os.environ.get("NVIDIA_API_KEY", "").strip())
@@ -62,7 +76,8 @@ def _fn(name: str, desc: str, props: dict, req: list[str]) -> dict:
 _S = {"type": "string"}
 _I = {"type": "integer"}
 TOOLS = [
-    _fn("click", "Click an element from the list by its [id].", {"id": _I}, ["id"]),
+    _fn("click", "Click an element from the list. Give its exact 'name' as listed (preferred) or its [id].",
+        {"name": {**_S, "description": "Element name exactly as in the list, e.g. '8' or 'New File'"}, "id": _I}, []),
     _fn("click_xy", "Click at pixel x,y of the screenshot (only when the element is not in the list).",
         {"x": _I, "y": _I, "label": {**_S, "description": "What you are clicking, e.g. 'Send button'"}}, ["x", "y", "label"]),
     _fn("focus", "Put the keyboard focus in an element [id] (e.g. a text field).", {"id": _I}, ["id"]),
@@ -80,7 +95,7 @@ SYSTEM = (
     "title, a list of its UI elements ([id] role 'name'), maybe a screenshot, and the steps done so far. "
     "Reply with tool calls only: 1–4 actions that can run in a row without looking again (e.g. ctrl+n, "
     "type_text, ctrl+s). After a click that changes the screen, stop and look again. Prefer keyboard "
-    "shortcuts and element [id]s over click_xy. Type exactly the text the user asked for. Never do "
+    "shortcuts and clicking elements by their exact listed name over click_xy. Type exactly the text the user asked for. Never do "
     "anything beyond the goal: no extra messages, no deleting, no purchases. When the goal is achieved "
     "call done. If you need information you don't have (which file, which person), call ask_user. "
     "Every step listed under 'Steps so far' already ran successfully — never repeat them; continue "
@@ -100,6 +115,21 @@ class Snapshot:
             if el.get("id") == idx:
                 return el
         return None
+
+    def resolve(self, args: dict) -> dict | None:
+        """Element by exact name (case-insensitive) or by id."""
+        name = str(args.get("name") or "").strip()
+        if name:
+            key = name.casefold()
+            exact = [e for e in self.elements if (e.get("name") or "").strip().casefold() == key]
+            if exact:
+                # Prefer real controls over labels with the same text (e.g. display "8").
+                exact.sort(key=lambda e: e.get("role") in {"label", "text", "heading"})
+                return exact[0]
+        try:
+            return self.element(int(args.get("id")))
+        except (TypeError, ValueError):
+            return None
 
     def is_editor(self) -> bool:
         blob = f"{self.app} {self.title}".casefold()
@@ -233,22 +263,11 @@ class NimBrain:
                 last = f"{model}: HTTP {r.status_code}"
                 continue
             msg = (r.json().get("choices") or [{}])[0].get("message") or {}
-            actions = []
-            for call in msg.get("tool_calls") or []:
-                fn = call.get("function") or {}
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except ValueError:
-                    args = {}
-                if fn.get("name"):
-                    actions.append(Action(fn["name"], args if isinstance(args, dict) else {}))
+            actions = _actions_from_message(msg)
             LOGGER.info("event=cu_model model=%s actions=%s elapsed=%.1f", model, len(actions),
                         time.monotonic() - started)
             if actions:
                 return actions
-            text = (msg.get("content") or "").split("</think>")[-1].strip()
-            if text:
-                return [Action("done", {"summary": text[:200]})]
             last = f"{model}: empty reply"
         raise RuntimeError(last)
 
@@ -256,11 +275,122 @@ class NimBrain:
         self._client.close()
 
 
+def _actions_from_message(msg: dict) -> list[Action]:
+    actions = []
+    for call in msg.get("tool_calls") or []:
+        fn = call.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except ValueError:
+            args = {}
+        if fn.get("name"):
+            actions.append(Action(fn["name"], args if isinstance(args, dict) else {}))
+    if actions:
+        return actions
+    text = (msg.get("content") or "").split("</think>")[-1].strip()
+    return [Action("done", {"summary": text[:200]})] if text else []
+
+
+def _has_image(messages: list[dict]) -> bool:
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list) and any(isinstance(p, dict) and p.get("type") == "image_url" for p in content):
+            return True
+    return False
+
+
+class DailyBudget:
+    """Counts Jev screen-step calls per local day (file-backed, survives restarts)."""
+
+    def __init__(self, limit: int, path: Path | None = None, today: Callable[[], str] | None = None):
+        self.limit = limit
+        self.path = path or Path.home() / ".local" / "share" / "vaani" / "cu_jev_budget.json"
+        self._today = today or (lambda: time.strftime("%Y-%m-%d"))
+
+    def _read(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def used(self) -> int:
+        data = self._read()
+        return int(data.get("count", 0)) if data.get("date") == self._today() else 0
+
+    def available(self) -> bool:
+        return self.used() < self.limit
+
+    def spend(self) -> None:
+        count = self.used() + 1
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps({"date": self._today(), "count": count}), encoding="utf-8")
+        except OSError:
+            pass
+
+
+class JevStepBrain:
+    """Text-only steps on Jev's OpenRouter models (fast, ~1–1.5s; no vision)."""
+
+    def __init__(self, jev: Any, budget: DailyBudget):
+        self.jev, self.budget = jev, budget
+
+    def next_actions(self, messages: list[dict]) -> list[Action]:
+        if not self.budget.available():
+            raise RuntimeError("jev daily screen-step cap reached")
+        started = time.monotonic()
+        body = self.jev._post({"messages": messages, "tools": TOOLS, "tool_choice": "auto", "max_tokens": 500})
+        self.budget.spend()
+        msg = (body.get("choices") or [{}])[0].get("message") or {}
+        actions = _actions_from_message(msg)
+        LOGGER.info("event=cu_model model=jev:%s actions=%s elapsed=%.1f used_today=%s/%s",
+                    body.get("model", "?"), len(actions), time.monotonic() - started,
+                    self.budget.used(), self.budget.limit)
+        if not actions:
+            raise RuntimeError("jev: empty reply")
+        return actions
+
+    def close(self) -> None:
+        pass
+
+
+class HybridBrain:
+    """Jev for steps that only need the element list; NVIDIA for screenshot steps.
+
+    Any Jev failure (quota, cap, bad reply) falls back to NVIDIA for that step.
+    """
+
+    def __init__(self, jev_brain: Any | None, nim_brain: Any):
+        self.jev_brain, self.nim_brain = jev_brain, nim_brain
+        self.jev_steps = self.nim_steps = 0
+
+    def next_actions(self, messages: list[dict]) -> list[Action]:
+        if self.jev_brain is not None and not _has_image(messages):
+            try:
+                actions = self.jev_brain.next_actions(messages)
+                self.jev_steps += 1
+                return actions
+            except Exception as exc:
+                LOGGER.info("event=cu_jev_fallback detail=%s", str(exc)[:80])
+        actions = self.nim_brain.next_actions(messages)
+        self.nim_steps += 1
+        return actions
+
+    def close(self) -> None:
+        for b in (self.jev_brain, self.nim_brain):
+            try:
+                if b is not None:
+                    b.close()
+            except Exception:
+                pass
+
+
 def describe(action: Action, snap: Snapshot) -> str:
     a = action.args
     if action.name in {"click", "focus"}:
-        el = snap.element(int(a.get("id", -1))) or {}
-        what = el.get("name") or el.get("role") or f"element {a.get('id')}"
+        el = snap.resolve(a) or {}
+        what = el.get("name") or el.get("role") or a.get("name") or f"element {a.get('id')}"
         return f"{'Click' if action.name == 'click' else 'Focus'} “{what}”"
     if action.name == "click_xy":
         return f"Click “{a.get('label') or 'point'}”"
@@ -280,8 +410,8 @@ def is_commit(action: Action, snap: Snapshot) -> bool:
     """Would this action send / submit / destroy something? → needs a click."""
     a = action.args
     if action.name == "click":
-        el = snap.element(int(a.get("id", -1))) or {}
-        return bool(_COMMIT_RE.search(el.get("name") or ""))
+        el = snap.resolve(a) or {}
+        return bool(_COMMIT_RE.search(el.get("name") or str(a.get("name") or "")))
     if action.name == "click_xy":
         return bool(_COMMIT_RE.search(str(a.get("label") or ""))) or not snap.is_editor()
     if action.name == "press_keys":
@@ -329,7 +459,10 @@ class ComputerTask:
     def _execute(self, action: Action, snap: Snapshot, shot: dict | None) -> str:
         a = action.args
         if action.name in {"click", "focus"}:
-            r = self.helper.call(action.name, id=int(a.get("id", -1)))
+            el = snap.resolve(a)
+            if el is None:
+                return f"failed (no element named {a.get('name')!r})" if a.get("name") else "failed (unknown element)"
+            r = self.helper.call(action.name, id=int(el["id"]))
             if r.get("ok") and r.get("xy"):
                 self.x.click(*r["xy"])
             return "ok" if r.get("ok") else f"failed ({r.get('error')})"
@@ -388,6 +521,10 @@ class ComputerTask:
                 if action.name == "ask_user":
                     return str(action.args.get("question") or "I need more information.")[:200]
                 desc = describe(action, snap)
+                recent = [h.split(". ", 1)[-1].split(" → ")[0] for h in self.history[-2:]]
+                if len(recent) == 2 and all(r == desc for r in recent) and action.name not in {"wait", "type_text"}:
+                    LOGGER.info("event=cu_no_progress action=%r", desc)
+                    return f"Stopped: no progress (kept trying to {desc[0].lower() + desc[1:]})."
                 if is_commit(action, snap):
                     LOGGER.info("event=cu_commit_gate action=%r", desc)
                     if not self.hooks.confirm(f"{desc} in {snap.app or 'this app'}"):
