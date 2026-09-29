@@ -166,6 +166,14 @@ TOOLS: list[dict] = [
         ["app", "text"],
     ),
     _fn(
+        "computer_task",
+        "Do a multi-step task INSIDE desktop apps by clicking and typing: e.g. in VS Code create a new "
+        "file and write something, fill a field, use an app's menus, message someone in a chat app. "
+        "Use this (not delegate_to_agent) whenever the task needs clicking inside an app's window.",
+        {"goal": {**_STR, "description": "Self-contained goal in English, including exact text to type"}},
+        ["goal"],
+    ),
+    _fn(
         "media_control",
         "Control whatever media is currently playing.",
         {"action": {"type": "string", "enum": list(MEDIA_ACTIONS)}},
@@ -238,6 +246,8 @@ SYSTEM_PROMPT = (
     "'downloads folder kholo' → open_folder(name='Downloads')\n"
     "'vaani wala project cursor mein khol do' → open_project(project='vaani', editor='cursor')\n"
     "'notepad kholo aur likho kal 5 baje call hai' → open_app_and_type(app='text editor', text='kal 5 baje call hai')\n"
+    "'vs code mein new file bana ke usme hello likh do' → computer_task(goal='In VS Code, create a new file and type hello')\n"
+    "'slack pe rahul ko hi bhej do' → computer_task(goal='In Slack, send the message \"hi\" to Rahul')\n"
     "'agla gaana' / 'skip karo' → media_control(action='next')\n"
     "'ruko' / 'band karo gaana' → media_control(action='pause')\n"
     "'awaaz badhao' → set_volume(action='up')\n"
@@ -360,6 +370,9 @@ def decision_from_tool(name: str, args: dict, *, model: str = "") -> JevDecision
         if not app or not text:
             return None
         return JevDecision("type_in_app", app, "", 0.9, model=model, text=text[:4000])
+    if name == "computer_task":
+        goal = _clip(args.get("goal"), 600)
+        return JevDecision("computer", goal, "", 0.9, model=model) if goal else None
     if name == "media_control":
         action = _clip(args.get("action"), 16).casefold()
         phrase = MEDIA_PHRASES.get(action)

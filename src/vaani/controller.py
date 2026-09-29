@@ -1122,6 +1122,9 @@ class Controller:
             # Jev already answered in the routing call — no second LLM hop.
             self._assistant_qa(token, audio, key, raw, result, answer=decision.answer)
             return
+        if intent == "computer":
+            self._assistant_computer_task(token, audio, raw, query or raw)
+            return
         if intent == "project":
             editor = resolve_editor(decision.target or "") if decision.target else None
             req = EditorRequest(query, editor)
@@ -1763,15 +1766,22 @@ class Controller:
             self._feedback("success")
         return True
 
-    def _preview_action(self, token: int, raw: str, action: str) -> bool:
+    def _preview_action(
+        self, token: int, raw: str, action: str, *, require_click: bool = False, seconds: float | None = None
+    ) -> bool:
         """Show what's about to run; False if the user cancelled in time.
 
         Blocks this worker for up to ``confirm_seconds``. Cancel = pill Cancel,
         pill ✕, or Esc (all route to ``cancel()``); "Do it now" skips the wait.
         """
-        secs = float(getattr(self, "confirm_seconds", 0) or 0)
+        secs = float(seconds if seconds is not None else (getattr(self, "confirm_seconds", 0) or 0))
         show = getattr(self.feedback, "show_confirm", None)
-        if secs <= 0 or not callable(show) or self.mode != "assistant":
+        if require_click:
+            # Irreversible step: no card → no consent → don't do it.
+            if not callable(show):
+                return False
+            secs = secs or 20.0
+        elif secs <= 0 or not callable(show) or self.mode != "assistant":
             return True
         self._confirm_choice = None
         self._confirm_active = True
@@ -1784,14 +1794,106 @@ class Controller:
                     return False
                 if self._confirm_choice == "go":
                     self.logger.info("event=action_preview_go via=click")
-                    break
+                    return not (self._cancel.is_set() or token != self._token)
                 time.sleep(0.05)
+            if require_click:
+                self.logger.info("event=action_preview_timeout require_click=1")
+                return False
             if self._cancel.is_set() or token != self._token:
                 return False
             return True
         finally:
             self._confirm_active = False
             self._confirm_choice = None
+
+    def _assistant_computer_task(self, token: int, audio: Any, raw: str, goal: str) -> None:
+        """Multi-step GUI task (click/type inside apps) via the NVIDIA-hosted model."""
+        from .computer_use import A11yHelper, ComputerTask, Hooks, NimBrain, XInput, computer_use_enabled
+
+        show = getattr(self.feedback, "show_answer", None)
+        if not computer_use_enabled():
+            self._assistant_qa(token, audio, "", raw, None, answer=(
+                "Doing tasks inside apps is off. Set VAANI_COMPUTER_USE=1 and NVIDIA_API_KEY in .env."))
+            return
+        if not self._preview_action(token, raw, f"Do on screen: {goal}"):
+            return
+        short_goal = goal if len(goal) <= 70 else goal[:67] + "…"
+
+        def status(text: str) -> None:
+            if callable(show):
+                show(short_goal, text)
+
+        def cancelled() -> bool:
+            return self._cancel.is_set() or token != self._token
+
+        def confirm(desc: str) -> bool:
+            ok = self._preview_action(token, raw, desc, require_click=True, seconds=20.0)
+            if ok and callable(show):
+                show(short_goal, f"Doing: {desc}")
+            return ok
+
+        def type_text(text: str) -> bool:
+            if self.delivery is None:
+                return False
+            try:
+                return self.delivery.deliver(text) == DeliveryStatus.PASTE_DISPATCHED
+            except Exception:
+                return False
+
+        def open_app(name: str) -> str:
+            target = resolve_app_name(name)
+            if target is None:
+                return f"failed (no app called {name})"
+            watcher = None
+            try:
+                watcher = (self.window_watcher_factory or WindowWatcher)()
+                before, _ = watcher.active()
+            except Exception:
+                before = None
+            launched = self.app_launcher.launch(target) if self.app_launcher is not None else launch_app(target)
+            if launched.startswith("Unable"):
+                return f"failed ({launched})"
+            if watcher is not None:
+                exe = next((p for n in target.executables if (p := shutil.which(n))), target.executables[0] if target.executables else "")
+                try:
+                    wait_for_app_window(watcher, class_hints(exe, target.name), before=before, timeout=10)
+                finally:
+                    watcher.close()
+            return "ok"
+
+        helper = brain = xin = None
+        summary = "Stopped."
+        try:
+            helper, brain, xin = A11yHelper(), NimBrain(), XInput()
+            task = ComputerTask(goal, Hooks(status, confirm, cancelled, type_text, open_app),
+                                brain=brain, helper=helper, xinput=xin)
+            status("Starting…")
+            summary = task.run()
+            if task.used_screenshot:
+                summary += " (used screenshots of the app window)"
+        except Exception as exc:
+            self.logger.warning("event=cu_failed detail=%s", type(exc).__name__)
+            summary = f"Couldn't run the task: {type(exc).__name__}."
+        finally:
+            for obj in (helper, brain):
+                try:
+                    if obj is not None:
+                        obj.close()
+                except Exception:
+                    pass
+        self.logger.info("event=cu_done summary=%r", summary[:160])
+        if cancelled():
+            return
+        if callable(show):
+            show(short_goal, summary)
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return
+            self.history.insert(raw_text=raw, final_text=summary, mode="assistant", delivery_status="displayed",
+                                cleanup_status="computer_task",
+                                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000))
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
 
     def _finish_action(self, token: int, audio: Any, raw: str, answer: str, status: str) -> None:
         if self.result_window is not None and hasattr(self.result_window, "show_text"):
