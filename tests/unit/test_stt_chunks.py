@@ -129,3 +129,27 @@ def test_parallel_hinglish_starts_hi_without_waiting(tmp_path):
     assert set(started) == {"en", "hi"}
     assert out.text
     client.close()
+
+
+def test_silent_tail_is_not_transcribed(tmp_path):
+    from vaani.stt_chunks import has_speech
+
+    assert has_speech(_tone(1.0)) and not has_speech(_silence(1.5))
+    pcm = _tone(1.2) + _silence(0.6) + _tone(1.0) + _silence(1.5)  # trailing breath/noise only
+    path = _wav(tmp_path / "rec.wav", pcm)
+    seen = []
+
+    def transcribe(chunk):
+        # Whisper hallucinates the outro only on silent audio.
+        with wave.open(str(chunk), "rb") as w:
+            pcm_chunk = w.readframes(w.getnframes())
+        seen.append(has_speech(pcm_chunk))
+        return "real words" if has_speech(pcm_chunk) else "Thank you for watching!"
+
+    c = ChunkedTranscriber(path, transcribe, min_chunk_s=1.0, poll_s=0.01).start()
+    deadline = time.monotonic() + 3
+    while c.chunks < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    out = c.finish(path)
+    assert out and "watching" not in out
+    assert all(seen)  # the silent tail was never sent

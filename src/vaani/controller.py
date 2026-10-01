@@ -6,6 +6,7 @@ hotkey path usable with real or test implementations.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import threading
 import time
@@ -883,7 +884,7 @@ class Controller:
         # hit playback, not Hermes resume.
         if self._assistant_try_volume(token, audio, raw):
             return
-        if self._assistant_try_media(token, audio, raw):
+        if self._assistant_try_media(token, audio, raw, result):
             return
 
         cont = extract_session_continue(raw)
@@ -1701,9 +1702,21 @@ class Controller:
             self._feedback("success")
         return True
 
-    def _assistant_try_media(self, token: int, audio: Any, raw: str) -> bool:
+    def _assistant_try_media(self, token: int, audio: Any, raw: str, result: Any = None) -> bool:
         action = resolve_media_action(raw)
         if action is None:
+            return False
+        from .media import _SHORT_MEDIA_ALIASES
+
+        candidates = tuple(getattr(result, "candidates", ()) or ())
+        if (
+            raw.strip().rstrip(".,!?:;").casefold() in _SHORT_MEDIA_ALIASES
+            and len(candidates) >= 2
+            and not candidates_agree(candidates[0], candidates[1])
+            and not re.search(r"\b(?:play|ple|pley|plej)\b|प्ले", candidates[1], re.I)
+        ):
+            # "Please." alone → play, but only if the Hindi pass heard "play" too.
+            self.logger.info("event=media_alias_skipped raw=%r hi=%r", raw[:30], candidates[1][:40])
             return False
         self.logger.info(
             "event=assistant_route kind=media name=%s times=%s",

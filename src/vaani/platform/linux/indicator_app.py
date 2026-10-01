@@ -508,10 +508,21 @@ def run_gtk(
     t0 = time.monotonic()
     answer_file = answer_path if answer_path is not None else resolve_answer_path()
     session_file = resolve_session_path()
-    app = Gtk.Application(application_id="com.vaani.RecordingIndicator")
+    # NON_UNIQUE: a second pill process must not "activate" this one — that used
+    # to spawn an extra window here with its own stale state (old card text
+    # drawn inside the pill). One process ⇒ exactly one window.
+    from gi.repository import Gio
+
+    app = Gtk.Application(
+        application_id="com.vaani.RecordingIndicator", flags=Gio.ApplicationFlags.NON_UNIQUE
+    )
+    windows: list = []
 
     def activate(application: Gtk.Application) -> None:
+        if windows:
+            return
         win = Gtk.Window(application=application)
+        windows.append(win)
         win.set_title("Vaani")
         win.set_decorated(False)
         win.set_resizable(False)
@@ -1105,6 +1116,13 @@ def run_gtk(
             if state.get("hidden"):
                 return
             phase = read_phase(phase_path)
+            if (
+                phase in {"recording", "processing"}
+                and state.get("answer_active")
+                and state.get("anim_mode") != "collapse"
+            ):
+                # Stale card while a session runs: show the pill, not old text.
+                _reset_to_pill()
             if phase == "answer" or state.get("answer_active"):
                 progress = _answer_progress()
                 collapsing = state.get("anim_mode") == "collapse"
@@ -1418,6 +1436,9 @@ def run_gtk(
             if phase != prev:
                 if prev in (None, "idle") and phase == "recording":
                     state["shown_at"] = time.monotonic()
+                    # New session from idle: never carry an old card over.
+                    if state.get("answer_active") or state.get("anim_mode") != "expand":
+                        _reset_to_pill()
                 state["last_phase"] = phase
                 if phase in {"recording", "processing"}:
                     state["click_armed_at"] = time.monotonic() + CLICK_GRACE_S

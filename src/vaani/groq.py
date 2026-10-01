@@ -88,16 +88,22 @@ _LEADING_BLEED_RE = re.compile(
     r")+",
     re.IGNORECASE,
 )
+# Whisper's YouTube-caption hallucinations on silence / trailing noise.
+_OUTRO = (
+    r"(?:thank\s+you(?:\s+(?:so\s+much|very\s+much))?(?:\s+for\s+(?:watching|listening))?"
+    r"|thanks\s+for\s+(?:watching|listening)"
+    r"|please\s+(?:like\s+(?:and\s+)?)?subscribe(?:\s+to\s+(?:my|our|the)\s+channel)?"
+    r"|(?:don'?t\s+forget\s+to\s+)?(?:like\s+and\s+)?subscribe(?:\s+to\s+(?:my|our|the)\s+channel)?"
+    r"|see\s+you\s+(?:in\s+the\s+)?next\s+(?:time|video|one)"
+    r"|bye[\s-]*bye|subtitles?\s+by\s+[\w.\- ]+|amara\.org[\w\s]*)"
+)
 _TRAILING_BLEED_RE = re.compile(
-    r"(?:\s+|,)+(?:thank\s+you|thanks\s+for\s+watching)\.?\s*$",
+    rf"(?:\s+|[,.!?])+{_OUTRO}[.!?…]*\s*$",
     re.IGNORECASE,
 )
 _JUNK_ONLY_RE = re.compile(
-    r"^(?:"
-    r"thank\s+you|thanks\s+for\s+watching|english|hinglish|e+[a-z]{0,3}amples?|"
-    r"so\s+much\s+for\s+you|you|the\s+end|subtitle[s]?\s+by\s+\w+"
-    r")(?:\s+(?:thank\s+you|thanks\s+for\s+watching|english|hinglish|e+[a-z]{0,3}amples?))*"
-    r"\.?$",
+    rf"^(?:{_OUTRO}|english|hinglish|e+[a-z]{{0,3}}amples?|so\s+much\s+for\s+you|you|the\s+end)"
+    rf"(?:[\s,.!?]+(?:{_OUTRO}|english|hinglish))*[.!?…]*$",
     re.IGNORECASE,
 )
 
