@@ -73,6 +73,24 @@ def _data_offset(path: Path) -> int:
     return idx + 8 if idx >= 12 else 44
 
 
+SPEECH_MIN_S = 0.2  # this much audio above the threshold counts as speech
+# Same floor the whole-clip silence gate uses (audio.SILENCE_PEAK_RMS); speech
+# that passes that gate passes this. Relative part is capped so steady,
+# pause-free speech is never mistaken for noise.
+SPEECH_FLOOR = 0.012
+
+
+def has_speech(pcm: bytes) -> bool:
+    """Conservative: False only when the audio is clearly just silence/noise."""
+    rms = _frame_rms(pcm)
+    if not rms:
+        return False
+    quiet = sorted(rms)[max(0, len(rms) // 10)]
+    threshold = max(SPEECH_FLOOR, min(quiet * 3.0, 0.03))
+    loud = sum(1 for r in rms if r > threshold)
+    return loud * 0.02 >= SPEECH_MIN_S
+
+
 def find_cut(pcm: bytes, *, min_bytes: int, max_bytes: int, pause_s: float = PAUSE_S) -> int | None:
     """Byte offset (frame-aligned) of a pause to cut at, or None to keep going.
 
@@ -223,6 +241,11 @@ class ChunkedTranscriber:
         tail = self._read_pcm()
         tail_future: Future | None = None
         tail_pool: ThreadPoolExecutor | None = None
+        if len(tail) >= MIN_TAIL_S * BYTES_PER_S and not has_speech(tail):
+            # A last second of breath/room noise is where Whisper invents
+            # "Thank you for watching!" — don't transcribe it at all.
+            self._logger.info("event=stt_tail_skipped reason=no_speech seconds=%.1f", len(tail) / BYTES_PER_S)
+            tail = b""
         if len(tail) >= MIN_TAIL_S * BYTES_PER_S:
             # Tail runs alongside any still-pending packet, not behind it.
             tail_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaani-stt-tail")
