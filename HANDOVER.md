@@ -6,6 +6,24 @@ Living handoff for the next session. Covers **what is running**, **what we built
 
 ---
 
+## Release workflow (2026-10-01) — READ FIRST
+
+Autostart runs a **pinned release**, not this work folder.
+
+| What | Where / command |
+| --- | --- |
+| Running copy | `~/.local/share/vaani/release/current` → `versions/<tag>` (own non-editable `.venv`) |
+| Promote tested HEAD (clean tree) | `vaani-release` → tags `vYYYY.MM.DD`, builds, switches, restarts when mic idle |
+| Promote a specific ref | `vaani-release <ref>` |
+| Undo last promote | `vaani-release --rollback` |
+| What's running | `vaani-release --status` · `--list` |
+| Test work folder live without promoting | `pkill -f '^\.venv/bin/python -m vaani$'; VAANI_PROJECT_DIR="$PWD" setsid -f ~/.local/bin/vaani-start` (next login goes back to the release) |
+| API keys | `~/.config/vaani/vaani.env` (work-folder and release `.env` are symlinks to it) |
+
+Keeps 3 releases. `scripts/vaani-start` / `vaani-history-sync` are installed to `~/.local/bin` (old copies saved as `*.pre-release-backup`).
+
+---
+
 ## 0. 2026-09-28 — Jev + latency (branch `feat/jev-openrouter-latency`)
 
 | Change | Detail |
