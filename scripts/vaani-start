@@ -1,6 +1,11 @@
 #!/bin/sh
+# Autostart entry point. Runs the pinned release (vaani-release) so edits or
+# branch switches in the work folder never change the running Vaani.
+# VAANI_PROJECT_DIR overrides (e.g. to test the work folder directly).
 set -eu
 
+release_dir="$HOME/.local/share/vaani/release/current"
+dev_dir="$HOME/Gaurav Projects/Vaani/03-REPOSITORIES/control/Vaani-main"
 runtime_log="$HOME/.local/share/vaani/logs/autostart.log"
 # Hermes project "Vaani agent" → sessions land under this folder, not Home.
 : "${VAANI_ASSISTANT_CWD:=$HOME/vaani-agent/vani-task}"
@@ -9,13 +14,15 @@ if pgrep -f '^\.venv/bin/python -m vaani$' >/dev/null 2>&1; then
     exit 0
 fi
 
+if [ -n "${VAANI_PROJECT_DIR:-}" ]; then
+    project_dir="$VAANI_PROJECT_DIR"
+elif [ -x "$release_dir/.venv/bin/python" ]; then
+    project_dir="$release_dir"
+else
+    project_dir="$dev_dir"   # no release installed yet
+fi
+
 mkdir -p "$(dirname "$runtime_log")" "$VAANI_ASSISTANT_CWD"
 export VAANI_ASSISTANT_CWD
-if [ -n "${VAANI_PROJECT_DIR:-}" ]; then
-    cd "$VAANI_PROJECT_DIR"
-    exec .venv/bin/python -m vaani >>"$runtime_log" 2>&1
-fi
-if command -v vaani >/dev/null 2>&1; then
-    exec vaani >>"$runtime_log" 2>&1
-fi
-exec python3 -m vaani >>"$runtime_log" 2>&1
+cd "$project_dir"
+exec .venv/bin/python -m vaani >>"$runtime_log" 2>&1
