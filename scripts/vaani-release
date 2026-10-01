@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Promote a tested commit of the Vaani work folder to the pinned release copy
+# that autostart runs, or roll back to the previous release.
+#
+#   vaani-release              promote HEAD of the work folder (must be clean)
+#   vaani-release <git-ref>    promote a specific commit / tag / branch
+#   vaani-release --rollback   switch back to the previous release
+#   vaani-release --status     show what is installed and what is running
+#   vaani-release --list       list installed releases
+#
+# Layout: ~/.local/share/vaani/release/{versions/<tag>, current, previous}
+# Each version is a `git archive` snapshot + its own .venv with Vaani installed
+# non-editable, so editing / switching branches in the work folder never
+# changes the running Vaani. API keys: ~/.config/vaani/vaani.env (shared).
+set -euo pipefail
+
+DEV_DIR="${VAANI_DEV_DIR:-$HOME/Gaurav Projects/Vaani/03-REPOSITORIES/control/Vaani-main}"
+ROOT="${VAANI_RELEASE_ROOT:-$HOME/.local/share/vaani/release}"
+VERSIONS="$ROOT/versions"
+ENV_FILE="$HOME/.config/vaani/vaani.env"
+KEEP=3
+
+say() { printf '[vaani-release] %s\n' "$*"; }
+die() { printf '[vaani-release] error: %s\n' "$*" >&2; exit 1; }
+
+running_pid() { pgrep -f '^\.venv/bin/python -m vaani$' | head -1 || true; }
+
+restart_vaani() {
+    if [ -n "${VAANI_RELEASE_NO_RESTART:-}" ]; then say "restart skipped (VAANI_RELEASE_NO_RESTART)"; return 0; fi
+    # Never cut off a dictation: wait while the mic is recording.
+    for _ in $(seq 1 60); do
+        pgrep -x parec >/dev/null 2>&1 || break
+        sleep 1
+    done
+    pkill -f '^\.venv/bin/python -m vaani$' 2>/dev/null || true
+    sleep 1.5
+    setsid -f "$HOME/.local/bin/vaani-start" >/dev/null 2>&1 < /dev/null
+    sleep 3
+    local pid
+    pid="$(running_pid)"
+    [ -n "$pid" ] || die "Vaani did not start — see ~/.local/share/vaani/logs/autostart.log"
+    say "running pid $pid from $(readlink -f "/proc/$pid/cwd")"
+}
+
+status() {
+    say "current:  $(readlink "$ROOT/current" 2>/dev/null | xargs -r basename || echo none)"
+    say "previous: $(readlink "$ROOT/previous" 2>/dev/null | xargs -r basename || echo none)"
+    local pid
+    pid="$(running_pid)"
+    if [ -n "$pid" ]; then say "running:  pid $pid from $(readlink -f "/proc/$pid/cwd")"; else say "running:  no"; fi
+}
+
+prune() {
+    local cur prev
+    cur="$(readlink -f "$ROOT/current" 2>/dev/null || true)"
+    prev="$(readlink -f "$ROOT/previous" 2>/dev/null || true)"
+    ls -1dt "$VERSIONS"/*/ 2>/dev/null | grep -v "\.partial/$" | tail -n +$((KEEP + 1)) | while read -r dir; do
+        dir="${dir%/}"
+        [ "$dir" = "$cur" ] || [ "$dir" = "$prev" ] && continue
+        say "pruning old release $(basename "$dir")"
+        rm -rf -- "$dir"
+    done
+}
+
+rollback() {
+    local cur prev
+    cur="$(readlink "$ROOT/current" 2>/dev/null || true)"
+    prev="$(readlink "$ROOT/previous" 2>/dev/null || true)"
+    [ -n "$prev" ] && [ -d "$prev" ] || die "no previous release to roll back to"
+    ln -sfn "$prev" "$ROOT/current.tmp" && mv -T "$ROOT/current.tmp" "$ROOT/current"
+    [ -n "$cur" ] && ln -sfn "$cur" "$ROOT/previous"
+    say "rolled back to $(basename "$prev")"
+    restart_vaani
+}
+
+promote() {
+    local ref="${1:-HEAD}"
+    command -v uv >/dev/null || die "uv not found"
+    cd "$DEV_DIR"
+    if [ "$ref" = "HEAD" ] && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        die "work folder has uncommitted changes — commit them first (or pass a ref)"
+    fi
+    local sha tag n dest
+    sha="$(git rev-parse --verify "$ref^{commit}")"
+    tag="$(git tag --points-at "$sha" | grep -E '^v[0-9]{4}\.' | head -1 || true)"
+    if [ -z "$tag" ]; then
+        tag="v$(date +%Y.%m.%d)"
+        n=2
+        while git rev-parse -q --verify "refs/tags/$tag" >/dev/null; do tag="v$(date +%Y.%m.%d)-$n"; n=$((n + 1)); done
+        git tag -a "$tag" "$sha" -m "Vaani release $tag"
+        say "tagged $sha as $tag"
+    fi
+    dest="$VERSIONS/$tag"
+    if [ -d "$dest" ]; then
+        say "$tag already built"
+    else
+        mkdir -p "$dest.partial"
+        git archive "$sha" | tar -x -C "$dest.partial"
+        printf '%s %s\n' "$tag" "$sha" > "$dest.partial/RELEASE"
+        # Same interpreter + exact package versions as the tested work folder.
+        local py
+        py="$("$DEV_DIR/.venv/bin/python" -c 'import sys; print(sys.executable)')"
+        uv venv -q --python "$py" "$dest.partial/.venv"
+        uv pip freeze --python "$DEV_DIR/.venv/bin/python" --exclude-editable > "$dest.partial/requirements.frozen.txt"
+        uv pip install -q --python "$dest.partial/.venv/bin/python" -r "$dest.partial/requirements.frozen.txt"
+        uv pip install -q --python "$dest.partial/.venv/bin/python" --no-deps "$dest.partial"
+        mv "$dest.partial" "$dest"
+    fi
+    # Keys live in one place, shared by the work folder and every release.
+    if [ ! -f "$ENV_FILE" ]; then
+        mkdir -p "$(dirname "$ENV_FILE")"
+        [ -f "$DEV_DIR/.env" ] && cp -L "$DEV_DIR/.env" "$ENV_FILE"
+        chmod 600 "$ENV_FILE" 2>/dev/null || true
+    fi
+    ln -sfn "$ENV_FILE" "$dest/.env"
+    (cd "$dest" && .venv/bin/python -c 'import vaani.controller, vaani.platform.linux.runtime, vaani.jev') \
+        || die "smoke import failed — release not activated"
+    local cur
+    cur="$(readlink "$ROOT/current" 2>/dev/null || true)"
+    if [ "$cur" != "$dest" ]; then
+        ln -sfn "$dest" "$ROOT/current.tmp" && mv -T "$ROOT/current.tmp" "$ROOT/current"
+        [ -n "$cur" ] && ln -sfn "$cur" "$ROOT/previous"
+    fi
+    say "current release: $tag ($sha)"
+    prune
+    restart_vaani
+}
+
+case "${1:-}" in
+    --rollback) rollback ;;
+    --status) status ;;
+    --list) ls -1t "$VERSIONS" 2>/dev/null | grep -v '\.partial$' || true ;;
+    -h|--help) sed -n '2,15p' "$0" ;;
+    *) promote "${1:-HEAD}" ;;
+esac
