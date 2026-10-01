@@ -30,6 +30,8 @@ def _helper_cmd() -> list[str] | None:
     """Prefer system Python (has gi); fall back to PATH python3."""
     candidates = (
         Path(__file__).resolve().parents[2] / "scripts" / "vaani-notify-helper.py",
+        # Installed release (vaani-release): Vaani runs with cwd = release dir.
+        Path.cwd() / "scripts" / "vaani-notify-helper.py",
         Path.home()
         / "Gaurav Projects/Vaani/03-REPOSITORIES/control/Vaani-main/scripts/vaani-notify-helper.py",
     )
