@@ -6,6 +6,8 @@ hotkey path usable with real or test implementations.
 from __future__ import annotations
 
 import logging
+import re
+import shutil
 import threading
 import time
 import struct, math, os
@@ -20,6 +22,8 @@ from .groq import GroqError, candidates_agree, guard_transcription, light_local_
 from .audio import is_silent_wav
 from .apps import launch_app, resolve_app, resolve_app_name
 from .folders import launch_folder, resolve_folder, resolve_folder_name
+from .projects import EditorRequest, default_editor, open_in_editor, parse_editor_request, project_index, resolve_editor
+from .app_typing import TypeRequest, WindowWatcher, class_hints, parse_type_request, wait_for_app_window
 from .volume import resolve_volume_action, run_volume_action
 from .media import resolve_media_action, run_media_action
 from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
@@ -155,6 +159,14 @@ class Controller:
         # Long dictation: packets transcribed while still recording.
         self._chunker: ChunkedTranscriber | None = None
         self.handsfree = False
+        # Action preview (assistant): card shows heard text + planned action,
+        # auto-runs after confirm_seconds unless cancelled. 0 disables.
+        try:
+            self.confirm_seconds = float(os.environ.get("VAANI_CONFIRM_S", "2.5"))
+        except ValueError:
+            self.confirm_seconds = 2.5
+        self._confirm_active = False
+        self._confirm_choice: str | None = None
 
     def _emit(self, name: str, category: str | None = None) -> None:
         with self._lock: self.events.append(ControllerEvent(name, self.state, category))
@@ -535,6 +547,14 @@ class Controller:
             self.stop()
         elif command == "cancel":
             self.cancel()
+        elif self._confirm_active and command in {"option_0", "option_1"}:
+            # Action preview card: 0 = do it now, 1 = cancel.
+            if command == "option_0":
+                self._confirm_choice = "go"
+            else:
+                self._confirm_choice = "cancel"
+                self.logger.info("event=action_preview_cancelled via=click")
+                self.cancel()
         elif isinstance(command, str) and command.startswith("option_"):
             try:
                 idx = int(command.split("_", 1)[1])
@@ -864,7 +884,7 @@ class Controller:
         # hit playback, not Hermes resume.
         if self._assistant_try_volume(token, audio, raw):
             return
-        if self._assistant_try_media(token, audio, raw):
+        if self._assistant_try_media(token, audio, raw, result):
             return
 
         cont = extract_session_continue(raw)
@@ -874,6 +894,12 @@ class Controller:
             )
             return
 
+        # Multi-step and project opens run before the plain app launcher, which
+        # would otherwise just open "VS Code" / "Text Editor" and drop the rest.
+        if self._assistant_try_type(token, audio, raw):
+            return
+        if self._assistant_try_project(token, audio, raw):
+            return
         if self._assistant_try_app(token, audio, raw):
             return
         if self._assistant_try_folder(token, audio, raw):
@@ -1096,6 +1122,19 @@ class Controller:
         if intent == "qa" and getattr(decision, "answer", ""):
             # Jev already answered in the routing call — no second LLM hop.
             self._assistant_qa(token, audio, key, raw, result, answer=decision.answer)
+            return
+        if intent == "computer":
+            self._assistant_computer_task(token, audio, raw, query or raw)
+            return
+        if intent == "project":
+            editor = resolve_editor(decision.target or "") if decision.target else None
+            req = EditorRequest(query, editor)
+            if self._assistant_try_project(token, audio, raw, request=req):
+                return
+        if intent == "type_in_app" and getattr(decision, "text", ""):
+            if self._assistant_try_type(token, audio, raw, request=TypeRequest(query, decision.text)):
+                return
+            self._assistant_qa(token, audio, key, raw, result, answer=f"Couldn't find an app called “{query}”.")
             return
         if intent in {"media", "volume"}:
             try_fn = self._assistant_try_media if intent == "media" else self._assistant_try_volume
@@ -1433,6 +1472,11 @@ class Controller:
             skill_id or "-",
             resume_session or "-",
         )
+        brief = " ".join((raw or "").split())
+        if len(brief) > 90:
+            brief = brief[:87] + "…"
+        if not self._preview_action(token, raw, f"Ask agent: {brief}"):
+            return
         self._feedback("processing")
         start_handoff = getattr(self.codex, "start_handoff", None)
         if not callable(start_handoff):
@@ -1594,6 +1638,13 @@ class Controller:
             getattr(site, "name", "") or "blank",
         )
         url = site.url
+        name = getattr(site, "name", "") or url
+        if ("youtube" in (url or "").casefold() and "watch" in (url or "")) and name.startswith("YouTube: "):
+            action = f"Play “{name[len('YouTube: '):]}” on YouTube"
+        else:
+            action = f"Open {name}"
+        if not self._preview_action(token, raw, action):
+            return True
         requested = site.browser if getattr(site, "browser", None) else None
         prefer = "chrome" if requested == "chrome" else "brave"
         if self.browser_launcher is not None:
@@ -1651,9 +1702,21 @@ class Controller:
             self._feedback("success")
         return True
 
-    def _assistant_try_media(self, token: int, audio: Any, raw: str) -> bool:
+    def _assistant_try_media(self, token: int, audio: Any, raw: str, result: Any = None) -> bool:
         action = resolve_media_action(raw)
         if action is None:
+            return False
+        from .media import _SHORT_MEDIA_ALIASES
+
+        candidates = tuple(getattr(result, "candidates", ()) or ())
+        if (
+            raw.strip().rstrip(".,!?:;").casefold() in _SHORT_MEDIA_ALIASES
+            and len(candidates) >= 2
+            and not candidates_agree(candidates[0], candidates[1])
+            and not re.search(r"\b(?:play|ple|pley|plej)\b|प्ले", candidates[1], re.I)
+        ):
+            # "Please." alone → play, but only if the Hindi pass heard "play" too.
+            self.logger.info("event=media_alias_skipped raw=%r hi=%r", raw[:30], candidates[1][:40])
             return False
         self.logger.info(
             "event=assistant_route kind=media name=%s times=%s",
@@ -1691,6 +1754,8 @@ class Controller:
         if not app:
             return False
         self.logger.info("event=assistant_route kind=app name=%s", app.name)
+        if not self._preview_action(token, raw, f"Open {app.name}"):
+            return True
         answer = (
             self.app_launcher.launch(app)
             if self.app_launcher is not None
@@ -1714,11 +1779,259 @@ class Controller:
             self._feedback("success")
         return True
 
+    def _preview_action(
+        self, token: int, raw: str, action: str, *, require_click: bool = False, seconds: float | None = None
+    ) -> bool:
+        """Show what's about to run; False if the user cancelled in time.
+
+        Blocks this worker for up to ``confirm_seconds``. Cancel = pill Cancel,
+        pill ✕, or Esc (all route to ``cancel()``); "Do it now" skips the wait.
+        """
+        secs = float(seconds if seconds is not None else (getattr(self, "confirm_seconds", 0) or 0))
+        show = getattr(self.feedback, "show_confirm", None)
+        if require_click:
+            # Irreversible step: no card → no consent → don't do it.
+            if not callable(show):
+                return False
+            secs = secs or 20.0
+        elif secs <= 0 or not callable(show) or self.mode != "assistant":
+            return True
+        self._confirm_choice = None
+        self._confirm_active = True
+        self.logger.info("event=action_preview action=%r seconds=%.1f", action[:120], secs)
+        try:
+            show(raw, action, secs)
+            deadline = time.monotonic() + secs
+            while time.monotonic() < deadline:
+                if self._cancel.is_set() or token != self._token:
+                    return False
+                if self._confirm_choice == "go":
+                    self.logger.info("event=action_preview_go via=click")
+                    return not (self._cancel.is_set() or token != self._token)
+                time.sleep(0.05)
+            if require_click:
+                self.logger.info("event=action_preview_timeout require_click=1")
+                return False
+            if self._cancel.is_set() or token != self._token:
+                return False
+            return True
+        finally:
+            self._confirm_active = False
+            self._confirm_choice = None
+
+    def _assistant_computer_task(self, token: int, audio: Any, raw: str, goal: str) -> None:
+        """Multi-step GUI task (click/type inside apps) via the NVIDIA-hosted model."""
+        from .computer_use import A11yHelper, ComputerTask, Hooks, XInput, build_brain, computer_use_enabled
+
+        show = getattr(self.feedback, "show_answer", None)
+        if not computer_use_enabled():
+            self._assistant_qa(token, audio, "", raw, None, answer=(
+                "Doing tasks inside apps is off. Set VAANI_COMPUTER_USE=1 and NVIDIA_API_KEY in .env."))
+            return
+        if not self._preview_action(token, raw, f"Do on screen: {goal}"):
+            return
+        short_goal = goal if len(goal) <= 70 else goal[:67] + "…"
+
+        def status(text: str) -> None:
+            if callable(show):
+                show(short_goal, text)
+
+        def cancelled() -> bool:
+            return self._cancel.is_set() or token != self._token
+
+        def confirm(desc: str) -> bool:
+            ok = self._preview_action(token, raw, desc, require_click=True, seconds=20.0)
+            if ok and callable(show):
+                show(short_goal, f"Doing: {desc}")
+            return ok
+
+        def type_text(text: str) -> bool:
+            if self.delivery is None:
+                return False
+            try:
+                return self.delivery.deliver(text) == DeliveryStatus.PASTE_DISPATCHED
+            except Exception:
+                return False
+
+        def open_app(name: str) -> str:
+            target = resolve_app_name(name)
+            if target is None:
+                return f"failed (no app called {name})"
+            watcher = None
+            try:
+                watcher = (self.window_watcher_factory or WindowWatcher)()
+                before, _ = watcher.active()
+            except Exception:
+                before = None
+            launched = self.app_launcher.launch(target) if self.app_launcher is not None else launch_app(target)
+            if launched.startswith("Unable"):
+                return f"failed ({launched})"
+            if watcher is not None:
+                exe = next((p for n in target.executables if (p := shutil.which(n))), target.executables[0] if target.executables else "")
+                try:
+                    wait_for_app_window(watcher, class_hints(exe, target.name), before=before, timeout=10)
+                finally:
+                    watcher.close()
+            return "ok"
+
+        helper = brain = xin = None
+        summary = "Stopped."
+        try:
+            helper, brain, xin = A11yHelper(), build_brain(self.jev), XInput()
+            task = ComputerTask(goal, Hooks(status, confirm, cancelled, type_text, open_app),
+                                brain=brain, helper=helper, xinput=xin)
+            status("Starting…")
+            summary = task.run()
+            if task.used_screenshot:
+                summary += " (used screenshots of the app window)"
+        except Exception as exc:
+            self.logger.warning("event=cu_failed detail=%s", type(exc).__name__)
+            summary = f"Couldn't run the task: {type(exc).__name__}."
+        finally:
+            for obj in (helper, brain):
+                try:
+                    if obj is not None:
+                        obj.close()
+                except Exception:
+                    pass
+        self.logger.info("event=cu_done summary=%r", summary[:160])
+        if cancelled():
+            return
+        if callable(show):
+            show(short_goal, summary)
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return
+            self.history.insert(raw_text=raw, final_text=summary, mode="assistant", delivery_status="displayed",
+                                cleanup_status="computer_task",
+                                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000))
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
+
+    def _finish_action(self, token: int, audio: Any, raw: str, answer: str, status: str) -> None:
+        if self.result_window is not None and hasattr(self.result_window, "show_text"):
+            self.result_window.show_text(answer)
+        with self._lock:
+            if self._cancel.is_set() or token != self._token:
+                return
+            self.history.insert(
+                raw_text=raw,
+                final_text=answer,
+                mode="assistant",
+                delivery_status="displayed",
+                cleanup_status=status,
+                duration_ms=int(getattr(audio, "duration_seconds", 0) * 1000),
+            )
+            self.state = AppState.IDLE
+            self._emit("assistant_complete")
+            self._feedback("success")
+
+    def _assistant_try_project(
+        self, token: int, audio: Any, raw: str, *, request: EditorRequest | None = None
+    ) -> bool:
+        """"open vaani in cursor" / "flow repo vs code mein kholo"."""
+        req = request or parse_editor_request(raw)
+        if req is None:
+            return False
+        match = project_index().find(req.project)
+        if match is None:
+            if req.editor is None and request is None:
+                # "open slack workspace" — not a project; let the app path try.
+                return False
+            answer = f"Couldn't find a project called “{req.project}”."
+            self.logger.info("event=project_not_found spoken=%r", req.project[:60])
+            self._finish_action(token, audio, raw, answer, "project_not_found")
+            return True
+        editor = req.editor or default_editor()
+        self.logger.info("event=assistant_route kind=project path=%s editor=%s", match.path, editor.key)
+        if not self._preview_action(token, raw, f"Open {match.name} in {editor.name}"):
+            return True
+        answer = open_in_editor(match, editor)
+        self._finish_action(token, audio, raw, answer, "project_action")
+        return True
+
+    # Tests inject a fake; runtime lazily opens an X11 connection.
+    window_watcher_factory: Callable[[], Any] | None = None
+
+    def _assistant_try_type(
+        self, token: int, audio: Any, raw: str, *, request: TypeRequest | None = None
+    ) -> bool:
+        """"open text editor and write buy milk": launch, wait for its window, paste."""
+        req = request or parse_type_request(raw)
+        if req is None:
+            return False
+        target = resolve_app_name(req.app)
+        if target is None:
+            return False
+        exe = next((path for name in target.executables if (path := shutil.which(name))), "")
+        if os.path.basename(exe) in {"gedit", "gnome-text-editor"} and "--new-document" not in target.arguments:
+            # Fresh document so we never type into an existing file.
+            target = type(target)(target.name, target.executables, (*target.arguments, "--new-document"), target.desktop_id)
+        watcher = None
+        before = None
+        try:
+            factory = self.window_watcher_factory or WindowWatcher
+            watcher = factory()
+            before, _cls = watcher.active()
+        except Exception:
+            watcher = None
+        self.logger.info("event=assistant_route kind=app_type name=%s chars=%s", target.name, len(req.text))
+        preview_text = req.text if len(req.text) <= 60 else req.text[:57] + "…"
+        if not self._preview_action(token, raw, f"Open {target.name} and type “{preview_text}”"):
+            if watcher is not None and callable(getattr(watcher, "close", None)):
+                watcher.close()
+            return True
+        launched = (
+            self.app_launcher.launch(target) if self.app_launcher is not None else launch_app(target)
+        )
+        if launched.startswith("Unable"):
+            self._finish_action(token, audio, raw, launched, "app_type_failed")
+            return True
+        focused = False
+        if watcher is not None:
+            try:
+                focused = wait_for_app_window(
+                    watcher, class_hints(exe or target.executables[0], target.name), before=before
+                )
+            finally:
+                close = getattr(watcher, "close", None)
+                if callable(close):
+                    close()
+        if self._cancel.is_set() or token != self._token:
+            return True
+        status = None
+        if focused and self.delivery is not None:
+            try:
+                status = self.delivery.deliver(req.text)
+            except Exception:
+                status = None
+        if status == DeliveryStatus.PASTE_DISPATCHED:
+            answer = f"Opened {target.name} and wrote it."
+        else:
+            clip = getattr(getattr(self.delivery, "clipboard", None), "set_text", None)
+            copied = False
+            if callable(clip):
+                try:
+                    clip(req.text)
+                    copied = True
+                except Exception:
+                    copied = False
+            answer = (
+                f"Opened {target.name}. Text copied — press Ctrl+V."
+                if copied
+                else f"Opened {target.name}, but couldn't type the text."
+            )
+            self.logger.info("event=app_type_fallback focused=%s status=%s", focused, getattr(status, "value", status))
+        self._finish_action(token, audio, raw, answer, "app_type_action")
+        return True
+
     def _assistant_try_folder(self, token: int, audio: Any, raw: str) -> bool:
         folder = resolve_folder(raw)
         if folder is None:
             return False
         self.logger.info("event=assistant_route kind=folder name=%s", folder.name)
+        if not self._preview_action(token, raw, f"Open {folder.name} folder"):
+            return True
         answer = launch_folder(folder)
         if self.result_window is not None and hasattr(self.result_window, "show_text"):
             self.result_window.show_text(answer)
