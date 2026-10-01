@@ -25,7 +25,7 @@ class AppTarget:
 APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
     (("claude desktop", "claude app", "claude"), AppTarget("Claude", ("claude-desktop",))),
     (("terminal", "gnome terminal"), AppTarget("Terminal", ("gnome-terminal",))),
-    (("text editor", "gedit"), AppTarget("Text Editor", ("gnome-text-editor", "gedit"))),
+    (("text editor", "gedit", "notepad", "note pad", "notes app", "notes"), AppTarget("Text Editor", ("gnome-text-editor", "gedit"))),
     (("visual studio code", "vs code", "vscode", "vs-code", "code editor", "code"), AppTarget("Visual Studio Code", ("code",))),
     (("file manager", "files"), AppTarget("Files", ("nautilus",))),
     (("calculator",), AppTarget("Calculator", ("gnome-calculator",))),
@@ -38,24 +38,7 @@ APPS: tuple[tuple[tuple[str, ...], AppTarget], ...] = (
     (("libreoffice calc", "libre office calc"), AppTarget("LibreOffice Calc", ("libreoffice",), ("--calc",))),
     (("libreoffice impress", "libre office impress"), AppTarget("LibreOffice Impress", ("libreoffice",), ("--impress",))),
     (("libreoffice", "libre office"), AppTarget("LibreOffice", ("libreoffice",))),
-    # Quick resume: this machine's Cursor workspace (~/Vaani → control repo).
-    (
-        (
-            "vaani project",
-            "vani project",
-            "wani project",
-            "project vaani",
-            "project vani",
-            "project wani",
-            "vaani session",
-            "vani session",
-        ),
-        AppTarget(
-            "Vaani project",
-            ("cursor",),
-            (str(Path.home() / "Vaani"),),
-        ),
-    ),
+    # Projects ("open vaani in cursor") are handled by projects.py.
     (("cursor editor", "cursor"), AppTarget("Cursor", ("cursor",))),
     (("antigravity ide", "antigravity"), AppTarget("Antigravity", ("antigravity-ide",))),
     (("thunderbird",), AppTarget("Thunderbird", ("thunderbird",))),

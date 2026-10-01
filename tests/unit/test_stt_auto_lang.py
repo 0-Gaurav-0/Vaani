@@ -90,3 +90,12 @@ def test_vocab_fixes_split_names(tmp_path, monkeypatch):
     (tmp_path / "vaani").mkdir()
     (tmp_path / "vaani" / "vocab.json").write_text(json.dumps({"jev": "Jev"}))
     assert g.guard_transcription("ask jev about it") == "ask Jev about it"
+
+
+def test_youtube_outro_hallucinations_are_stripped():
+    from vaani.groq import guard_transcription as g
+
+    assert g("Thank you for watching!") is None
+    assert g("Please subscribe to my channel.") is None
+    assert g("we shipped it, thanks for watching.") == "we shipped it"
+    assert g("I said thank you to him for the help") == "I said thank you to him for the help"

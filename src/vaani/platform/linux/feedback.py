@@ -278,6 +278,24 @@ class LinuxFeedback:
         except Exception:
             pass
 
+    def show_confirm(self, question: str, action: str, seconds: float) -> None:
+        """Action preview card: what was heard, what will run, countdown + buttons.
+
+        Option 0 = run now, option 1 = cancel (clicks come back as option_N).
+        """
+        try:
+            write_answer(
+                self.answer_path,
+                # Plain text: the pill's cairo font has no arrows/check glyphs.
+                f"Heard: “{question}”\n{action}",
+                "Do it now\nCancel",
+                options=["Do it now", "Cancel"],
+                countdown_s=seconds,
+            )
+            write_phase(self.phase_path, "answer")
+        except Exception:
+            pass
+
     def play(self, cue: str) -> bool:
         if cue == "start":
             self._spawn_indicator()
