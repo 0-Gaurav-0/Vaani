@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+release_dir="$HOME/.local/share/vaani/release/current"
+dev_dir="$HOME/Gaurav Projects/Vaani/03-REPOSITORIES/control/Vaani-main"
+if [ -x "$release_dir/.venv/bin/python" ]; then cd "$release_dir"; else cd "$dev_dir"; fi
+exec .venv/bin/python -m vaani.history_catalog "$@"
