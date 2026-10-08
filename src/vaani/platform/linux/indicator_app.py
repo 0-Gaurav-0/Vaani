@@ -56,8 +56,8 @@ ANSWER_ANIM_MS = 280
 # ---- look (glass capsule) ----
 FONT = "Ubuntu"
 MONO_FONT = "Ubuntu Mono"
-GLASS_TOP = (0.20, 0.21, 0.25, 0.52)
-GLASS_BOTTOM = (0.06, 0.06, 0.08, 0.68)
+GLASS_TOP = (0.17, 0.18, 0.22, 0.74)
+GLASS_BOTTOM = (0.05, 0.05, 0.07, 0.86)
 DICTATION_ACCENT = (0.96, 0.96, 0.97)
 ASSISTANT_ACCENT = (0.66, 0.55, 0.98)  # violet
 WARN_ACCENT = (0.98, 0.75, 0.14)  # amber, last minute
