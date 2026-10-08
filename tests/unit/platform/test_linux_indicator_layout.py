@@ -4,7 +4,6 @@ from vaani.platform.linux import indicator_app as ia
 
 LAPTOP = (0, 0, 1920, 1080)
 HDMI_RIGHT = (1920, 0, 2560, 1440)
-HDMI_ABOVE = (0, -1440, 2560, 1440)
 
 
 def test_pick_monitor_containing_nearest_and_empty():
@@ -72,3 +71,27 @@ def test_save_position_keeps_legacy_xy_and_adds_monitor(tmp_path):
     assert data == {"x": 10, "y": 20, "monitor": "eDP-1", "rx": 0.5, "ry": 0.95}
     assert ia._load_position(path) == (10, 20)  # tk fallback still reads it
     assert ia._load_layout(path)["monitor"] == "eDP-1"
+
+
+def test_legacy_save_survives_hotplug_that_moves_the_laptop():
+    names, rects = ["eDP-1"], [LAPTOP]
+    # Legacy file had only absolute x/y; startup derives the spot from it.
+    spot = ia._spot_for_pos(859, 1038 - 48, ia.WIDTH, ia.HEIGHT, names, rects, 0)
+    assert spot["monitor"] == "eDP-1"
+    # HDMI plugged in above; it becomes item 0 and primary, laptop shifts down.
+    names2, rects2 = ["HDMI-1", "eDP-1"], [(0, 0, 2560, 1440), (0, 1440, 1920, 1080)]
+    rect, rx, ry = ia._resolve_spot(spot, names2, rects2, 0, ia.WIDTH, ia.HEIGHT)
+    assert rect == (0, 1440, 1920, 1080)
+    assert ia._pos_from_rel(rx, ry, ia.WIDTH, ia.HEIGHT, rect) == (859, 1440 + 990)
+
+
+def test_spot_on_unplugged_monitor_falls_back_to_primary_same_place():
+    spot = {"monitor": "HDMI-1", "rx": 0.25, "ry": 0.9}
+    rect, rx, ry = ia._resolve_spot(spot, ["eDP-1"], [LAPTOP], 0, ia.WIDTH, ia.HEIGHT)
+    assert (rect, rx, ry) == (LAPTOP, 0.25, 0.9)
+
+
+def test_no_spot_means_primary_bottom_center():
+    rect, rx, ry = ia._resolve_spot({}, ["HDMI-1", "eDP-1"], [HDMI_RIGHT, LAPTOP], 1, ia.WIDTH, ia.HEIGHT)
+    assert rect == LAPTOP
+    assert ia._pos_from_rel(rx, ry, ia.WIDTH, ia.HEIGHT, rect) == ia._default_pos(*LAPTOP)
