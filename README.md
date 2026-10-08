@@ -48,8 +48,10 @@ logs, and machine-specific paths are intentionally not stored in Git.
 - Automatic `Ctrl+Shift+V` paste in recognized terminal emulators.
 - Clipboard-only fallback when the focused target changes or paste injection
   cannot be verified.
-- A GTK4 recording pill with live microphone amplitude and cancel/stop
-  controls; drag requests remain compositor-dependent.
+- A GTK4 glass recording pill with live microphone amplitude and cancel/stop
+  controls. Drag it anywhere (any monitor); it is landscape near the top or
+  bottom edge and portrait elsewhere, and its spot is remembered per monitor
+  so display hotplug does not move it.
 - Local SQLite transcript history.
 - Deterministic application and browser launching before an assistant request
   reaches Codex.
@@ -317,7 +319,7 @@ stop and process it.
 | `Esc` | Cancel active recording or processing | `xinput` polling |
 | Widget X button | Cancel without delivering text | Signal to Vaani |
 | Widget red stop button | Stop recording and process | Signal to Vaani |
-| Drag the widget center | Ask the X11 compositor to move it | GTK4 gesture |
+| Drag the pill (anywhere on it) | Follows the pointer; a press only clicks ✕/stop if it moves <4px | GTK4 gesture + X11 move |
 
 Launcher equivalents:
 

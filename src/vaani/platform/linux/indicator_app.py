@@ -195,6 +195,39 @@ def _pos_from_rel(rx: float, ry: float, w: int, h: int, rect: Rect) -> tuple[int
     return _clamp_pos(x, y, mx, my, mw, mh, w=w, h=h)
 
 
+def _resolve_spot(
+    spot: dict[str, Any],
+    names: list[str],
+    rects: list[Rect],
+    primary: int,
+    w: int,
+    h: int,
+) -> tuple[Rect, float, float]:
+    """Monitor + relative center for a remembered spot on the current layout.
+
+    The spot's own monitor if it is still connected; otherwise the primary
+    monitor at the same relative place; with no spot, primary bottom-center.
+    """
+    mon = spot.get("monitor")
+    has_rel = "rx" in spot and "ry" in spot
+    if mon in names and has_rel:
+        return rects[names.index(mon)], float(spot["rx"]), float(spot["ry"])
+    rect = rects[max(0, min(primary, len(rects) - 1))]
+    if has_rel:
+        return rect, float(spot["rx"]), float(spot["ry"])
+    dx, dy = _default_pos(*rect, w=w, h=h)
+    rx, ry = _rel_from_pos(dx, dy, w, h, rect)
+    return rect, rx, ry
+
+
+def _spot_for_pos(
+    x: int, y: int, w: int, h: int, names: list[str], rects: list[Rect], primary: int
+) -> dict[str, Any]:
+    i = _pick_monitor(rects, x + w / 2.0, y + h / 2.0, primary)
+    rx, ry = _rel_from_pos(x, y, w, h, rects[i])
+    return {"monitor": names[i], "rx": rx, "ry": ry}
+
+
 def _answer_anchor_pos(
     pill_x: int,
     pill_y: int,
@@ -513,6 +546,19 @@ class _X11:
                 return False
         return False
 
+    def geometry(self, xid: int) -> tuple[int, int] | None:
+        """Root position of the toplevel we move (xlib only)."""
+        if self._mode != "xlib":
+            return None
+        try:
+            win = self._toplevel(xid)
+            root = self._dpy.screen().root
+            coords = root.translate_coords(win, 0, 0)
+            return int(coords.x), int(coords.y)
+        except Exception:
+            self._reset()
+            return None
+
     def pointer(self) -> tuple[int, int] | None:
         """Pointer position in root coordinates."""
         dpy = self._display() if self.ok else None
@@ -762,6 +808,10 @@ def run_gtk(
             "h": ph0,
             "orient": orient,
             "monitor_sig": (tuple(names0), tuple(rects0)),
+            # Remembered spot (monitor connector + relative center). Restored on
+            # hotplug; only user placement changes it, so a pill bumped to the
+            # primary monitor returns when its display comes back.
+            "spot": _spot_for_pos(px, py, pw0, ph0, names0, rects0, primary0),
             "drag": None,  # active press/drag bookkeeping
             "held": None,  # button under a held press ("left" | "right")
             "moves_ok": 0,
@@ -866,9 +916,10 @@ def run_gtk(
             # Ignore bogus top-left saves if we never successfully moved.
             if px_ <= 2 and py_ <= 2 and int(state["moves_ok"]) == 0:
                 return
-            name, rect = monitor_at(px_ + pw / 2.0, py_ + ph / 2.0)
-            rx, ry = _rel_from_pos(px_, py_, pw, ph, rect)
-            _save_position(position_path, px_, py_, monitor=name, rx=rx, ry=ry)
+            names, rects, primary = monitors()
+            spot = _spot_for_pos(px_, py_, pw, ph, names, rects, primary)
+            state["spot"] = spot
+            _save_position(position_path, px_, py_, **spot)
 
         def set_orientation(new: str, *, pivot: tuple[float, float] | None = None) -> None:
             """Swap landscape/portrait around ``pivot`` (default: pill center)."""
@@ -891,28 +942,19 @@ def run_gtk(
             names, rects, primary = monitors()
             if state.get("answer_active"):
                 _reset_to_pill()
-            layout_ = _load_layout(position_path)
-            mon = layout_.get("monitor")
-            if mon in names and "rx" in layout_ and "ry" in layout_:
-                rect = rects[names.index(mon)]
-                rx, ry = float(layout_["rx"]), float(layout_["ry"])
-            else:
-                # Saved monitor gone: same relative spot on the primary monitor.
-                rect = rects[primary]
-                if "rx" in layout_ and "ry" in layout_:
-                    rx, ry = float(layout_["rx"]), float(layout_["ry"])
-                else:
-                    pw, ph = pill_size()
-                    dx, dy = _default_pos(*rect, w=pw, h=ph)
-                    rx, ry = _rel_from_pos(dx, dy, pw, ph, rect)
+            spot = state.get("spot") if isinstance(state.get("spot"), dict) else {}
+            rect, rx, ry = _resolve_spot(spot, names, rects, primary, *pill_size())
             orient_ = _zone_orientation(rect[1] + ry * rect[3], rect, str(state["orient"]))
             state["orient"] = orient_
             pw, ph = pill_size()
             set_content_size(pw, ph)
             state["x"], state["y"] = _pos_from_rel(rx, ry, pw, ph, rect)
+            _surface, xid = _xid()
+            actual = x11.geometry(xid) if xid is not None else None
             print(
                 f"[vaani] indicator monitors={list(zip(names, rects))} primary={primary} "
-                f"target={state['x']},{state['y']} orient={orient_}",
+                f"spot={spot} target={state['x']},{state['y']} orient={orient_} "
+                f"window_was={actual}",
                 flush=True,
             )
             x11.forget()
@@ -926,6 +968,21 @@ def run_gtk(
                 return
             state["monitor_sig"] = sig
             relayout_for_monitors()
+
+        def guard_position() -> None:
+            """Re-place if the WM moved us (e.g. dropped at 0,0 after a RandR event)."""
+            if state.get("hidden") or float(state.get("anim_progress", 1.0)) < 1.0:
+                return
+            _surface, xid = _xid()
+            if xid is None:
+                return
+            actual = x11.geometry(xid)
+            want = (int(state["x"]) - P, int(state["y"]) - P)
+            if actual is None or (abs(actual[0] - want[0]) <= 1 and abs(actual[1] - want[1]) <= 1):
+                return
+            print(f"[vaani] indicator: window at {actual}, expected {want}; re-placing", flush=True)
+            x11.forget()
+            place()
 
         def _cancel_dismiss_timer() -> None:
             dismiss_id = state.get("dismiss_id")
@@ -1836,6 +1893,7 @@ def run_gtk(
             if state["ticks"] % 15 == 0 and not state.get("drag"):
                 # Display hotplug / resolution change.
                 check_monitors()
+                guard_position()
             if phase == "idle":
                 press = state.get("press")
                 if (
