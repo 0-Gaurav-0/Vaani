@@ -155,7 +155,7 @@ def _recorded_job(tmp_path):
 
 
 def test_worker_pauses_on_quota_then_resumes_without_respending(tmp_path, monkeypatch):
-    monkeypatch.setattr(worker, "notify", lambda *a: None)
+    monkeypatch.setattr(worker, "notify", lambda *a, **k: None)
     d = _recorded_job(tmp_path)
     fake = FakeTranscriber(fail_first=True)
     assert worker.process_all(tmp_path, fake) == 1
@@ -171,7 +171,7 @@ def test_worker_pauses_on_quota_then_resumes_without_respending(tmp_path, monkey
 
 
 def test_worker_without_key_keeps_audio_and_retries_later(tmp_path, monkeypatch):
-    monkeypatch.setattr(worker, "notify", lambda *a: None)
+    monkeypatch.setattr(worker, "notify", lambda *a, **k: None)
     d = _recorded_job(tmp_path)
     assert worker.process_all(tmp_path, None) == 1
     job = MeetingJob.load(d)
@@ -198,7 +198,7 @@ class FakeRecorder:
 
 def test_control_r_starts_single_r_ignored_rr_stops(monkeypatch):
     import vaani.meeting.control as ctl
-    monkeypatch.setattr(ctl, "notify", lambda *a: None)
+    monkeypatch.setattr(ctl, "notify", lambda *a, **k: None)
     spawned, cues = [], []
     rec = FakeRecorder()
     c = MeetingControl(Path("/tmp/meet"), recorder=rec, feedback=cues.append, spawn=lambda: spawned.append(1))
@@ -210,7 +210,7 @@ def test_control_r_starts_single_r_ignored_rr_stops(monkeypatch):
 
 def test_control_cap_stops_and_processes(monkeypatch):
     import vaani.meeting.control as ctl
-    monkeypatch.setattr(ctl, "notify", lambda *a: None)
+    monkeypatch.setattr(ctl, "notify", lambda *a, **k: None)
     monkeypatch.setattr(ctl, "WARN_BEFORE_MAX_S", 0.05)
     spawned = []
     rec = FakeRecorder()
@@ -231,6 +231,7 @@ def test_hotkey_r_taps_abort_dictation_and_count(monkeypatch):
     meetings, aborts = [], []
     m = MiddleButtonHotkeyManager(lambda mode: True, clock=lambda: now[0],
                                   on_meeting=meetings.append, on_abort_quiet=lambda: aborts.append(1))
+    monkeypatch.setattr(m, "_trackpoint_middle_state", lambda: True)
     m._session_active = True  # 150 ms hold already started dictation
     m.on_r_key(True); m.on_r_key(False)
     now[0] = 0.2
@@ -250,10 +251,65 @@ def test_hotkey_meeting_hold_release_resets_gesture(monkeypatch):
     now = [0.0]
     m = hk.MiddleButtonHotkeyManager(lambda mode: True, clock=lambda: now[0], on_meeting=lambda n: None)
     monkeypatch.setattr(m, "_trackpoint_middle_state_for_press", lambda: True)
-    monkeypatch.setattr(m, "_trackpoint_middle_state", lambda: False)
+    middle = [True]
+    monkeypatch.setattr(m, "_trackpoint_middle_state", lambda: middle[0])
     monkeypatch.setattr(m, "_media_topology_is_verified", lambda: False)
     m._handle_button_event(4)  # press
     m.on_r_key(True); m.on_r_key(False)
+    middle[0] = False
     m._handle_button_event(5)  # release
     assert m._button_source is None and not m._gesture.down and m._gesture.armed_until < 0
     assert not m._ignore_until_up and not m._meeting_hold
+
+
+class FakeRoot:
+    def __init__(self):
+        self.grabbed = 0
+        self.log = []
+
+    def grab_key(self, *a):
+        self.grabbed += 1
+        self.log.append("grab")
+
+    def ungrab_key(self, *a):
+        self.grabbed -= 1
+        self.log.append("ungrab")
+
+
+def _manager_with_grab(monkeypatch, middle):
+    from vaani import hotkeys as hk
+
+    meetings = []
+    m = hk.MiddleButtonHotkeyManager(lambda mode: True, on_meeting=meetings.append, on_cancel=lambda: None)
+    m._r_keycode, m._root = 27, FakeRoot()
+    m._dpy = type("D", (), {"flush": lambda self: None})()
+    monkeypatch.setattr(m, "_trackpoint_middle_state_for_press", lambda: True)
+    monkeypatch.setattr(m, "_trackpoint_middle_state", lambda: middle[0])
+    monkeypatch.setattr(m, "_media_topology_is_verified", lambda: False)
+    return m, meetings
+
+
+def test_r_grab_released_on_poll_release_and_esc(monkeypatch):
+    middle = [True]
+    m, _ = _manager_with_grab(monkeypatch, middle)
+    m._handle_button_event(4)
+    assert m._root.grabbed == 1
+    middle[0] = False
+    m._sync_trackpoint_release()  # release event missed; poll catches it
+    assert m._root.grabbed == 0
+    middle[0] = True
+    m._handle_button_event(4)
+    assert m._root.grabbed == 1
+    m._cancel_now()  # Esc
+    assert m._root.grabbed == 0
+
+
+def test_r_with_middle_up_never_starts_meeting(monkeypatch):
+    middle = [True]
+    m, meetings = _manager_with_grab(monkeypatch, middle)
+    m._handle_button_event(4)
+    middle[0] = False  # release lost, grab stale
+    m.on_r_key(True)
+    m._r_last = -10
+    m.meeting_tick()
+    assert meetings == [] and m._root.grabbed == 0

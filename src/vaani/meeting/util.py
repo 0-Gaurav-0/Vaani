@@ -28,8 +28,9 @@ def gemini_key() -> str | None:
     return None
 
 
-def notify(title: str, body: str) -> None:
+def notify(title: str, body: str, *, sticky: bool = False) -> None:
+    argv = ["notify-send", "-a", "Vaani", *(["-u", "critical"] if sticky else []), title, body]
     try:
-        subprocess.run(["notify-send", "-a", "Vaani", title, body], check=False, timeout=5)
+        subprocess.run(argv, check=False, timeout=5)
     except (OSError, subprocess.SubprocessError):
         pass

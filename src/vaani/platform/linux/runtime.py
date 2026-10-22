@@ -6,6 +6,7 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 
 from ...audio import AudioRecorderImpl, reap_orphan_parec
 from ...codex import CodexRunner, ResultWindow
@@ -288,7 +289,10 @@ def _run_x11(settings: Settings) -> int:
         on_touchpad_middle=on_touchpad_middle,
         on_handsfree=on_handsfree,
         is_recording=lambda: controller.state is _AppState.RECORDING,
-        on_meeting=meeting.shortcut,
+        # pactl/parec/notify-send take time; keep them off the X event thread.
+        on_meeting=lambda taps: threading.Thread(
+            target=meeting.shortcut, args=(taps,), daemon=True, name="vaani-meeting-key"
+        ).start(),
         on_abort_quiet=controller.abort_quiet,
     )
     controller.hotkeys = hotkeys

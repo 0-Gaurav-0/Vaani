@@ -115,6 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # request lines carry upload ids
     try:
         os.nice(10)
     except OSError:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -40,6 +41,15 @@ def parec_argv(device: str, parec: str = "parec") -> list[str]:
         PAREC_LATENCY_ARG,
         CLIENT_MARKER,
     ]
+
+
+def scoped(argv: list[str]) -> list[str]:
+    """Run in its own systemd user scope so killing Vaani's cgroup (crash,
+    release restart, closing the terminal app it was started from) doesn't
+    stop the meeting. ``--scope`` execs in place, so the PID is unchanged."""
+    if shutil.which("systemd-run"):
+        return ["systemd-run", "--user", "--scope", "--quiet", "--collect", *argv]
+    return argv
 
 
 def output_kind(run=subprocess.run) -> str:
@@ -106,14 +116,14 @@ class MeetingRecorder:
                 with os.fdopen(fd, "wb") as out:
                     procs.append(
                         subprocess.Popen(
-                            parec_argv(device, self.parec),
+                            scoped(parec_argv(device, self.parec)),
                             stdout=out,
                             stderr=subprocess.DEVNULL,
                             env=env,
                             start_new_session=True,  # survives a Vaani crash/restart
                         )
                     )
-            time.sleep(0.05)
+            time.sleep(0.5)  # systemd-run --scope registers, then execs parec
             dead = [p for p in procs if p.poll() not in (None, 0)]
             if dead:
                 raise RuntimeError(f"parec exited {dead[0].returncode}")

@@ -70,7 +70,8 @@ class MeetingControl:
         self._token += 1
         threading.Thread(target=self._cap_guard, args=(self._token,), daemon=True, name="vaani-meeting-cap").start()
         self._feedback("start")
-        notify("Meeting recording started", f"TrackPoint + R R to stop.\n{job.dir}")
+        # Stays on screen until dismissed: the visible "recording" signal.
+        notify("● Meeting recording", f"TrackPoint + R R to stop.\n{job.dir}", sticky=True)
         return True
 
     def _finish(self, reason: str) -> bool:

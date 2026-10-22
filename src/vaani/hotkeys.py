@@ -728,6 +728,9 @@ class MiddleButtonHotkeyManager:
 
     def _cancel_now(self) -> None:
         """Esc (or equivalent): abort session; only ignore middle-button if it is down."""
+        self._grab_r(False)
+        self._r_taps = 0
+        self._meeting_hold = False
         if self.on_cancel:
             try:
                 self.on_cancel()
@@ -780,6 +783,15 @@ class MiddleButtonHotkeyManager:
         if self._button_source != "trackpoint" or not self._gesture.down:
             return False
         self._button_source = None
+        self._grab_r(False)
+        if self._meeting_hold:
+            # Poll-path release after a meeting tap: same reset as the event path.
+            self._meeting_hold = False
+            if self._r_taps:
+                self._resolve_meeting_taps()
+            self._gesture.reset()
+            self._ignore_until_up = False
+            return True
         if self._gesture.on_up():
             self._stop_mode()
         else:
@@ -820,6 +832,11 @@ class MiddleButtonHotkeyManager:
         """R key event while grabbed (i.e. while the middle button is held)."""
         if not pressed:
             self._r_down = False
+            return
+        if self._trackpoint_middle_state() is not True:
+            # Stale grab (missed release): never let a typed "r" start a meeting.
+            self._grab_r(False)
+            self._r_taps = 0
             return
         if self._r_down:  # autorepeat
             return

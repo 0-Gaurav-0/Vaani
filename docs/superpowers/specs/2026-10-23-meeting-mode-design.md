@@ -29,9 +29,11 @@ summary. Cost must be **$0**. Normal dictation must not get slower or heavier.
   (`spk:0`), `start_offset`/`end_offset` (`"1.400s"`).
 - Docs: ≤30 min per request with diarization; ≤8 speakers, 3+ "experimental".
   Free-tier quotas are not published.
-- Accuracy risk seen on two 20 s clips: diarized mode reworded one opening
-  phrase; both modes dropped the last ~6 s of one clip that Groq kept. Hence the
-  Whisper coverage check below.
+- Accuracy on the user's 52 s dictation: Gemini misheard one phrase ("I had a
+  phone question" for "I have this one question"). A span Groq had and Gemini
+  lacked turned out to be **silence** (frame RMS at noise floor, 31–38 s):
+  Whisper hallucinated it. So Whisper must never fill gaps by text coverage.
+- 503 "high demand" happens on the free tier; retried in-request.
 - Machine: 12 cores, 15 GB RAM, no GPU, no ffmpeg, no torch.
 
 ## Shortcut
@@ -45,14 +47,19 @@ summary. Cost must be **$0**. Normal dictation must not get slower or heavier.
 
 ## Components
 
-All under `src/vaani/meeting/`; each testable alone.
+All under `src/vaani/meeting/`; each testable alone. Slice 1 (shipped first):
+recorder, job, prepare, Gemini, assemble (speaker linking via 30 s part
+overlap), worker, control, hotkey. Slice 2: coverage, speakers (enrollment),
+postprocess (names, translation, summary), recording pill.
 
 1. `recorder.py` — `MeetingRecorder`: two `parec` processes (mic =
-   default source, system = `@DEFAULT_MONITOR@`), 16 kHz mono s16 raw WAV each,
-   `--latency-msec` set. If laptop speakers are in use, loads PipeWire
-   `module-echo-cancel` for the meeting and records its source as the mic;
-   unloads at stop. 4 h cap with warning; cap → stop *and process*.
-   Writes `job.json` (`state: recording`) at start so a crash is recoverable.
+   default source, system = `@DEFAULT_MONITOR@`), 16 kHz mono s16 raw each,
+   `--latency-msec` and `--client-name=vaani-meeting` (the dictation reaper
+   never matches it). Each runs in its own `systemd-run --user --scope`, so a
+   Vaani crash/restart doesn't stop it; the next Vaani adopts it from
+   `job.json`. No echo cancellation: on laptop speakers the mix is the mic only
+   (it already hears remote voices); on headphones/Bluetooth, mic + system.
+   4 h cap with warning; cap → stop *and process*.
 2. `job.py` — `MeetingJob`: on-disk state machine in `job.json`:
    `recording → recorded → prepared → transcribed(part i) → linked → written`.
    Each step idempotent; restart resumes from last completed step. Failure
@@ -64,10 +71,10 @@ All under `src/vaani/meeting/`; each testable alone.
 4. `gemini_transcribe.py` — Files API upload + interaction call per part;
    parses word annotations into `Word(text, start, end, speaker)`. Retries with
    backoff; HTTP 429 → job pauses (`retry_after`), resumed by a timer.
-5. `coverage.py` — Groq Whisper `verbose_json` per part; for each Whisper
-   segment whose time range has <50 % of its word count in Gemini words,
-   insert the Whisper text (marked `[whisper]`) attributed to the nearest
-   Gemini speaker.
+5. `coverage.py` (slice 2) — find gaps locally: windows where mix frame RMS
+   shows speech for ≥2 s but Gemini returned no words. Send only those windows
+   to Groq Whisper (shares the dictation quota, so keep it small) and insert the
+   text marked `[whisper]`. Never fill silent windows.
 6. `speakers.py` — sherpa-onnx speaker embedding (CPU, ~28 MB model downloaded
    once to `~/.local/share/vaani/models/`). Per part, average embedding per
    Gemini speaker → greedy cosine clustering to global speakers across parts.
