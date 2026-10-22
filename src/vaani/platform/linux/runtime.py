@@ -11,6 +11,7 @@ from ...audio import AudioRecorderImpl, reap_orphan_parec
 from ...codex import CodexRunner, ResultWindow
 from ...config import Settings, sweep_audio_directory
 from ...controller import Controller
+from ...session_archive import recover_recordings
 from ...delivery import ClipboardDelivery
 from ...groq import GroqClient
 from ...history import HistoryStore
@@ -140,10 +141,14 @@ def run_linux(settings: Settings) -> int:
 def _run_x11(settings: Settings) -> int:
     _reap_orphan_indicators()
     _reap_orphan_mic()
+    # A crashed session's WAV would be swept below; keep it instead.
+    recovered = recover_recordings(settings.audio_dir, settings.sessions_dir)
     sweep_audio_directory(settings.audio_dir)
     os.environ["VAANI_AMPLITUDE_PATH"] = str(settings.amplitude_path)
     os.environ["VAANI_INDICATOR_CONTROL"] = str(settings.indicator_control_path)
     logger = configure_logging(settings.log_dir, debug=settings.debug)
+    for path in recovered:
+        logger.info("event=session_recovered dir=%s", path.parent.name)
     try:
         from Xlib.display import Display
 

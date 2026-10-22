@@ -4,8 +4,10 @@ A capped or crashed session used to lose everything said so far: chunk
 transcripts lived only in memory and the WAV was unlinked on failure. Each
 chunk the :class:`~vaani.stt_chunks.ChunkedTranscriber` cuts is now written to
 ``<root>/<YYYYmmdd-HHMMSS>/`` as FLAC (lossless, ~2.3x smaller than WAV; ~3 ms
-CPU per 20 s chunk) plus one line in ``transcript.txt``. Sessions older than
-``RETENTION_S`` are deleted when the next session starts.
+CPU per 20 s chunk) *before* it is uploaded, plus one line in
+``transcript.txt`` once the upload settles. A recording left behind by a crash
+is moved to ``<root>/<stamp>-recovered/`` at startup instead of being swept.
+Sessions older than ``RETENTION_S`` are deleted when the next session starts.
 """
 from __future__ import annotations
 
@@ -70,17 +72,79 @@ class SessionArchive:
             self._dir = path
         return self._dir
 
-    def save_chunk(self, index: int, pcm: bytes, text: str | None) -> None:
-        """Write chunk audio and its transcript line. Never raises."""
+    def save_audio(self, index: int, pcm: bytes) -> None:
+        """Write chunk audio. Called before upload; never raises."""
         try:
             with self._lock:
-                directory = self._ensure_dir()
-                _write_audio(directory / f"chunk-{index:03d}", pcm)
-                line = text if text else "<no transcript>"
-                with open(directory / "transcript.txt", "a", encoding="utf-8") as fh:
-                    fh.write(f"[{index:03d}] {line}\n")
+                _write_audio(self._ensure_dir() / f"chunk-{index:03d}", pcm)
         except Exception as exc:
             self._logger.warning("event=session_archive_failed index=%s detail=%s", index, type(exc).__name__)
+
+    def save_text(self, index: int, text: str | None) -> None:
+        """Append the chunk's transcript line. Never raises."""
+        try:
+            with self._lock:
+                path = self._ensure_dir() / "transcript.txt"
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                    fh.write(f"[{index:03d}] {text or '<no transcript>'}\n")
+        except Exception as exc:
+            self._logger.warning("event=session_archive_failed index=%s detail=%s", index, type(exc).__name__)
+
+
+MIN_RECOVER_BYTES = 44 + RATE * 2  # at least ~1 s of audio
+
+
+def recover_recordings(audio_dir: Path, root: Path, *, background: bool = True) -> list[Path]:
+    """Move leftover ``recording-*.wav`` files (a crashed session) into ``root``.
+
+    Must run before :func:`vaani.config.sweep_audio_directory`, which deletes
+    them. The move is a rename; FLAC compression runs once, off-thread.
+    """
+    moved: list[Path] = []
+    if not audio_dir.is_dir() or audio_dir.is_symlink():
+        return moved
+    for wav_path in sorted(audio_dir.glob("recording-*.wav")):
+        try:
+            st = wav_path.lstat()
+            if wav_path.is_symlink() or not wav_path.is_file() or st.st_size < MIN_RECOVER_BYTES:
+                continue
+            if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                continue
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(st.st_mtime))
+            target_dir = root / f"{stamp}-recovered"
+            n = 1
+            while target_dir.exists():
+                n += 1
+                target_dir = root / f"{stamp}-recovered-{n}"
+            target_dir.mkdir(mode=0o700)
+            target = target_dir / "recording.wav"
+            shutil.move(str(wav_path), str(target))
+            moved.append(target)
+        except OSError:
+            continue
+    if moved:
+        if background:
+            threading.Thread(target=_compress_all, args=(moved,), daemon=True, name="vaani-recover").start()
+        else:
+            _compress_all(moved)
+    return moved
+
+
+def _compress_all(paths: list[Path]) -> None:
+    for wav_path in paths:
+        try:
+            # parec's header sizes are unreliable after a crash; read raw PCM.
+            from .stt_chunks import FRAME_BYTES, _data_offset
+
+            data = wav_path.read_bytes()[_data_offset(wav_path):]
+            pcm = data[: len(data) // FRAME_BYTES * FRAME_BYTES]
+            out = _write_audio(wav_path.with_suffix(""), pcm)
+            if out.suffix != ".wav":
+                wav_path.unlink(missing_ok=True)
+        except Exception as exc:
+            LOGGER.warning("event=session_recover_compress_failed detail=%s", type(exc).__name__)
 
 
 def _write_audio(stem: Path, pcm: bytes) -> Path:

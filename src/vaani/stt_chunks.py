@@ -183,15 +183,20 @@ class ChunkedTranscriber:
             return b""
         return data[: len(data) // FRAME_BYTES * FRAME_BYTES]
 
-    def _keep(self, index: int, pcm: bytes, text: str | None) -> None:
-        # After the upload, so archiving never delays a transcript.
+    def _keep_audio(self, index: int, pcm: bytes) -> None:
+        # Before the upload: a failure or hang there must not lose the audio.
         if self._archive is not None:
-            self._archive.save_chunk(index, pcm, text)
+            self._archive.save_audio(index, pcm)
+
+    def _keep_text(self, index: int, text: str | None) -> None:
+        if self._archive is not None:
+            self._archive.save_text(index, text)
 
     def _submit(self, pcm: bytes) -> Future:
         index = len(self._futures)
 
         def job() -> str:
+            self._keep_audio(index, pcm)
             chunk = write_wav(pcm, self.path.parent)
             started = time.monotonic()
             text: str | None = None
@@ -202,7 +207,7 @@ class ChunkedTranscriber:
                     chunk.unlink(missing_ok=True)
                 except OSError:
                     pass
-                self._keep(index, pcm, text)
+                self._keep_text(index, text)
             self._logger.info(
                 "event=stt_chunk_done index=%s seconds=%.1f chars=%s elapsed=%.2f",
                 index,
@@ -264,6 +269,7 @@ class ChunkedTranscriber:
             tail_index, tail_pcm = len(self._futures), tail
 
             def tail_job() -> str:
+                self._keep_audio(tail_index, tail_pcm)
                 text: str | None = None
                 try:
                     text = (self._transcribe(chunk) or "").strip()
@@ -273,7 +279,7 @@ class ChunkedTranscriber:
                         chunk.unlink(missing_ok=True)
                     except OSError:
                         pass
-                    self._keep(tail_index, tail_pcm, text)
+                    self._keep_text(tail_index, text)
 
             tail_future = tail_pool.submit(tail_job)
         parts: list[str] = []
