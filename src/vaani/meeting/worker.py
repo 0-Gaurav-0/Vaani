@@ -123,7 +123,17 @@ def main(argv: list[str] | None = None) -> int:
     key = gemini_key()
     transcriber = GeminiTranscriber(key) if key else None
     sweep_old_audio(root)
-    return 1 if process_all(root, transcriber) else 0
+    # Re-scan: a meeting stopped while we worked is picked up without waiting
+    # for the 30 min retry loop.
+    seen: set[tuple[str, str]] = set()
+    pending = 0
+    for _ in range(20):
+        snapshot = {(str(j.dir), j.state) for j in find_jobs(root) if j.due()}
+        if not snapshot or snapshot <= seen:
+            break
+        seen |= snapshot
+        pending = process_all(root, transcriber)
+    return 1 if pending else 0
 
 
 if __name__ == "__main__":

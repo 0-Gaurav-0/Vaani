@@ -49,8 +49,9 @@ _DEFAULT_MESSAGES = {
 
 # Dismiss the pill — NOT processing (pill stays visible while Groq works).
 # Answer phase has its own auto-dismiss in the indicator; no answer cue here.
-_DISMISS_CUES = frozenset({"success", "failure", "busy", "paste", "stop"})
-_SILENT_CUES = frozenset({"success", "paste"})
+# "dismiss": hide the pill without a sound (dictation dropped by the meeting shortcut).
+_DISMISS_CUES = frozenset({"success", "failure", "busy", "paste", "stop", "dismiss"})
+_SILENT_CUES = frozenset({"success", "paste", "dismiss"})
 _SESSION_ENV_KEYS = frozenset(
     {
         "PATH",

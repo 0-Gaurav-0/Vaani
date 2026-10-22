@@ -31,6 +31,8 @@ class MeetingJob:
     error: str = ""
     retry_after: float = 0.0
     attempts: int = 0
+    paused_total: float = 0.0  # seconds paused so far (not recorded)
+    paused_since: float = 0.0  # epoch while paused, else 0
 
     @property
     def path(self) -> Path:

@@ -179,47 +179,114 @@ def test_worker_without_key_keeps_audio_and_retries_later(tmp_path, monkeypatch)
     assert (d / "audio" / "mix.flac").is_file()
 
 
-# ---- control -------------------------------------------------------------
+# ---- control ----------------------------------------------------------
 
 class FakeRecorder:
     def __init__(self):
         self.active, self.elapsed, self.starts, self.stops = False, 0.0, 0, 0
+        self.job = None
+        self.paused_flag = False
 
     def start(self):
         self.active = True
         self.starts += 1
-        return MeetingJob(Path("/tmp/x"))
+        self.job = MeetingJob(Path("/tmp/x"), started=time.time())
+        return self.job
 
     def stop(self):
         self.active = False
         self.stops += 1
         return MeetingJob(Path("/tmp/x"), state=RECORDED)
 
+    def pause(self):
+        if self.paused_flag:
+            return False
+        self.paused_flag = True
+        self.job.paused_since = time.time()
+        return True
 
-def test_control_r_starts_single_r_ignored_rr_stops(monkeypatch):
+    def resume(self):
+        if not self.paused_flag:
+            return False
+        self.paused_flag = False
+        self.job.paused_since = 0.0
+        return True
+
+    def level(self):
+        return 0.3
+
+
+class FakePill:
+    def __init__(self):
+        self.shown = self.hidden = 0
+        self.levels, self.commands, self.updates = [], [], []
+
+    def show(self, **kw):
+        self.shown += 1
+
+    def update(self, **kw):
+        self.updates.append(kw)
+
+    def level(self, v):
+        self.levels.append(v)
+
+    def poll_command(self):
+        return self.commands.pop(0) if self.commands else None
+
+    def hide(self):
+        self.hidden += 1
+
+
+def _control(monkeypatch, **kw):
     import vaani.meeting.control as ctl
     monkeypatch.setattr(ctl, "notify", lambda *a, **k: None)
     spawned, cues = [], []
-    rec = FakeRecorder()
-    c = MeetingControl(Path("/tmp/meet"), recorder=rec, feedback=cues.append, spawn=lambda: spawned.append(1))
-    assert c.shortcut(1) and rec.active
+    rec, pill = FakeRecorder(), FakePill()
+    c = MeetingControl(Path("/tmp/meet"), recorder=rec, pill=pill, sound=cues.append,
+                       spawn=lambda: spawned.append(1), **kw)
+    return c, rec, pill, spawned, cues
+
+
+def _wait(cond, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return cond()
+
+
+def test_control_r_starts_single_r_ignored_rr_stops_and_pill_hides(monkeypatch):
+    c, rec, pill, spawned, cues = _control(monkeypatch)
+    assert c.shortcut(1) and rec.active and pill.shown == 1
+    assert _wait(lambda: pill.levels)  # waveform fed while recording
     assert not c.shortcut(1) and rec.active  # stray tap does not stop
     assert c.shortcut(2) and not rec.active and spawned == [1]
-    assert cues == ["start", "busy", "processing"]
+    assert pill.hidden == 1  # gone immediately, no processing pill
+    assert cues == ["start", "busy", "stop"]
+    assert c.shortcut(1) and rec.starts == 2  # next meeting right away
 
 
-def test_control_cap_stops_and_processes(monkeypatch):
+def test_control_pill_pause_resume_stop(monkeypatch):
+    c, rec, pill, spawned, cues = _control(monkeypatch)
+    c.shortcut(1)
+    pill.commands += ["pause"]
+    assert _wait(lambda: rec.paused_flag)
+    assert pill.updates[-1]["paused_since"] > 0
+    pill.commands += ["resume"]
+    assert _wait(lambda: not rec.paused_flag)
+    pill.commands += ["stop"]
+    assert _wait(lambda: not rec.active) and spawned == [1] and pill.hidden == 1
+
+
+def test_control_cap_counts_recorded_time_and_processes(monkeypatch):
     import vaani.meeting.control as ctl
-    monkeypatch.setattr(ctl, "notify", lambda *a, **k: None)
-    monkeypatch.setattr(ctl, "WARN_BEFORE_MAX_S", 0.05)
-    spawned = []
-    rec = FakeRecorder()
-    c = MeetingControl(Path("/tmp/meet"), recorder=rec, spawn=lambda: spawned.append(1), max_s=0.1)
-    assert c.shortcut(1)
-    deadline = time.monotonic() + 2
-    while rec.active and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert not rec.active and spawned == [1]
+    monkeypatch.setattr(ctl, "WARN_BEFORE_MAX_S", 1)
+    c, rec, pill, spawned, cues = _control(monkeypatch, max_s=10)
+    c.shortcut(1)
+    rec.elapsed = 9.5
+    assert _wait(lambda: "warn" in cues)
+    assert rec.active
+    rec.elapsed = 10.0
+    assert _wait(lambda: not rec.active) and spawned == [1]
 
 
 # ---- hotkey --------------------------------------------------------------
@@ -313,3 +380,43 @@ def test_r_with_middle_up_never_starts_meeting(monkeypatch):
     m._r_last = -10
     m.meeting_tick()
     assert meetings == [] and m._root.grabbed == 0
+
+
+def test_recorder_pause_resume_appends_and_excludes_paused_time(tmp_path, monkeypatch):
+    import stat
+    from vaani.meeting import recorder as recmod
+
+    fake = tmp_path / "parec"
+    fake.write_text("#!/bin/sh\ntrap 'exit 0' INT TERM\nwhile :; do printf 'abcd'; sleep 0.01; done\n")
+    fake.chmod(stat.S_IRWXU)
+    monkeypatch.setattr(recmod, "scoped", lambda argv: argv)
+    monkeypatch.setattr(recmod, "output_kind", lambda: "speaker")
+    r = recmod.MeetingRecorder(tmp_path / "meet", parec=str(fake))
+    job = r.start()
+    mic = job.dir / "audio" / "mic.raw"
+    time.sleep(0.3)
+    assert r.pause() and not r.pause()
+    size_paused = mic.stat().st_size
+    assert size_paused > 0
+    time.sleep(0.4)
+    assert mic.stat().st_size == size_paused  # nothing captured while paused
+    assert r.level() == 0.0
+    paused_elapsed = r.elapsed
+    time.sleep(0.2)
+    assert r.elapsed == pytest.approx(paused_elapsed, abs=0.05)  # clock frozen
+    assert r.resume()
+    time.sleep(0.3)
+    assert mic.stat().st_size > size_paused  # appended, not truncated
+    done = r.stop()
+    assert done.state == RECORDED and done.paused_total >= 0.4 and done.paused_since == 0.0
+    assert not [p for p in job.pids if recmod._alive_meeting_pid(p)]
+
+
+def test_adopt_keeps_a_meeting_paused_at_crash(tmp_path):
+    from vaani.meeting import recorder as recmod
+
+    d = tmp_path / "2026-10-23 0900"
+    (d / "audio").mkdir(parents=True)
+    MeetingJob(d, state=RECORDING, started=time.time() - 60, paused_since=time.time() - 10).save()
+    r = recmod.MeetingRecorder(tmp_path)
+    assert r.adopt() == [] and r.active and r.paused

@@ -527,7 +527,7 @@ class Controller:
                 try: self.recorder.cleanup()
                 except Exception: pass
                 self.state = AppState.IDLE; self._emit("cancelled")
-                if not quiet: self._feedback("busy")
+                self._feedback("dismiss" if quiet else "busy")
                 return True
             if self.state is AppState.PROCESSING:
                 self._token += 1

@@ -275,7 +275,18 @@ def _run_x11(settings: Settings) -> int:
     from ...meeting.control import MeetingControl
     from ...meeting.util import default_root as meeting_root
 
-    meeting = MeetingControl(meeting_root(), feedback=controller._feedback, logger=logger)
+    from ...meeting.pill import MeetingPill
+
+    def meeting_sound(cue: str) -> None:
+        # Sound only: the dictation pill must not react to meeting events.
+        threading.Thread(target=feedback._play_sound, args=(cue,), daemon=True).start()
+
+    meeting = MeetingControl(
+        meeting_root(),
+        pill=MeetingPill(settings.cache_dir, settings.log_dir),
+        sound=meeting_sound,
+        logger=logger,
+    )
     try:
         meeting.startup()
     except Exception as exc:
@@ -448,6 +459,10 @@ def _run_x11(settings: Settings) -> int:
             pass
         try:
             hotkeys.unregister()
+        except Exception:
+            pass
+        try:
+            meeting.shutdown()  # hides the pill; a recording meeting keeps going
         except Exception:
             pass
         try:
