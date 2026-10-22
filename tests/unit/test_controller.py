@@ -379,3 +379,51 @@ def test_long_clip_is_not_silently_discarded_as_too_short():
     # Regression: a capped 10-minute dictation was logged as too_short and lost.
     names = _stop_raising('recording too long')
     assert 'cancelled' not in names and 'failure' in names
+
+
+def _wav_file(path, seconds=2.0):
+    import wave
+    with wave.open(str(path), 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(b'\x10\x27\xf0\xd8' * int(8000 * seconds))
+    return path
+
+
+def test_failed_transcription_preserves_recording(tmp_path):
+    wav = _wav_file(tmp_path / 'recording-x.wav')
+
+    class RecFile(Rec):
+        def start(self): return SimpleNamespace(path=wav, duration_seconds=2)
+        def stop(self): return SimpleNamespace(path=wav, duration_seconds=2)
+
+    class GroqDown(Groq):
+        def transcribe(self, *a, **k): raise RuntimeError('http')
+        def transcribe_hinglish(self, *a, **k): raise RuntimeError('http')
+
+    sessions = tmp_path / 'sessions'
+    c = Controller(recorder=RecFile(), groq=GroqDown(), delivery=Delivery(), history=History(),
+                   key_provider=lambda: 'key', max_duration=60, session_archive_dir=sessions)
+    assert c.trigger('smart') and c.stop()
+    c._worker.join(2)
+    kept = list(sessions.glob('*-failed/recording.*'))
+    assert kept and not wav.exists()
+    assert c.events[-1].name == 'failure'
+
+
+def test_successful_transcription_still_deletes_recording(tmp_path):
+    wav = _wav_file(tmp_path / 'recording-y.wav')
+
+    class RecFile(Rec):
+        def start(self): return SimpleNamespace(path=wav, duration_seconds=2)
+        def stop(self): return SimpleNamespace(path=wav, duration_seconds=2)
+
+    class GroqH(Groq):
+        def transcribe_hinglish(self, *a, **k): return SimpleNamespace(text='hello there', language='en')
+
+    sessions = tmp_path / 'sessions'
+    h = History()
+    c = Controller(recorder=RecFile(), groq=GroqH(), delivery=Delivery(), history=h,
+                   key_provider=lambda: 'key', max_duration=60, session_archive_dir=sessions)
+    assert c.trigger('smart') and c.stop()
+    c._worker.join(2)
+    assert h.rows and not wav.exists() and not list(sessions.glob('*-failed'))

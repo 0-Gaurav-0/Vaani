@@ -53,7 +53,7 @@ from .assistant_route import (
 from .indicator_protocol import clear_command, read_command
 from .delivery import DeliveryStatus
 from .memory import append_turn, load_context
-from .session_archive import SessionArchive
+from .session_archive import SessionArchive, preserve_recording
 from .stt_chunks import ChunkedTranscriber, chunked_stt_enabled
 
 JEV_UNAVAILABLE = "Jev is unavailable right now (OpenRouter). Try again in a bit."
@@ -492,6 +492,7 @@ class Controller:
                 self._feedback("busy")
                 self.logger.info("event=recording_ignored reason=too_short")
                 return False
+            self._preserve_audio(self._audio)
             self._fail(exc, "mic")
             return False
         self._feedback("processing")
@@ -684,10 +685,11 @@ class Controller:
                     audio.path,
                     key,
                     cancel=self._cancel,
-                    delete_audio=True,
+                    delete_audio=False,
                     language=None,
                     prompt=None,
                 )
+                self._discard_audio(audio)
                 if self._cancel.is_set() or token != self._token:
                     return
                 raw = (result.text or "").strip()
@@ -735,15 +737,18 @@ class Controller:
                 except OSError:
                     pass
             elif callable(transcribe_h):
-                kwargs = {"cancel": self._cancel, "delete_audio": True}
+                # Keep the WAV until transcription succeeds; a failure preserves it.
+                kwargs = {"cancel": self._cancel, "delete_audio": False}
                 if self.mode == "assistant" and _accepts_kwarg(transcribe_h, "parallel"):
                     # Short, often-Hinglish commands: run en+hi concurrently.
                     kwargs["parallel"] = True
                 result = transcribe_h(audio.path, key, **kwargs)
+                self._discard_audio(audio)
             else:
                 result = self.groq.transcribe(
-                    audio.path, key, cancel=self._cancel, delete_audio=True, language="en"
+                    audio.path, key, cancel=self._cancel, delete_audio=False, language="en"
                 )
+                self._discard_audio(audio)
             if self._cancel.is_set() or token != self._token: return
             raw = (result.text or "").strip()
             gemini_raw = getattr(result, "language", None) == "gemini"
@@ -819,6 +824,7 @@ class Controller:
         except Exception as exc:
             if self._cancel.is_set():
                 return
+            self._preserve_audio(audio)
             try:
                 self.recorder.cleanup()
             except Exception:
@@ -2211,6 +2217,23 @@ class Controller:
         from .platform.linux.browser import open_browser
 
         return open_browser(prefer_brave=prefer_brave, url=url)
+
+    def _discard_audio(self, audio: Any) -> None:
+        try:
+            Path(audio.path).unlink(missing_ok=True)
+        except (OSError, AttributeError, TypeError):
+            pass
+
+    def _preserve_audio(self, audio: Any) -> None:
+        """Move a recording that failed to process into the session archive."""
+        if self.session_archive_dir is None or audio is None:
+            return
+        path = getattr(audio, "path", None)
+        if path is None:
+            return
+        kept = preserve_recording(Path(path), self.session_archive_dir)
+        if kept is not None:
+            self.logger.info("event=recording_preserved dir=%s", kept.parent.name)
 
     def _fail(self, exc: BaseException, category: str | None = None) -> None:
         category = category or exception_category(exc)

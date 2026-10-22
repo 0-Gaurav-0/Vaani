@@ -6,7 +6,8 @@ chunk the :class:`~vaani.stt_chunks.ChunkedTranscriber` cuts is now written to
 ``<root>/<YYYYmmdd-HHMMSS>/`` as FLAC (lossless, ~2.3x smaller than WAV; ~3 ms
 CPU per 20 s chunk) *before* it is uploaded, plus one line in
 ``transcript.txt`` once the upload settles. A recording left behind by a crash
-is moved to ``<root>/<stamp>-recovered/`` at startup instead of being swept.
+is moved to ``<root>/<stamp>-recovered/`` at startup instead of being swept,
+and one whose processing fails goes to ``<root>/<stamp>-failed/`` right away.
 Sessions older than ``RETENTION_S`` are deleted when the next session starts.
 """
 from __future__ import annotations
@@ -111,25 +112,47 @@ def recover_recordings(audio_dir: Path, root: Path, *, background: bool = True) 
                 continue
             if hasattr(os, "getuid") and st.st_uid != os.getuid():
                 continue
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(st.st_mtime))
-            target_dir = root / f"{stamp}-recovered"
-            n = 1
-            while target_dir.exists():
-                n += 1
-                target_dir = root / f"{stamp}-recovered-{n}"
-            target_dir.mkdir(mode=0o700)
-            target = target_dir / "recording.wav"
-            shutil.move(str(wav_path), str(target))
-            moved.append(target)
+            moved.append(_move_into(wav_path, root, "recovered", st.st_mtime))
         except OSError:
             continue
     if moved:
-        if background:
-            threading.Thread(target=_compress_all, args=(moved,), daemon=True, name="vaani-recover").start()
-        else:
-            _compress_all(moved)
+        _compress_later(moved, background)
     return moved
+
+
+def preserve_recording(wav_path: Path, root: Path, *, label: str = "failed", background: bool = True) -> Path | None:
+    """Move a recording whose processing failed into ``root``. Never raises."""
+    try:
+        wav_path = Path(wav_path)
+        if wav_path.is_symlink() or not wav_path.is_file() or wav_path.stat().st_size < MIN_RECOVER_BYTES:
+            return None
+        target = _move_into(wav_path, root, label, time.time())
+    except OSError as exc:
+        LOGGER.warning("event=session_preserve_failed detail=%s", type(exc).__name__)
+        return None
+    _compress_later([target], background)
+    return target
+
+
+def _move_into(wav_path: Path, root: Path, label: str, mtime: float) -> Path:
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(mtime))
+    target_dir = root / f"{stamp}-{label}"
+    n = 1
+    while target_dir.exists():
+        n += 1
+        target_dir = root / f"{stamp}-{label}-{n}"
+    target_dir.mkdir(mode=0o700)
+    target = target_dir / "recording.wav"
+    shutil.move(str(wav_path), str(target))
+    return target
+
+
+def _compress_later(paths: list[Path], background: bool) -> None:
+    if background:
+        threading.Thread(target=_compress_all, args=(paths,), daemon=True, name="vaani-recover").start()
+    else:
+        _compress_all(paths)
 
 
 def _compress_all(paths: list[Path]) -> None:

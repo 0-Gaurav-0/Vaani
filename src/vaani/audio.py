@@ -340,8 +340,11 @@ class AudioRecorderImpl:
                 raise AudioError("recording process failed")
             self._stopped = result
             return result
-        except Exception:
-            path.unlink(missing_ok=True)
+        except AudioError as exc:
+            # A too-short click is noise; anything else is real speech the
+            # controller preserves, so leave the file for it.
+            if "too short" in str(exc):
+                path.unlink(missing_ok=True)
             raise
 
     def cleanup(self) -> None:
