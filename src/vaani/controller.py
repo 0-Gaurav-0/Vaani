@@ -474,7 +474,9 @@ class Controller:
             self._amplitude_stop.set()
             # Accidental click / bounce: treat too-short clips as a quiet cancel.
             detail = str(exc).lower()
-            if "duration out of range" in detail or "invalid audio" in detail:
+            # Only a genuinely short clip is a quiet cancel; "too long" or a
+            # broken file must surface, never vanish as a "too_short" no-op.
+            if "too short" in detail:
                 try: self.recorder.cleanup()
                 except Exception: pass
                 with self._lock:

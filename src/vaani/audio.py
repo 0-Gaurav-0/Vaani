@@ -13,7 +13,13 @@ import wave
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from .config import MAX_AUDIO_BYTES, MAX_RECORDING_SECONDS, MIN_RECORDING_SECONDS, child_environment
+from .config import (
+    MAX_AUDIO_BYTES,
+    MAX_RECORDING_SECONDS,
+    MIN_RECORDING_SECONDS,
+    RECORDING_CAP_GRACE_SECONDS,
+    child_environment,
+)
 from .config import sweep_audio_directory
 from .types import AudioResult
 
@@ -430,8 +436,10 @@ def validate_wav(path: Path, *, duration_seconds: float | None = None) -> AudioR
             duration = frames / rate
     except (wave.Error, EOFError) as exc:
         raise AudioError("invalid WAV format") from exc
-    if duration < MIN_RECORDING_SECONDS or duration > MAX_RECORDING_SECONDS:
-        raise AudioError("recording duration out of range")
+    if duration < MIN_RECORDING_SECONDS:
+        raise AudioError("recording too short")
+    if duration > MAX_RECORDING_SECONDS + RECORDING_CAP_GRACE_SECONDS:
+        raise AudioError("recording too long")
     return AudioResult(path, duration_seconds if duration_seconds is not None else duration)
 
 

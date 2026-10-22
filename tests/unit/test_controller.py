@@ -355,3 +355,27 @@ def test_browser_defaults_to_brave(monkeypatch):
     )
     assert Controller._open_browser().startswith("Opened")
     assert "brave" in seen[0][0]
+
+
+def _stop_raising(message):
+    from vaani.audio import AudioError
+
+    class RecRaises(Rec):
+        def stop(self): raise AudioError(message)
+
+    h = History()
+    c = Controller(recorder=RecRaises(), groq=Groq(), delivery=Delivery(), history=h,
+                   key_provider=lambda: 'key', max_duration=60)
+    assert c.trigger('smart')
+    assert not c.stop()
+    return [e.name for e in c.events]
+
+
+def test_short_clip_is_quiet_cancel():
+    assert 'cancelled' in _stop_raising('recording too short')
+
+
+def test_long_clip_is_not_silently_discarded_as_too_short():
+    # Regression: a capped 10-minute dictation was logged as too_short and lost.
+    names = _stop_raising('recording too long')
+    assert 'cancelled' not in names and 'failure' in names
