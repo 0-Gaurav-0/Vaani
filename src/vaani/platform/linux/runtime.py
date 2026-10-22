@@ -271,6 +271,15 @@ def _run_x11(settings: Settings) -> int:
 
     from ...types import AppState as _AppState
 
+    from ...meeting.control import MeetingControl
+    from ...meeting.util import default_root as meeting_root
+
+    meeting = MeetingControl(meeting_root(), feedback=controller._feedback, logger=logger)
+    try:
+        meeting.startup()
+    except Exception as exc:
+        logger.error("event=meeting_startup_failed detail=%s", type(exc).__name__)
+
     # Middle button owns hold-to-talk on ThinkPads; Ctrl+Space stays with the desktop.
     hotkeys = MiddleButtonHotkeyManager(
         on_hotkey_press,
@@ -279,6 +288,8 @@ def _run_x11(settings: Settings) -> int:
         on_touchpad_middle=on_touchpad_middle,
         on_handsfree=on_handsfree,
         is_recording=lambda: controller.state is _AppState.RECORDING,
+        on_meeting=meeting.shortcut,
+        on_abort_quiet=controller.abort_quiet,
     )
     controller.hotkeys = hotkeys
     snap_listener = None

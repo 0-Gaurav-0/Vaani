@@ -249,6 +249,10 @@ class Controller:
 
     start = trigger
 
+    def abort_quiet(self) -> bool:
+        """Drop a just-started dictation without a cue (meeting shortcut hold)."""
+        return self.cancel(quiet=True)
+
     # Servers drop idle keep-alive sockets; refresh during long recordings.
     WARM_REFRESH_S = 45.0
 
@@ -499,7 +503,7 @@ class Controller:
         worker = threading.Thread(target=self._process, args=(token, audio), daemon=True)
         self._worker = worker; worker.start(); return True
 
-    def cancel(self) -> bool:
+    def cancel(self, *, quiet: bool = False) -> bool:
         self.logger.info(
             "event=cancel_begin state=%s snap=%s",
             getattr(self.state, "name", self.state),
@@ -522,7 +526,9 @@ class Controller:
             if self.state is AppState.RECORDING:
                 try: self.recorder.cleanup()
                 except Exception: pass
-                self.state = AppState.IDLE; self._emit("cancelled"); self._feedback("busy"); return True
+                self.state = AppState.IDLE; self._emit("cancelled")
+                if not quiet: self._feedback("busy")
+                return True
             if self.state is AppState.PROCESSING:
                 self._token += 1
                 job = self._handoff_job

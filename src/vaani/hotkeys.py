@@ -475,6 +475,7 @@ class XTestMediaKeySender:
 LATCH_KEYSYM_DEFAULT = "XF86WakeUp"
 LATCH_ARM_S = 1.5  # Fn tap → click must follow within this window
 LATCH_DOUBLE_S = 0.4  # second click within this → assistant instead of dictation
+MEETING_TAP_S = 0.5  # TrackPoint + R taps closer than this count together (R R = stop)
 GENERIC_EVENT_CODE = 35  # X11 GenericEvent (carries XInput2 events)
 XI_RAW_KEY_PRESS = 13
 
@@ -536,6 +537,8 @@ class MiddleButtonHotkeyManager:
         on_handsfree: Callable[[str], bool] | None = None,
         is_recording: Callable[[], bool] | None = None,
         clock: Callable[[], float] | None = None,
+        on_meeting: Callable[[int], None] | None = None,
+        on_abort_quiet: Callable[[], None] | None = None,
     ):
         self.on_trigger = on_trigger
         self.on_release = on_release
@@ -563,6 +566,17 @@ class MiddleButtonHotkeyManager:
         self._latch_clicks = 0
         self._latch_first_at = 0.0
         self._swallow_release = False
+        # Meeting shortcut: R tapped while the TrackPoint middle button is held.
+        self.on_meeting = on_meeting
+        self.on_abort_quiet = on_abort_quiet
+        self._r_keycode: int | None = None
+        self._r_grabbed = False
+        self._r_down = False
+        self._r_taps = 0
+        self._r_last = 0.0
+        self._meeting_hold = False
+        self._dpy: Any = None
+        self._root: Any = None
 
     def _xinput(self, *args: str) -> str:
         return subprocess.check_output(["xinput", *args], text=True, stderr=subprocess.DEVNULL)
@@ -599,6 +613,8 @@ class MiddleButtonHotkeyManager:
             import os as _os
 
             self._latch_keycode = resolve_latch_keycode(dpy)
+            r_code = dpy.keysym_to_keycode(XK.string_to_keysym("r"))
+            self._r_keycode = int(r_code) if r_code else None
             dpy.close()
         except Exception:
             self._escape = 9
@@ -783,6 +799,61 @@ class MiddleButtonHotkeyManager:
             return False
         return self._finish_trackpoint_release()
 
+    # ---- meeting shortcut (TrackPoint + R / R R) ----------------------------
+
+    def _grab_r(self, on: bool) -> None:
+        """Own R only while button 2 is held, so no stray 'r' reaches the app."""
+        if self._r_keycode is None or self._root is None or on == self._r_grabbed or self.on_meeting is None:
+            return
+        any_mod = getattr(X, "AnyModifier", 1 << 15)
+        try:
+            if on:
+                self._root.grab_key(self._r_keycode, any_mod, False, X.GrabModeAsync, X.GrabModeAsync)
+            else:
+                self._root.ungrab_key(self._r_keycode, any_mod)
+            self._dpy.flush()
+            self._r_grabbed = on
+        except Exception:
+            self._r_grabbed = False
+
+    def on_r_key(self, pressed: bool) -> None:
+        """R key event while grabbed (i.e. while the middle button is held)."""
+        if not pressed:
+            self._r_down = False
+            return
+        if self._r_down:  # autorepeat
+            return
+        self._r_down = True
+        if self._r_taps == 0:
+            # The hold may already have started dictation: drop it silently.
+            if self._session_active and self.on_abort_quiet:
+                try:
+                    self.on_abort_quiet()
+                except Exception:
+                    pass
+            self._session_active = False
+            self._held_mode = None
+            self._gesture.active = False
+            self._gesture.mode = None
+            self._gesture.armed_until = -1.0
+            self._ignore_until_up = True  # no dictation for the rest of this hold
+            self._meeting_hold = True
+        self._r_taps += 1
+        self._r_last = self._clock()
+
+    def meeting_tick(self) -> None:
+        if self._r_taps and self._clock() - self._r_last >= MEETING_TAP_S:
+            self._resolve_meeting_taps()
+
+    def _resolve_meeting_taps(self) -> None:
+        taps, self._r_taps = self._r_taps, 0
+        self._r_down = False
+        if self.on_meeting and taps:
+            try:
+                self.on_meeting(taps)
+            except Exception:
+                pass
+
     # ---- hands-free latch -------------------------------------------------
 
     def on_latch_key(self) -> None:
@@ -882,12 +953,23 @@ class MiddleButtonHotkeyManager:
             if latch is not None:
                 return latch
             self._button_source = "trackpoint"
+            self._grab_r(True)
             mode = self._gesture.on_down()
             if mode:
                 self._start_mode(mode)
             return True
         if event_type != release_type:
             return False
+        self._grab_r(False)
+        if self._r_taps:
+            self._resolve_meeting_taps()
+        if self._meeting_hold:
+            # Fully reset so this hold can't arm a double-press → assistant.
+            self._meeting_hold = False
+            self._gesture.reset()
+            self._button_source = None
+            self._ignore_until_up = False
+            return True
         if self._swallow_release:
             self._swallow_release = False
             self._ignore_until_up = False
@@ -922,6 +1004,7 @@ class MiddleButtonHotkeyManager:
 
         dpy = display.Display()
         root = dpy.screen().root
+        self._dpy, self._root = dpy, root
         event_mask = Xconst.ButtonPressMask | Xconst.ButtonReleaseMask
         grabbed_mods: list[int] = []
         for mods in (
@@ -963,6 +1046,7 @@ class MiddleButtonHotkeyManager:
             while not self._stop.is_set():
                 try:
                     self.latch_tick()
+                    self.meeting_tick()
                     self._sync_trackpoint_release()
                     if not self._ignore_until_up:
                         mode = self._gesture.tick()
@@ -991,6 +1075,10 @@ class MiddleButtonHotkeyManager:
                             ):
                                 self.on_latch_key()
                             continue
+                        if ev.type in (Xconst.KeyPress, Xconst.KeyRelease):
+                            if detail == self._r_keycode:
+                                self.on_r_key(ev.type == Xconst.KeyPress)
+                            continue
                         if detail != 2:
                             continue
                         self._handle_button_event(ev.type)
@@ -998,6 +1086,8 @@ class MiddleButtonHotkeyManager:
                     if self._stop.wait(0.05):
                         break
         finally:
+            self._grab_r(False)
+            self._dpy = self._root = None
             for mods in grabbed_mods:
                 try:
                     root.ungrab_button(2, mods)
