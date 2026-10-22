@@ -53,6 +53,7 @@ from .assistant_route import (
 from .indicator_protocol import clear_command, read_command
 from .delivery import DeliveryStatus
 from .memory import append_turn, load_context
+from .session_archive import SessionArchive
 from .stt_chunks import ChunkedTranscriber, chunked_stt_enabled
 
 JEV_UNAVAILABLE = "Jev is unavailable right now (OpenRouter). Try again in a bit."
@@ -130,9 +131,11 @@ class Controller:
                  media_keys: Any | None = None,
                  jev: Any | None = None, jev_first: bool = False,
                  jev_groq_fallback: bool = False,
-                 warm_web: bool = False):
+                 warm_web: bool = False,
+                 session_archive_dir: str | os.PathLike[str] | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
+        self.session_archive_dir = Path(session_archive_dir) if session_archive_dir else None
         self.codex, self.result_window = codex, result_window
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
@@ -301,8 +304,11 @@ class Controller:
                 raise RuntimeError("API key required")
             return transcribe_h(chunk, key, cancel=cancel, delete_audio=False).text
 
+        archive = None
+        if self.session_archive_dir is not None:
+            archive = SessionArchive(self.session_archive_dir, logger=self.logger)
         try:
-            self._chunker = ChunkedTranscriber(path, transcribe, logger=self.logger).start()
+            self._chunker = ChunkedTranscriber(path, transcribe, logger=self.logger, archive=archive).start()
         except Exception as exc:
             self.logger.warning("event=stt_chunker_start_failed detail=%s", type(exc).__name__)
             self._chunker = None

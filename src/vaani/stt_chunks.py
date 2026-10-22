@@ -24,6 +24,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
+from .session_archive import SessionArchive
+
 LOGGER = logging.getLogger("vaani")
 
 RATE = 16000
@@ -145,6 +147,7 @@ class ChunkedTranscriber:
         max_chunk_s: float = MAX_CHUNK_S,
         poll_s: float = POLL_S,
         logger: logging.Logger = LOGGER,
+        archive: SessionArchive | None = None,
     ):
         self.path = Path(wav_path)
         self._transcribe = transcribe
@@ -152,6 +155,7 @@ class ChunkedTranscriber:
         self.max_bytes = int(max_chunk_s * BYTES_PER_S) // FRAME_BYTES * FRAME_BYTES
         self.poll_s = poll_s
         self._logger = logger
+        self._archive = archive
         self._stop = threading.Event()
         self._cut = 0  # PCM bytes already handed to chunks
         self._futures: list[Future] = []
@@ -179,12 +183,18 @@ class ChunkedTranscriber:
             return b""
         return data[: len(data) // FRAME_BYTES * FRAME_BYTES]
 
+    def _keep(self, index: int, pcm: bytes, text: str | None) -> None:
+        # After the upload, so archiving never delays a transcript.
+        if self._archive is not None:
+            self._archive.save_chunk(index, pcm, text)
+
     def _submit(self, pcm: bytes) -> Future:
         index = len(self._futures)
 
         def job() -> str:
             chunk = write_wav(pcm, self.path.parent)
             started = time.monotonic()
+            text: str | None = None
             try:
                 text = (self._transcribe(chunk) or "").strip()
             finally:
@@ -192,6 +202,7 @@ class ChunkedTranscriber:
                     chunk.unlink(missing_ok=True)
                 except OSError:
                     pass
+                self._keep(index, pcm, text)
             self._logger.info(
                 "event=stt_chunk_done index=%s seconds=%.1f chars=%s elapsed=%.2f",
                 index,
@@ -250,15 +261,19 @@ class ChunkedTranscriber:
             # Tail runs alongside any still-pending packet, not behind it.
             tail_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vaani-stt-tail")
             chunk = write_wav(tail, self.path.parent)
+            tail_index, tail_pcm = len(self._futures), tail
 
             def tail_job() -> str:
+                text: str | None = None
                 try:
-                    return (self._transcribe(chunk) or "").strip()
+                    text = (self._transcribe(chunk) or "").strip()
+                    return text
                 finally:
                     try:
                         chunk.unlink(missing_ok=True)
                     except OSError:
                         pass
+                    self._keep(tail_index, tail_pcm, text)
 
             tail_future = tail_pool.submit(tail_job)
         parts: list[str] = []

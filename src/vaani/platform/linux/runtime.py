@@ -188,6 +188,7 @@ def _run_x11(settings: Settings) -> int:
         key_provider=lambda: effective_key(store).value,
         amplitude_path=settings.amplitude_path,
         indicator_control_path=settings.indicator_control_path,
+        session_archive_dir=settings.sessions_dir,
         browser_launcher=browser,
         app_launcher=apps,
         media_keys=media_keys,

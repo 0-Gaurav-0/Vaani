@@ -67,6 +67,10 @@ class Settings:
         return self.cache_dir / "amplitude"
 
     @property
+    def sessions_dir(self) -> Path:
+        return self.data_dir / "sessions"
+
+    @property
     def indicator_control_path(self) -> Path:
         return self.cache_dir / "indicator_control.json"
 
