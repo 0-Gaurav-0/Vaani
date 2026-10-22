@@ -17,7 +17,12 @@ from .config import MAX_AUDIO_BYTES, MAX_RECORDING_SECONDS, MIN_RECORDING_SECOND
 from .config import sweep_audio_directory
 from .types import AudioResult
 
-PAREC_ARGV = ("parec", "--device=@DEFAULT_SOURCE@", "--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav")
+# PipeWire's pulse shim buffers ~2 s per write without a latency hint, and
+# SIGINT drops the pending block: the tail of every clip was lost and the pill
+# waveform (which reads the growing file) only moved every 2 s. Keep the flag
+# last so reap_orphan_parec's substring match still covers older argv.
+PAREC_LATENCY_ARG = "--latency-msec=30"
+PAREC_ARGV = ("parec", "--device=@DEFAULT_SOURCE@", "--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav", PAREC_LATENCY_ARG)
 PAREC_CMDLINE = " ".join(PAREC_ARGV)
 
 # Peak window RMS below this ⇒ treat as muted / no speech (matches waveform idle floor).

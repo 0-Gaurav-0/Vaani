@@ -36,7 +36,7 @@ def test_exact_argv_and_env_allowlist(tmp_path):
             break
         time.sleep(0.05)
     lines = args.read_text().splitlines(); rec.cleanup()
-    assert lines == ['--device=@DEFAULT_SOURCE@','--rate=16000','--channels=1','--format=s16le','--file-format=wav']
+    assert lines == ['--device=@DEFAULT_SOURCE@','--rate=16000','--channels=1','--format=s16le','--file-format=wav','--latency-msec=30']
     assert 'GROQ_API_KEY=' not in env.read_text()
 
 def test_invalid_directory_and_open_failure(tmp_path):

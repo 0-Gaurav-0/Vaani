@@ -26,7 +26,7 @@ from .projects import EditorRequest, default_editor, open_in_editor, parse_edito
 from .app_typing import TypeRequest, WindowWatcher, class_hints, parse_type_request, wait_for_app_window
 from .volume import resolve_volume_action, run_volume_action
 from .media import resolve_media_action, run_media_action
-from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
+from .sites import play_query_of, resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
 from .codex import build_skill_prompt
 from .assistant_intent import (
@@ -88,6 +88,25 @@ def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     import re
     m = re.match(r"^\s*(Answer this|Only answer|Question)\b\s*[:,\-]?\s*(.*)$", text, re.I | re.S)
     return (m.group(1), m.group(2).strip()) if m else (None, text.strip())
+
+
+def disagree_play_choices(candidates: tuple[str, ...]) -> RouteDecision | None:
+    """Offer both passes' titles when Jev can't reconcile them.
+
+    Forced-English Whisper translates Hindi titles ("play pehli nazar mein" →
+    "Play in the first sight"); with Jev rate-limited, acting on that pick
+    played the wrong song. Asking costs one click; guessing costs a wrong tab.
+    """
+    options: list[RouteOption] = []
+    seen: set[str] = set()
+    for cand in candidates[:2]:
+        query = play_query_of(cand)
+        if query and query.casefold() not in seen:
+            seen.add(query.casefold())
+            options.append(RouteOption(f"Play on YouTube: {query}", "play", query, "youtube"))
+    if len(options) < 2:
+        return None
+    return RouteDecision(intent="clarify", options=tuple(options))
 
 
 @dataclass(frozen=True)
@@ -922,6 +941,8 @@ class Controller:
                 candidates[1][:60],
             )
             decision = self._jev_route(raw, candidates=candidates)
+            if decision is None:
+                decision = disagree_play_choices(candidates)
             if decision is not None:
                 self._dispatch_decision(token, audio, key, raw, result, decision)
                 return
