@@ -823,6 +823,8 @@ class Controller:
             )
         except Exception as exc:
             if self._cancel.is_set():
+                # User cancelled: honour it, don't leave the WAV to be "recovered".
+                self._discard_audio(audio)
                 return
             self._preserve_audio(audio)
             try:

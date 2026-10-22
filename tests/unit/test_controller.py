@@ -427,3 +427,27 @@ def test_successful_transcription_still_deletes_recording(tmp_path):
     assert c.trigger('smart') and c.stop()
     c._worker.join(2)
     assert h.rows and not wav.exists() and not list(sessions.glob('*-failed'))
+
+
+def test_cancel_during_processing_deletes_recording(tmp_path):
+    import threading
+    wav = _wav_file(tmp_path / 'recording-z.wav')
+    entered, release = threading.Event(), threading.Event()
+
+    class RecFile(Rec):
+        def start(self): return SimpleNamespace(path=wav, duration_seconds=2)
+        def stop(self): return SimpleNamespace(path=wav, duration_seconds=2)
+
+    class GroqSlow(Groq):
+        def transcribe_hinglish(self, *a, cancel=None, **k):
+            entered.set(); release.wait(2)
+            raise RuntimeError('cancelled')
+
+    sessions = tmp_path / 'sessions'
+    c = Controller(recorder=RecFile(), groq=GroqSlow(), delivery=Delivery(), history=History(),
+                   key_provider=lambda: 'key', max_duration=60, session_archive_dir=sessions)
+    assert c.trigger('smart') and c.stop()
+    assert entered.wait(2)
+    worker = c._worker
+    c.cancel(); release.set(); worker.join(2)
+    assert not wav.exists() and not list(sessions.glob('*'))
