@@ -344,6 +344,18 @@ def _run_x11(settings: Settings) -> int:
             snap_listener = None
             snap_on = False
             wake_on = False
+        # First dictation after login paid ~2.7 s importing numpy/soundfile
+        # (trim + FLAC) under memory pressure; load them while idle instead.
+        def _preload_audio_libs() -> None:
+            try:
+                import numpy  # noqa: F401
+                import soundfile  # noqa: F401
+            except Exception:
+                pass
+
+        import threading
+
+        threading.Thread(target=_preload_audio_libs, name="vaani-preload", daemon=True).start()
         extras = []
         if snap_listener is not None:
             if snap_on:

@@ -183,8 +183,10 @@ class AudioRecorderImpl:
                     continue
                 try:
                     with open(path, "rb") as fh:
-                        fh.seek(44)
-                        data = fh.read()[-4096:]
+                        # Tail only: reading the whole growing WAV every 40 ms
+                        # cost ~95 MB/s of reads two minutes into a dictation.
+                        fh.seek(max(44, os.fstat(fh.fileno()).st_size - 4096))
+                        data = fh.read()
                     if len(data) >= 2:
                         level = _pcm16_rms(data)
                         self._level = level
@@ -361,6 +363,21 @@ def wav_peak_rms(path: Path, *, window_bytes: int = 3200) -> float:
     if len(data) < 2:
         return 0.0
     step = max(2, window_bytes - (window_bytes % 2))
+    try:
+        import numpy as np  # on the release path: pure Python took ~0.5 s for 3 min
+    except ImportError:
+        np = None
+    if np is not None:
+        n = len(data) // step
+        if n:
+            arr = np.frombuffer(data[: n * step], dtype="<i2").astype(np.float32).reshape(n, step // 2)
+            peak = float((np.sqrt((arr * arr).mean(axis=1)) / 32768.0).max())
+        else:
+            peak = 0.0
+        rest = data[n * step :]
+        if len(rest) >= 2:
+            peak = max(peak, _pcm16_rms(rest))
+        return min(1.0, peak)
     peak = 0.0
     for i in range(0, len(data) - 1, step):
         chunk = data[i : i + step]
