@@ -37,6 +37,24 @@ class AudioPreflightError(AudioError):
     pass
 
 
+def _owned_by_other_vaani(pid: int) -> bool:
+    """True when ``pid``'s parent is another live Vaani daemon (mic in use).
+
+    Without this, any second process calling the reaper (the test suite,
+    a stray launcher) killed the running daemon's mic mid-dictation.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            ppid = int(fh.read().rsplit(b")", 1)[1].split()[1])
+        if ppid in (os.getpid(), 0, 1):
+            return False
+        with open(f"/proc/{ppid}/cmdline", "rb") as fh:
+            parent = fh.read().split(b"\0")
+    except (OSError, ValueError, IndexError):
+        return False
+    return b"-m" in parent and b"vaani" in parent
+
+
 def reap_orphan_parec(*, keep_pid: int | None = None) -> int:
     """Kill leftover Vaani ``parec`` processes so the mic is released.
 
@@ -63,6 +81,8 @@ def reap_orphan_parec(*, keep_pid: int | None = None) -> int:
         except ValueError:
             continue
         if keep_pid is not None and pid == keep_pid:
+            continue
+        if _owned_by_other_vaani(pid):
             continue
         cmdline = args.strip()
         if cmdline != PAREC_CMDLINE and not cmdline.endswith(" " + PAREC_CMDLINE):
@@ -97,6 +117,8 @@ def reap_orphan_parec(*, keep_pid: int | None = None) -> int:
             except ValueError:
                 continue
             if keep_pid is not None and pid == keep_pid:
+                continue
+            if _owned_by_other_vaani(pid):
                 continue
             cmdline = args.strip()
             if " --device=@DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le --file-format=wav" not in cmdline:
