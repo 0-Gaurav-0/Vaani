@@ -1,178 +1,86 @@
 # Vaani
 
-Vaani is a personal, cloud-assisted voice dictation and command tool for
-Ubuntu. Press a global shortcut, speak, press the shortcut again, and Vaani
-transcribes the recording with Groq. It can paste cleaned text into the focused
-application, preserve literal speech, answer an explicit question, open common
-applications or sites, or pass a spoken task to Codex CLI.
+Vaani is a personal voice dictation and command tool. Hold a shortcut, speak,
+and release it to paste text or run a voice command. It supports English,
+Hindi, and mixed Hinglish speech through cloud transcription.
 
-This repository is the recoverable, sanitized copy of the working Linux
-application. Private URLs, credentials, browser history, transcript history,
-logs, and machine-specific paths are intentionally not stored in Git.
+The main desktop target is **Ubuntu 22.04, GNOME, and Xorg/X11**. Linux
+Wayland, macOS, and Windows adapters also exist. Their setup and feature
+limits are in the [installation guides](docs/install/README.md).
+Meeting mode currently requires the Linux/X11 runtime.
 
-> [!IMPORTANT]
-> Vaani currently targets **Ubuntu 22.04, GNOME, Xorg/X11, and x86_64**, with
-> a Wayland backend (GNOME 45+/KDE Plasma 6+ via the GlobalShortcuts portal,
-> full auto-paste on wlroots compositors like Sway/Hyprland). It is not yet
-> a Windows or macOS application. Planned cross-platform operator and
-> remote work lives in [ROADMAP.md](ROADMAP.md).
+## Current features
 
-## Contents
+- **Hold-to-talk dictation:** hold the ThinkPad TrackPoint middle button to
+  record; release it to transcribe and paste.
+- **Hands-free dictation:** use the Fn latch and middle button to record
+  without holding the button. Dictation stops and processes at ten minutes.
+- **Hinglish text:** Groq Whisper supports mixed English and Hindi. Optional
+  Gemini dictation returns Latin-script Hinglish without translation.
+- **Voice commands:** open apps, sites, folders, and projects; play music;
+  control media and volume; or open an app and type text into it.
+- **Assistant:** optional Jev routing through OpenRouter, with Hermes CLI or
+  Codex CLI for delegated tasks. Action previews offer a cancel window.
+- **Recording pill:** a draggable glass pill with waveform, timer, stop, and
+  cancel controls. It remembers its position per monitor.
+- **Recording recovery:** dictation chunks and text remain on disk for up to
+  48 hours between archive sweeps. Failed and crashed recordings are preserved
+  when audio is still available.
+- **Meeting mode:** record the microphone and system output, pause or resume,
+  then create a Markdown transcript with speaker labels and timestamps.
+- **Pinned local releases:** install a tested Git snapshot separately from
+  the work folder, with a command to restore the previous release.
 
-- [Roadmap](ROADMAP.md)
-- [What works](#what-works)
-- [How Vaani works](#how-vaani-works)
-- [Requirements](#requirements)
-- [Fresh installation](#fresh-installation)
-- [First run](#first-run)
-- [Shortcuts and controls](#shortcuts-and-controls)
-- [Operating modes](#operating-modes)
-- [Configuration](#configuration)
-- [Data and privacy](#data-and-privacy)
-- [Safe operation](#safe-operation)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
-- [Architecture](#architecture)
-- [Backup and recovery](#backup-and-recovery)
-- [Current limitations](#current-limitations)
+The latest changes also fix PipeWire capture tail loss, reduce audio startup
+work, and avoid stopping a recorder owned by another live Vaani process.
+See [CHANGELOG.md](CHANGELOG.md) for the October 2026 update and
+[ROADMAP.md](ROADMAP.md) for planned work.
 
-## What works
-
-- Toggle-to-record dictation from any X11 application.
-- English, Hindi, and Hinglish transcription through Groq
-  `whisper-large-v3-turbo`.
-- Smart cleanup that removes filler and returns English or Latin-script
-  Hinglish.
-- Literal dictation that bypasses cleanup.
-- Automatic paste with `Ctrl+V` in editors and browsers.
-- Automatic `Ctrl+Shift+V` paste in recognized terminal emulators.
-- Clipboard-only fallback when the focused target changes or paste injection
-  cannot be verified.
-- A GTK4 glass recording pill with live microphone amplitude and cancel/stop
-  controls. Drag it anywhere (any monitor); it is landscape near the top or
-  bottom edge and portrait elsewhere, and its spot is remembered per monitor
-  so display hotplug does not move it.
-- Local SQLite transcript history.
-- Deterministic application and browser launching before an assistant request
-  reaches Codex.
-- Optional Codex CLI assistant requests.
-- Private site aliases stored outside Git.
-- GNOME login autostart.
-- Sanitized rotating logs and temporary-audio cleanup.
-
-## How Vaani works
+## How it works
 
 ```text
-global X11 shortcut
-        |
-        v
-PulseAudio capture (parec, 16 kHz mono WAV)
-        |
-        v
-Groq transcription (Whisper)
-        |
-        +--> literal mode --------> clipboard + paste
-        |
-        +--> smart cleanup -------> clipboard + paste
-        |
-        +--> explicit answer -----> Groq answer -> clipboard + paste
-        |
-        +--> assistant mode ------> local app/site action or Codex CLI
-        |
-        v
-private SQLite history + sanitized operational log
+Dictation shortcut → microphone capture → Groq or optional Gemini
+                                      → text → clipboard + paste
+
+Assistant shortcut → transcription → app/site/media action
+                                   → optional OpenRouter routing
+                                   → optional Hermes/Codex task
+
+Meeting shortcut → microphone + system capture → saved meeting job
+                                              → background Gemini worker
+                                              → transcript.md
 ```
 
-Vaani captures the focused X11 window immediately before delivery and verifies
-that it remains unchanged while paste is dispatched. It does not preserve the
-target from recording start, so keep the intended destination focused when
-processing finishes.
+On X11, Vaani checks the target window before it pastes. If delivery fails or
+focus changes during dispatch, use the clipboard to paste manually.
 
-## Requirements
+## Installation
 
-### Supported environment
-
-- Ubuntu 22.04 LTS
-- GNOME desktop session
-- Xorg/X11 session (`XDG_SESSION_TYPE=x11`), **or** a Wayland session with a
-  GlobalShortcuts-capable portal (GNOME 45+, KDE Plasma 6+) — see
-  [docs/install/linux.md](docs/install/linux.md) for the X11/Wayland matrix
-- x86_64 CPU
-- Python 3.10 or newer
-- Network access to the Groq API
-- A Groq API key
-
-### Required operating-system components
-
-- PulseAudio-compatible capture through `parec` and `pactl`
-- X11 input inspection through `xinput`
-- X11 clipboard fallback through `xclip`
-- XTEST support in the X server
-- GTK4 and PyGObject for the recording widget
-- GNOME Keyring/Secret Service for the Groq key
-- `notify-send` for notifications
-
-### Optional assistant dependency
-
-Assistant mode requires an installed and authenticated Hermes CLI
-(`hermes`, default). Override with `VAANI_AGENT_BIN` (falls back to Codex
-CLI only if Hermes is missing from `PATH`). Dictation does not require Hermes.
-
-## Fresh installation
-
-These commands assume a fresh Ubuntu 22.04 GNOME/Xorg machine and a clone path
-without spaces.
+Use the [OS installation matrix](docs/install/README.md) for all platforms.
+The following commands prepare the Linux/X11 development environment.
 
 ### 1. Install system packages
 
 ```bash
 sudo apt update
-sudo apt install -y \
-  curl \
-  git \
-  gh \
-  python3.10 \
-  python3.10-venv \
-  python3-gi \
-  gir1.2-gtk-4.0 \
-  libgtk-4-1 \
-  pulseaudio-utils \
-  xclip \
-  xinput \
-  libnotify-bin \
-  gnome-keyring
+sudo apt install -y git curl python3.10 python3.10-venv python3-gi \
+  gir1.2-gtk-4.0 libgtk-4-1 pulseaudio-utils xclip xinput \
+  libnotify-bin gnome-keyring ffmpeg
 ```
 
-Log out and back in after installing `gnome-keyring` if the Secret Service is
-not available in the current desktop session.
+Meeting mode also uses `systemd-run --user` and `xdg-user-dir`.
+The audio tools must have access to the desktop user's PulseAudio or PipeWire
+session. Meeting preparation uses `ffmpeg` and `ffprobe`.
 
-### 2. Clone the private repository
-
-Authenticate GitHub CLI through its browser flow, then clone:
+### 2. Clone and install
 
 ```bash
-gh auth login --hostname github.com --git-protocol https --web
-gh auth status
-gh repo clone 0-Gaurav-0/Vaani
+git clone https://github.com/0-Gaurav-0/Vaani.git
 cd Vaani
 ```
 
-Do not place a GitHub token in the clone URL.
-
-### 3. Install `uv`
-
-If `uv` is not already installed:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-export PATH="$HOME/.local/bin:$PATH"
-uv --version
-```
-
-### 4. Create the Python environment
-
-PyGObject is supplied by Ubuntu, so the virtual environment must be allowed to
-see system site packages:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed.
+Then create the environment:
 
 ```bash
 uv venv --python python3.10 --system-site-packages .venv
@@ -180,825 +88,228 @@ uv pip sync --python .venv/bin/python requirements.lock
 uv pip install --python .venv/bin/python --no-deps --editable .
 ```
 
-Verify Python, GTK4, and the X11 library:
+GTK uses the system PyGObject package. The dependency lock includes the audio
+libraries used for FLAC compression.
+
+### 3. Configure credentials
+
+Store the Groq key in the system keyring with a hidden prompt:
+
+```bash
+.venv/bin/python -c 'from getpass import getpass; from vaani.secrets import SecretServiceKeyStore; SecretServiceKeyStore().set(getpass("Groq API key: "))'
+```
+
+Optional providers use environment variables. Copy `.env.example` to `.env`
+and edit it locally. Vaani loads `.env` at startup; the file is ignored by Git.
+Do not put credentials in a command, issue, commit, or screenshot.
+
+| Variable | Purpose |
+|---|---|
+| `GROQ_API_KEY` | Process-local override for the Groq keyring value |
+| `GEMINI_API_KEY` | Gemini dictation and meeting transcription |
+| `VAANI_USE_GEMINI=1` | Enable Gemini dictation; a key alone does not enable it |
+| `VAANI_GEMINI_MODEL` | Dictation model override; default `gemini-2.5-flash` |
+| `OPENROUTER_API_KEY` | Optional Jev assistant routing and answers |
+| `VAANI_JEV=0` | Disable Jev |
+| `VAANI_AGENT_BIN` | Choose the agent CLI; default Hermes if available, then Codex |
+| `VAANI_ASSISTANT_CWD` | Agent task directory |
+| `VAANI_COMPUTER_USE=1` | Enable experimental Linux computer use with `NVIDIA_API_KEY` |
+| `VAANI_CONFIRM_S` | Action preview time; default 2.5 seconds |
+| `VAANI_CHUNKED_STT=0` | Disable chunked dictation transcription |
+
+Meeting mode uses the model configured in
+[`meeting/gemini.py`](src/vaani/meeting/gemini.py), separately from
+`VAANI_GEMINI_MODEL`. Provider model access and quotas can vary by account.
+
+### 4. Test the environment
 
 ```bash
 .venv/bin/python -c 'import gi; gi.require_version("Gtk", "4.0"); from gi.repository import Gtk; print("GTK4 OK")'
-.venv/bin/python -c 'from Xlib.display import Display; d=Display(); print("X11/XTEST OK:", d.has_extension("XTEST")); d.close()'
-```
-
-### 5. Verify the audio source
-
-```bash
-pactl get-default-source
-.venv/bin/python -c 'from vaani.audio import preflight; preflight(); print("Microphone preflight OK")'
-```
-
-The preflight checks the recorder and default source without retaining a
-recording.
-
-### 6. Store the Groq key safely
-
-The recommended location is GNOME Keyring. This command prompts without
-displaying or placing the key in shell history:
-
-```bash
-.venv/bin/python -c 'from getpass import getpass; from vaani.secrets import SecretServiceKeyStore; SecretServiceKeyStore().set(getpass("Groq API key: ")); print("Groq key stored in the system keyring")'
-```
-
-Confirm that a key can be read without printing it:
-
-```bash
-.venv/bin/python -c 'from vaani.secrets import SecretServiceKeyStore; print("Groq key configured" if SecretServiceKeyStore().get() else "Groq key missing")'
-```
-
-Validate the key and required Groq models:
-
-```bash
-.venv/bin/python - <<'PY'
-from vaani.secrets import SecretServiceKeyStore, validate_key
-from vaani.types import GroqModelSettings
-
-key = SecretServiceKeyStore().get()
-result = validate_key(key or "", GroqModelSettings())
-print(result)
-PY
-```
-
-Never commit a key, put it in `sites.json`, paste it into an issue, or include it
-in a launcher command. `GROQ_API_KEY` is supported as a process-local override,
-but the keyring is safer for normal use.
-
-### 7. Install launchers and GNOME autostart
-
-The Python package does not install the shell launchers or desktop entry. Copy
-them explicitly:
-
-```bash
-mkdir -p "$HOME/.local/bin" "$HOME/.config/autostart"
-
-install -m 755 scripts/vaani-start "$HOME/.local/bin/vaani-start"
-install -m 755 scripts/vaani-toggle "$HOME/.local/bin/vaani-toggle"
-install -m 755 scripts/vaani-assistant "$HOME/.local/bin/vaani-assistant"
-install -m 755 scripts/vaani-cancel "$HOME/.local/bin/vaani-cancel"
-
-install -m 644 data/vaani-autostart.desktop \
-  "$HOME/.config/autostart/vaani.desktop"
-
-repo_dir="$(pwd -P)"
-sed -i \
-  "s|^Exec=.*|Exec=env VAANI_PROJECT_DIR=$repo_dir $HOME/.local/bin/vaani-start|" \
-  "$HOME/.config/autostart/vaani.desktop"
-```
-
-Inspect the installed command before enabling it:
-
-```bash
-grep '^Exec=' "$HOME/.config/autostart/vaani.desktop"
-```
-
-The resulting desktop file contains a local absolute path by design. It lives in
-`~/.config/autostart`, not in Git. Regenerate it after moving the repository.
-
-## First run
-
-### Confirm the desktop session
-
-```bash
-printf 'Session type: %s\n' "$XDG_SESSION_TYPE"
-printf 'Display: %s\n' "$DISPLAY"
-```
-
-Both must describe an active X11 desktop for this check specifically — it's
-for the X11 backend's own diagnostics. A Wayland session runs through the
-portal backend instead (`vaani.platform.linux.wayland`); see
-[docs/install/linux.md](docs/install/linux.md) for what does and doesn't
-work there.
-
-### Test transcription without global hotkeys
-
-```bash
+.venv/bin/python -c 'from vaani.audio import preflight; preflight(); print("Audio OK")'
 .venv/bin/python -m vaani --record
 ```
 
-Speak, press Enter, and confirm that text appears in the terminal. This path
-tests microphone capture, the keyring, Groq authentication, upload, and
-transcription. It does not paste automatically.
-
-### Run Vaani in the foreground
+The manual record command tests capture and transcription without global
+shortcuts. Then start the desktop runtime in the foreground:
 
 ```bash
 .venv/bin/python -m vaani
 ```
 
-Keep this terminal open during the first shortcut test. Press `Ctrl+C` only when
-Vaani is idle.
-
-### Start it in the background
-
-After the foreground test succeeds:
-
-```bash
-setsid -f env VAANI_PROJECT_DIR="$PWD" "$HOME/.local/bin/vaani-start"
-pgrep -af '^\.venv/bin/python -m vaani$'
-```
-
-The autostart entry runs the same launcher on the next GNOME login.
+Keep the terminal open for the first shortcut test.
 
 ## Shortcuts and controls
 
-Press a mode shortcut once to begin recording and the same shortcut again to
-stop and process it.
+These controls describe the current **Linux/X11 ThinkPad backend**.
+Other keyboards and OS adapters can have different controls.
+`Ctrl+Space` remains available to the desktop on this backend.
 
-| Control | Behavior | Implementation |
-|---|---|---|
-| `Ctrl+Space` | Smart dictation | X11 passive grab |
-| `Ctrl+Shift+Space` | Literal dictation | X11 passive grab |
-| `Ctrl+Alt+Space` | Assistant mode | X11 passive grab |
-| `Ctrl+Super+Space` | Alternate assistant trigger | `xinput` polling |
-| `Esc` | Cancel active recording or processing | `xinput` polling |
-| Widget X button | Cancel without delivering text | Signal to Vaani |
-| Widget red stop button | Stop recording and process | Signal to Vaani |
-| Drag the pill (anywhere on it) | Follows the pointer; a press only clicks ✕/stop if it moves <4px | GTK4 gesture + X11 move |
-
-Launcher equivalents:
-
-```bash
-vaani-toggle
-vaani-assistant
-vaani-cancel
-```
-
-The launcher scripts match a process whose command line is exactly
-`.venv/bin/python -m vaani`. Start Vaani through `vaani-start` or that exact
-Python command if you rely on the launchers.
-
-### Shortcut compatibility warning
-
-`Ctrl+Super+Space` and global `Esc` use an `xinput` polling path with these
-current assumptions:
-
-- Control keycode `37`
-- Super keycode `133`
-- Space keycode `65`
-- Escape keycode `9`
-- Keyboard name `AT Translated Set 2 keyboard`
-- Fallback device ID `11`
-
-Those values are common on the reference laptop, not universal. `Ctrl+Space`,
-`Ctrl+Shift+Space`, and `Ctrl+Alt+Space` use X11 key symbols and are more
-portable across X11 keyboards.
-
-## Operating modes
-
-### Smart dictation
-
-Use `Ctrl+Space`.
-
-1. Vaani records a 16 kHz mono WAV.
-2. Groq Whisper transcribes without forcing a language.
-3. The cleanup model removes filler and preserves corrections and meaning.
-4. Hindi/Devanagari cleanup is transliterated to Latin-script Hinglish.
-5. The result is copied and pasted into the unchanged focused window.
-
-If cleanup fails or its response is unsafe or malformed, Vaani falls back to
-the raw transcript.
-
-### Literal dictation
-
-Use `Ctrl+Shift+Space`.
-
-Literal mode skips smart cleanup and delivers the raw trimmed transcription.
-Use it for code, punctuation-sensitive speech, names, or wording that should
-not be rewritten.
-
-### Answer-prefix behavior
-
-Answer generation currently works reliably only through **literal dictation**.
-Use `Ctrl+Shift+Space` and start with one of:
-
-- “Answer this …”
-- “Only answer …”
-- “Question …”
-
-Vaani sends the remaining question to the Groq chat model and pastes only the
-answer.
-
-Known bug: smart mode currently overwrites the generated answer with cleanup of
-the original transcript, and assistant mode routes the original transcript
-instead. Do not rely on answer prefixes in those two modes until the controller
-flow is fixed.
-
-### Assistant mode
-
-Use `Ctrl+Alt+Space` (hold-to-talk via xinput on Linux).
-
-Assistant transcription currently forces English. After transcription, Vaani
-tries these routes in order:
-
-1. Resolve and launch a known desktop application (`open` / `launch` / …).
-2. Resolve YouTube play/search, a configured site, or a direct browser request.
-3. Match **one** installed Agent Skill (`~/.agents/skills`, `~/.claude/skills`)
-   by name/alias and run it with Codex using **only that skill’s body** and
-   **only MCPs listed in the skill frontmatter** (`mcps: […]`; default none).
-4. Otherwise fall back to an isolated Codex chat request (no user MCP catalog).
-
-Brave is preferred for generic browser/site requests unless Chrome is named
-explicitly. Site URLs are opened in a new window. App, site, skill, and Codex
-actions return a desktop notification and are written to local history.
-
-Fast examples: `Open VS Code`, `Play rickroll on YouTube`.  
-Skill example: `Run the sample skill for Acme` (skill must exist on disk).
-
-Optional skill frontmatter for selective MCP:
-
-```yaml
----
-name: my-workflow
-description: Compare product pricing
-mcps:
-  - browseros
----
-```
-
-#### Assistant agent boundary
-
-- **Chat fallback** uses Hermes oneshot: `hermes -z PROMPT --yolo --reasoning low`
-  (final response only on stdout). Default timeout 30s.
-- **Skill runs** inject the skill body into the prompt and best-effort pass
-  `--skills <id>`. Codex’s temp-`CODEX_HOME` MCP allowlist applies only when
-  `VAANI_AGENT_BIN` points at Codex. Default skill timeout 120s
-  (`VAANI_SKILL_TIMEOUT`).
-- Reasoning effort is set to `low` for voice.
-- The working directory is `VAANI_ASSISTANT_CWD`, or the home directory when
-  unset.
-- Agent binary: `VAANI_AGENT_BIN` (default `hermes` if on `PATH`, else `codex`).
-  Hermes config/auth lives under `~/.hermes/` (Codex auth may still be used as
-  a Hermes provider).
-- The process runs with the desktop user's operating-system permissions.
-- The desktop environment is inherited except for `OPENAI_API_KEY` and
-  `GROQ_API_KEY`.
-
-Treat spoken assistant tasks as commands executed with your user permissions.
-
-## Configuration
-
-### Assistant workspace
-
-Set the directory where assistant agent requests run:
-
-```bash
-export VAANI_ASSISTANT_CWD="$HOME/path/to/workspace"
-```
-
-For autostart, add the variable to the installed desktop entry:
-
-```text
-Exec=env VAANI_PROJECT_DIR=/path/to/Vaani VAANI_ASSISTANT_CWD=/path/to/workspace /home/user/.local/bin/vaani-start
-```
-
-Use real local paths only in the installed file under `~/.config/autostart`.
-Do not commit them.
-
-### Private site shortcuts
-
-Private URLs belong in:
-
-```text
-~/.config/vaani/sites.json
-```
-
-Start from the safe example:
-
-```bash
-mkdir -p "$HOME/.config/vaani"
-install -m 600 config/sites.example.json "$HOME/.config/vaani/sites.json"
-```
-
-Schema:
-
-```json
-[
-  {
-    "aliases": ["project dashboard", "dashboard"],
-    "name": "Project Dashboard",
-    "url": "https://example.com/dashboard"
-  }
-]
-```
-
-Rules:
-
-- `aliases` must be a non-empty list of phrases.
-- `name` is the notification label.
-- `url` must use `http` or `https`.
-- Invalid entries are ignored.
-- Local entries are checked before the built-in public catalog.
-- Keep this file private and never add it to Git.
-
-Example request: “Open the project dashboard in Brave.”
-
-### Built-in public sites
-
-The sanitized repository contains generic aliases for Gmail, Basecamp, Paddle,
-Stripe, Postmark, Agent Skills, ChatGPT, Claude, and Gemini. Account-specific
-destinations must stay in the private local configuration.
-
-### Groq models and limits
-
-Current defaults:
-
-| Purpose | Model or limit |
+| Control | Action |
 |---|---|
-| Transcription | `whisper-large-v3-turbo` |
-| Cleanup and answers | `llama-3.1-8b-instant` (fast) |
-| Recording auto-stop | 300 seconds |
-| WAV validation maximum | 600 seconds |
-| Minimum recording | 250 milliseconds |
-| Maximum audio file | 25 MiB |
-| Transcription deadline | 150 seconds |
-| Cleanup/answer deadline | 75 seconds |
+| Hold TrackPoint middle button | Record dictation |
+| Release TrackPoint middle button | Stop dictation and process it |
+| Double-press and hold middle button | Record an assistant command |
+| Fn, then one middle-button click | Start hands-free dictation |
+| Fn, then two middle-button clicks | Start hands-free assistant recording |
+| Fn plus middle-button click while hands-free | Stop and process |
+| Esc or pill cancel | Cancel dictation or its processing |
+| Pill stop | Stop dictation and process it |
+| TrackPoint middle button plus R | Start a meeting |
+| TrackPoint middle button plus R twice | Stop a meeting and process it |
+| Meeting pill pause/resume | Pause or resume meeting capture |
+| Meeting pill stop | Save the meeting and start background transcription |
 
-The effective live recording limit is five minutes because the controller
-auto-stops before the WAV validator's ten-minute ceiling.
+The Fn latch uses the detected keycode or `VAANI_LATCH_KEYCODE` override.
+Set `VAANI_LATCH_KEYSYM=off` to disable it.
+A single R tap during an active meeting does not stop it.
+Releasing the TrackPoint button does not stop a meeting.
+
+## Dictation and assistant behavior
+
+Groq dictation preserves the words and applies light local cleanup. It does
+not use the older smart paraphrase flow. Longer dictations can transcribe
+chunks while capture continues. A failed chunk path falls back to the full
+recording. At ten minutes, Vaani stops capture and processes the recording.
+
+Gemini dictation is optional. It returns the provider transcript directly,
+without the Groq answer-prefix or cleanup flow. Assistant mode can route that
+transcript as a command.
+
+Examples of assistant commands:
+
+- “Open Firefox.”
+- “Open my project in VS Code.”
+- “Open text editor and write hello.”
+- “Play a song on YouTube.”
+
+Assistant tasks can reach external services. Hermes or Codex must be installed
+and authenticated before delegated tasks can run. Vaani rejects agent requests that it identifies as write actions.
+Codex skill runs use a selected skill and its MCP allowlist. Hermes uses its own configuration;
+the Codex isolation rules do not apply to Hermes.
+
+Experimental computer use can send the active window's accessibility data
+and, when needed, its screenshot to a model provider. It requires separate
+configuration and is not required for dictation.
+
+## Meeting mode
+
+1. Set `GEMINI_API_KEY` locally.
+2. Hold the TrackPoint middle button and press R to start.
+3. Use the separate red pill to pause or resume capture.
+4. Press the pill stop button, or use TrackPoint plus R twice, to finish.
+5. Wait for the notification that the transcript is ready.
+
+The recording cap is four hours of captured time. Pauses do not count toward
+that cap. A warning appears five minutes before the cap.
+
+Meetings are saved in `Vaani Meetings` under the desktop Documents directory.
+If that directory cannot be found, Vaani uses `~/Documents/Vaani Meetings`.
+Each meeting has its own job state, audio, parts, and final `transcript.md`.
+The transcript uses numbered speakers and timestamps. Speaker labels across
+parts are inferred and can be wrong.
+
+The worker transcribes in a separate process. The pill closes when capture
+stops, and another meeting can start while the previous job processes.
+The recorder captures the microphone and default output monitor. Preparation
+mixes system audio for headphones; it uses the microphone track for speakers
+to avoid duplicate voices.
+
+Jobs save progress between stages. Quota errors defer work for a later retry.
+Other failures retry with backoff, up to eight attempts. Failed jobs retain
+their audio. Successfully transcribed audio and part files become eligible
+for deletion after 30 days, when the worker next runs. The Markdown transcript
+remains until you delete it.
 
 ## Data and privacy
 
-Vaani is local-first for orchestration, not local-only for processing.
+Vaani uses cloud services. It is not an offline transcription tool.
 
-### Cloud boundary
-
-- Recorded audio is uploaded to Groq for transcription.
-- Smart cleanup sends transcript text to a Groq chat model.
-- Answer-prefix behavior sends the question to a Groq chat model.
-- Codex assistant tasks are sent wherever the authenticated Codex CLI sends
-  them.
-
-### Local data
-
-| Path | Contents | Retention |
-|---|---|---|
-| `~/.local/share/vaani/history.sqlite3` | Plaintext raw and final transcripts plus metadata | Unlimited by default |
-| `~/.local/share/vaani/logs/vaani.log` | Sanitized state/error events | 1 MiB plus three rotations |
-| `~/.local/share/vaani/logs/autostart.log` | Launcher stdout/stderr | Not rotated by Vaani |
-| `~/.cache/vaani/audio/` | Temporary WAV files | Deleted after transcription or swept at startup |
-| `~/.config/vaani/sites.json` | Optional private site aliases | Until manually changed |
-| `/tmp/vaani-amplitude` | Latest scalar RMS amplitude only | Temporary |
-| System keyring | Groq API key | Until removed |
-
-History and runtime directories are created with private permissions. The
-history database stores transcripts in plaintext and currently has no
-configured retention limit.
-
-After delivery, the final text remains on the desktop clipboard. Clipboard
-managers may retain it independently of Vaani.
-
-Audio is normally deleted in a `finally` block after transcription. A hard
-process or machine crash can leave a temporary WAV until Vaani next starts and
-sweeps the audio directory.
-
-Logs redact recognized keys and transcript-like payload fields, but they should
-still be treated as private operational data.
-
-## Safe operation
-
-### Stop versus cancel
-
-- **Stop** ends recording, enters processing, transcribes, and delivers.
-- **Cancel** invalidates the operation, removes temporary audio, and does not
-  intentionally deliver partial text.
-
-### Safe restart rule
-
-Never restart, update, or kill Vaani during recording or processing. Wait until
-the log reports one of:
-
-```text
-event=delivered
-event=assistant_complete
-event=cancelled
-event=failure
-```
-
-Watch the log:
-
-```bash
-tail -f "$HOME/.local/share/vaani/logs/vaani.log"
-```
-
-After Vaani is idle, stop it gracefully:
-
-```bash
-pkill -TERM -f '^\.venv/bin/python -m vaani$'
-```
-
-Start it again:
-
-```bash
-setsid -f env VAANI_PROJECT_DIR="$PWD" "$HOME/.local/bin/vaani-start"
-```
-
-## Troubleshooting
-
-### Vaani does not start
-
-Check the session and display:
-
-```bash
-printf 'XDG_SESSION_TYPE=%s\nDISPLAY=%s\n' "$XDG_SESSION_TYPE" "$DISPLAY"
-.venv/bin/python -c 'from Xlib.display import Display; d=Display(); print(d.get_display_name()); d.close()'
-```
-
-Check for a running process and inspect logs:
-
-```bash
-pgrep -af '^\.venv/bin/python -m vaani$'
-tail -n 100 "$HOME/.local/share/vaani/logs/vaani.log"
-tail -n 100 "$HOME/.local/share/vaani/logs/autostart.log"
-```
-
-Run in the foreground for the clearest startup result:
-
-```bash
-.venv/bin/python -m vaani
-```
-
-### A shortcut does nothing
-
-Confirm that only one Vaani process is running:
-
-```bash
-pgrep -af '^\.venv/bin/python -m vaani$'
-```
-
-Inspect X11 devices and actual key events:
-
-```bash
-xinput list
-xinput test-xi2 3
-```
-
-Press the problem shortcut and look for key press/release events. Exit the test
-with `Ctrl+C`.
-
-If `Ctrl+Space`, `Ctrl+Shift+Space`, or `Ctrl+Alt+Space` fails, another
-application or GNOME shortcut may already own the passive grab. Remove that
-conflict and restart Vaani only after it is idle.
-
-If only `Ctrl+Super+Space` or global `Esc` fails, compare your device and
-keycodes with the assumptions in
-[`src/vaani/hotkeys.py`](src/vaani/hotkeys.py).
-
-### The recording widget is missing
-
-Verify GTK4 inside the Vaani environment:
-
-```bash
-.venv/bin/python -c 'import gi; gi.require_version("Gtk", "4.0"); from gi.repository import Gtk; print("GTK4 OK")'
-```
-
-Check the indicator process:
-
-```bash
-pgrep -af 'python.*-m vaani\.indicator'
-```
-
-The indicator intentionally falls back to a headless process when GTK cannot
-initialize, so dictation may still work while the widget is invisible.
-
-### The waveform does not react
-
-While recording, inspect the scalar amplitude:
-
-```bash
-watch -n 0.2 cat /tmp/vaani-amplitude
-```
-
-The value should rise above zero while speaking. If it does not, verify the
-default source:
-
-```bash
-pactl get-default-source
-pactl list short sources
-```
-
-### Transcription is empty, repetitive, or says the wrong thing
-
-Test the exact audio/Groq path:
-
-```bash
-.venv/bin/python -m vaani --record
-```
-
-Then check:
-
-```bash
-pactl get-default-source
-.venv/bin/python -c 'from vaani.audio import preflight; preflight(); print("Audio OK")'
-```
-
-Select the intended microphone in GNOME Settings if the default source is a
-monitor, disconnected device, or low-quality input.
-
-### “API key required” or keyring errors
-
-Confirm Secret Service and the masked key state:
-
-```bash
-busctl --user status org.freedesktop.secrets
-.venv/bin/python -c 'from vaani.secrets import SecretServiceKeyStore; print("configured" if SecretServiceKeyStore().get() else "missing")'
-```
-
-If the keyring is locked, unlock the GNOME login keyring and retry. To replace
-the key, run the hidden prompt from the installation section.
-
-To remove the stored key:
-
-```bash
-.venv/bin/python -c 'from vaani.secrets import SecretServiceKeyStore; SecretServiceKeyStore().remove(); print("Groq key removed")'
-```
-
-### Groq errors or timeouts
-
-Validate model access:
-
-```bash
-.venv/bin/python - <<'PY'
-from vaani.secrets import SecretServiceKeyStore, validate_key
-from vaani.types import GroqModelSettings
-
-print(validate_key(SecretServiceKeyStore().get() or "", GroqModelSettings()))
-PY
-```
-
-Check the sanitized category in `vaani.log`. Common categories include network,
-quota, timeout, malformed response, microphone, and paste failure.
-
-### Text reaches the clipboard but does not paste
-
-Inspect the clipboard:
-
-```bash
-xclip -selection clipboard -o
-```
-
-Vaani deliberately avoids pasting if focus changed during processing. Return to
-the intended field and paste manually.
-
-Recognized terminal classes receive `Ctrl+Shift+V`; editors and browsers receive
-`Ctrl+V`. An unknown terminal class may therefore need manual paste.
-
-### Assistant requests time out or ignore MCPs
-
-Verify Codex:
-
-```bash
-codex --version
-codex login status
-```
-
-The 30-second assistant timeout is intentional. The current runner also uses
-`--ignore-user-config`, so user MCPs and skills are not loaded. This is current
-behavior, not an authentication failure.
-
-### A private site does not open
-
-Validate the JSON:
-
-```bash
-.venv/bin/python -m json.tool "$HOME/.config/vaani/sites.json"
-```
-
-Only `http` and `https` URLs are accepted. Confirm the spoken command contains
-an action word such as “open,” “launch,” “go to,” or “show,” followed by a
-configured alias.
-
-## Development
-
-### Recreate the development environment
-
-```bash
-uv venv --python python3.10 --system-site-packages .venv
-uv pip sync --python .venv/bin/python requirements.lock
-uv pip install --python .venv/bin/python --no-deps --editable .
-```
-
-### Run the complete suite
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 \
-  .venv/bin/pytest -q -p no:cacheprovider
-```
-
-The keyring probe is opt-in:
-
-```bash
-VAANI_KEYRING_PROBE=1 \
-  .venv/bin/pytest -q tests/integration/test_keyring_probe.py -rs
-```
-
-Run the X11 integration check inside the active Xorg session:
-
-```bash
-DISPLAY="$DISPLAY" \
-  .venv/bin/pytest -q tests/integration/test_x11_live.py -rs
-```
-
-A skip means the environmental integration was not proven; it is not a pass.
-
-### Run focused tests
-
-```bash
-.venv/bin/pytest -q tests/unit/test_controller.py
-.venv/bin/pytest -q tests/unit/test_hotkeys.py
-.venv/bin/pytest -q tests/unit/test_delivery.py
-.venv/bin/pytest -q tests/unit/test_sites.py
-```
-
-### Scan tracked files for secrets
-
-```bash
-git ls-files -z |
-  xargs -0 uvx --from detect-secrets detect-secrets scan
-```
-
-Review every finding. References to the `secrets.py` module and synthetic test
-values can be false positives; an unexplained high-entropy value blocks a push.
-
-Also inspect history for common credential prefixes without printing matches
-into a report:
-
-```bash
-git log --all --oneline -G'gsk_|gh[pousr]_|github_pat_|AKIA|BEGIN .*PRIVATE KEY'
-```
-
-### Update dependencies
-
-Edit `requirements.in`, then regenerate the platform lock:
-
-```bash
-uv pip compile requirements.in \
-  --python-version 3.10 \
-  --python-platform x86_64-manylinux_2_35 \
-  --generate-hashes \
-  --output-file requirements.lock
-```
-
-Run the complete suite and security scans before committing a lock update.
-
-## Architecture
-
-### Source map
-
-| Module | Responsibility |
+| Data | Destination or local location |
 |---|---|
-| `__main__.py` | Runtime assembly, X11 loop, signals, and manual record command |
-| `controller.py` | Recording state machine, cancellation, mode routing, and history writes |
-| `audio.py` | `parec` lifecycle, WAV validation, and temporary-file cleanup |
-| `groq.py` | Transcription, cleanup, answers, retries, limits, and redaction-safe errors |
-| `delivery.py` | Clipboard ownership, target verification, and XTEST paste |
-| `hotkeys.py` | X11 passive grabs plus alternate `xinput` polling |
-| `indicator.py` | GTK4 recording pill and scalar-amplitude rendering |
-| `x11.py` | Active-window and input-focus snapshots |
-| `history.py` | Private SQLite schema and concurrency-safe transcript storage |
-| `secrets.py` | GNOME Keyring access and Groq model validation |
-| `codex.py` | Bounded, cancellable Hermes (or Codex) CLI execution |
-| `apps.py` | Deterministic desktop application resolution and launch |
-| `sites.py` | Public aliases plus optional private local site configuration |
-| `feedback.py` | Recording sounds, notifications, and indicator lifecycle |
-| `observability.py` | Sanitized rotating logs and error categories |
-| `config.py` | Runtime paths, permissions, timeouts, and audio limits |
-| `types.py` | Shared states, settings, results, and protocols |
+| Dictation audio | Groq, or Google when Gemini dictation is enabled |
+| Meeting audio parts | Google Gemini |
+| Assistant text and context | Configured OpenRouter, Hermes, Codex, or computer-use provider |
+| Raw and final dictation text | `~/.local/share/vaani/history.sqlite3` |
+| Dictation chunk audio and text | `~/.local/share/vaani/sessions/` |
+| Temporary dictation WAV | `~/.cache/vaani/audio/` |
+| Meeting audio, provider responses, transcript, and job state | Documents directory / `Vaani Meetings/` |
+| Operational logs | `~/.local/share/vaani/logs/` |
+| Private site aliases | `~/.config/vaani/sites.json` |
+| Browser history index and play memory | Local Vaani data directory |
 
-### State model
+These paths describe Linux. Other platforms use their OS data directories.
+Transcript history is plaintext and has no automatic retention limit.
+The final text remains on the clipboard; clipboard managers can keep copies.
+Logs can contain transcript previews, task context, and file paths. Treat them
+as private even though the main logger redacts some credential patterns.
 
-```text
-Idle
-  |
-  | shortcut
-  v
-Recording
-  |        \
-  | stop    \ cancel
-  v          v
-Processing  Idle
-  |
-  | delivered / displayed / failure
-  v
-Idle
-```
+Dictation archive folders older than 48 hours are removed when another
+archived session starts. This is not a background deletion deadline.
+Processing failures and startup recovery preserve available recordings there.
+Cancel removes the active temporary WAV, but chunks already archived can
+remain until the archive sweep. Meeting retention is separate.
 
-Each operation receives a token. Cancellation invalidates the token so a late
-worker result cannot be inserted into history or delivered after the operation
-has been cancelled.
+Private credentials, browser data, recordings, transcripts, logs, and local
+backups must stay outside the repository. `.gitignore` provides a second
+check; it does not protect files that Git already tracks.
 
-### Source of truth
+## Local releases and autostart
 
-Historical documents under `docs/superpowers/` record earlier designs and
-plans. When they disagree with runtime source or executable tests, current
-source and tests are authoritative.
+The release workflow creates a snapshot with its own environment under
+`~/.local/share/vaani/release/versions/`. Autostart prefers the `current`
+release over the work folder. Shared credentials stay outside that snapshot.
 
-## Backup and recovery
-
-### What to back up
-
-- The Git repository or its private GitHub remote
-- `~/.config/vaani/sites.json`, if used
-- `~/.local/share/vaani/history.sqlite3`, if transcript history matters
-- `~/.local/share/vaani/logs/`, only when operational history is useful
-- The installed autostart desktop file as a reference, or regenerate it
-
-Do not back up:
-
-- A plaintext Groq key
-- `~/.cache/vaani/audio/`
-- `/tmp/vaani-amplitude`
-- `.venv/`
-- Python caches or test caches
-
-### Create a local data backup
-
-Wait until Vaani is idle and stop it gracefully. Then:
+Install the launchers explicitly:
 
 ```bash
-backup_dir="$HOME/vaani-backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -m 700 "$backup_dir"
-
-if [ -f "$HOME/.config/vaani/sites.json" ]; then
-  install -m 600 "$HOME/.config/vaani/sites.json" "$backup_dir/sites.json"
-fi
-
-if [ -f "$HOME/.local/share/vaani/history.sqlite3" ]; then
-  install -m 600 \
-    "$HOME/.local/share/vaani/history.sqlite3" \
-    "$backup_dir/history.sqlite3"
-fi
+mkdir -p "$HOME/.local/bin" "$HOME/.config/autostart"
+for script in vaani-start vaani-toggle vaani-assistant vaani-cancel vaani-release; do
+  install -m 755 "scripts/$script" "$HOME/.local/bin/$script"
+done
 ```
 
-Re-enter the Groq key into the destination machine's keyring instead of
-exporting it to plaintext.
-
-### Restore
-
-1. Clone the private repository.
-2. Repeat the fresh installation.
-3. Restore `sites.json` with mode `0600`.
-4. Restore `history.sqlite3` with mode `0600` while Vaani is stopped.
-5. Store the Groq key through the hidden keyring prompt.
-6. Regenerate the autostart entry for the new repository path.
-7. Run `--record`, then foreground shortcut testing, before enabling autostart.
-
-Example restore:
+Set `VAANI_DEV_DIR` to the clone path when you use the release command from
+another location. Review the default paths in `scripts/vaani-start` before
+use on a new machine. The desktop file is in `data/vaani-autostart.desktop`;
+set its `Exec` field to your installed launcher before you copy it to autostart.
 
 ```bash
-install -Dm600 /path/to/backup/sites.json \
-  "$HOME/.config/vaani/sites.json"
-install -Dm600 /path/to/backup/history.sqlite3 \
-  "$HOME/.local/share/vaani/history.sqlite3"
+VAANI_DEV_DIR="$PWD" vaani-release --status
+VAANI_DEV_DIR="$PWD" vaani-release          # build and activate tested HEAD
+vaani-release --rollback                   # activate previous release
 ```
 
-Skip a command when that backup file does not exist.
+A release command can restart Vaani. Wait until dictation and its processing
+finish before promotion or rollback. Meeting capture has a separate systemd
+scope and can survive a daemon restart, but this does not replace backups.
+See [operations rules](docs/OPERATIONS.md).
 
-## Current limitations
+## Development and checks
 
-See [ROADMAP.md](ROADMAP.md) for planned work beyond this list.
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/pytest -q -p no:cacheprovider
+```
 
-- Linux only (X11 or Wayland); no Windows or macOS backend yet.
-- Wayland: hotkeys need a GlobalShortcuts-capable portal (GNOME 45+, KDE
-  Plasma 6+) and a one-time system dialog to assign each shortcut; auto-paste
-  only works on compositors with `wtype` support (Sway, Hyprland) — GNOME/KDE
-  Wayland deliver to the clipboard only, and you press Ctrl+V yourself.
-- Ubuntu 22.04 GNOME/Xorg x86_64 is the validated platform.
-- Cloud transcription requires network access, a Groq key, and available quota.
-- Recordings are not transcribed incrementally or streamed as text.
-- Live recording auto-stops after five minutes.
-- History is plaintext and unlimited by default; there is no history UI.
-- Delivered text remains on the system clipboard.
-- Alternate assistant and global Escape polling assumes reference-laptop
-  keycodes and a particular keyboard device.
-- Widget movement is compositor-dependent and its position is not currently
-  restored automatically by the runtime.
-- Answer prefixes work reliably only in literal mode.
-- Assistant transcription currently forces English.
-- Codex assistant requests use a 30-second timeout and ignore user
-  configuration, MCPs, and skills.
-- There is no assistant chat UI or persistent Codex conversation.
-- Launcher signals require Vaani's expected process command line.
-- Launcher and autostart files must be installed separately from the Python
-  package.
-- Private sites require local configuration and are intentionally absent from
-  Git.
+The keyring integration probe requires `VAANI_KEYRING_PROBE=1`.
+X11 integration checks require a live X11 session. A skipped check does not
+prove that integration works. Unit tests do not prove live provider access
+or desktop behavior on every OS.
 
-## Security checklist before pushing changes
+Before a push, scan the tracked files and the history that you will publish.
+Review each finding without copying secret values into logs or reports.
+Never add a real key to `.env.example` or a test fixture.
 
-- [ ] No `.env`, key, token, cookie, credential file, or private URL is tracked.
-- [ ] No transcript database, audio, log, cache, backup, or virtual environment
-      is tracked.
-- [ ] Tests pass from the documented environment.
-- [ ] Keyring and X11 integration checks were run or their skips are disclosed.
-- [ ] `detect-secrets` findings were reviewed.
-- [ ] Git history contains no credential prefix or corporate/private metadata.
-- [ ] The GitHub repository remains private.
+| Source | Purpose |
+|---|---|
+| `src/vaani/controller.py` | Dictation state, cancellation, and assistant routing |
+| `src/vaani/audio.py` | Capture, validation, and recorder cleanup |
+| `src/vaani/stt_chunks.py` | Chunked transcription during recording |
+| `src/vaani/session_archive.py` | Local chunk archive and recording recovery |
+| `src/vaani/meeting/` | Meeting capture, job state, preparation, transcription, and export |
+| `src/vaani/platform/` | OS runtime, input, delivery, and UI adapters |
+| `src/vaani/codex.py` | Hermes and Codex task execution |
+| `src/vaani/jev.py` | Optional OpenRouter assistant routing |
+| `scripts/vaani-release` | Pinned local releases and rollback |
 
-For the operational restart rule, also see
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+Historical design documents can describe earlier behavior. Current runtime
+source and tests take precedence. Keep local data backups separate from Git.

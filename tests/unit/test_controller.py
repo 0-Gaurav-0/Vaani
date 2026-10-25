@@ -125,7 +125,7 @@ def test_assistant_uses_runner_displays_and_persists():
         def __init__(self): self.results=[]
         def show(self, result): self.results.append(result.stdout)
     class CodingGroq(Groq):
-        def transcribe(self, *a, **k): return SimpleNamespace(text='fix the flaky test', language='en')
+        def transcribe(self, *a, **k): return SimpleNamespace(text='review the flaky test', language='en')
         def route(self, text, *a, **k):
             from vaani.assistant_route import RouteDecision
             return RouteDecision(intent='codex', query=text, confidence=0.9)
@@ -140,10 +140,8 @@ def test_assistant_uses_runner_displays_and_persists():
     c=Controller(recorder=Rec(), groq=CodingGroq(), delivery=Delivery(), history=h,
                  feedback=fb, codex=Runner(), result_window=w, key_provider=lambda:'key')
     assert c.trigger_assistant(); assert c.stop(); c._worker.join(1)
-    # Codex is confirm-gated: first stop only shows Confirm/Cancel.
-    assert w.results == []
-    assert fb.clarify is not None
-    c._apply_clarify_index(0)
+    # A read-only routed task runs through the configured agent runner.
+    assert fb.clarify is None
     assert w.results == ['answer']
     assert h.rows[-1]['mode'] == 'assistant' and h.rows[-1]['final_text'] == 'answer'
     assert c.state is AppState.IDLE

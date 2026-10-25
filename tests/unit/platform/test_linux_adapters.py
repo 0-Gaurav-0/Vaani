@@ -127,11 +127,17 @@ def test_linux_feedback_paplay_env_is_minimal(tmp_path: Path, monkeypatch):
     fb = LinuxFeedback(
         runner=run,
         beeper=None,
+        sound_async=False,
+        env={"GROQ_API_KEY": "test-secret"},
         amplitude_path=tmp_path / "amplitude",
         control_path=tmp_path / "control.json",
     )
-    assert fb.play("success")
-    assert set(seen["env"]) <= {"PATH", "LANG", "LC_ALL"}
+    assert fb.play("warn")
+    assert set(seen["env"]) <= {
+        "PATH", "LANG", "LC_ALL", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR", "XAUTHORITY", "HOME",
+    }
+    assert "GROQ_API_KEY" not in seen["env"]
 
 
 def test_build_linux_bundle_id(tmp_path: Path, monkeypatch):
