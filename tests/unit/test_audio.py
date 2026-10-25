@@ -36,7 +36,7 @@ def test_exact_argv_and_env_allowlist(tmp_path):
             break
         time.sleep(0.05)
     lines = args.read_text().splitlines(); rec.cleanup()
-    assert lines == ['--device=@DEFAULT_SOURCE@','--rate=16000','--channels=1','--format=s16le','--file-format=wav']
+    assert lines == ['--device=@DEFAULT_SOURCE@','--rate=16000','--channels=1','--format=s16le','--file-format=wav','--latency-msec=30']
     assert 'GROQ_API_KEY=' not in env.read_text()
 
 def test_invalid_directory_and_open_failure(tmp_path):
@@ -46,10 +46,15 @@ def test_invalid_directory_and_open_failure(tmp_path):
     failing = shutil.which("false") or exe(tmp_path/'fail', 'exit 1')
     with pytest.raises(AudioError, match='source open failed'): AudioRecorder(tmp_path/'a', parec=failing).start()
 
-@pytest.mark.parametrize('seconds', [0.1, 600.1])
-def test_duration_boundaries(tmp_path, seconds):
+@pytest.mark.parametrize('seconds,match', [(0.1, 'too short'), (630.1, 'too long')])
+def test_duration_boundaries(tmp_path, seconds, match):
     p=tmp_path/'x.wav'; wav(p, seconds)
-    with pytest.raises(AudioError): validate_wav(p)
+    with pytest.raises(AudioError, match=match): validate_wav(p)
+
+def test_capped_recording_slightly_over_limit_is_valid(tmp_path):
+    # Cap timer fires at 600 s wall clock; the WAV may hold a bit more.
+    p=tmp_path/'x.wav'; wav(p, 600.4)
+    assert validate_wav(p).duration_seconds > 600
 
 def test_startup_sweep_owned_files_only(tmp_path):
     d=tmp_path/'audio'; d.mkdir(mode=0o755)

@@ -13,11 +13,22 @@ import wave
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from .config import MAX_AUDIO_BYTES, MAX_RECORDING_SECONDS, MIN_RECORDING_SECONDS, child_environment
+from .config import (
+    MAX_AUDIO_BYTES,
+    MAX_RECORDING_SECONDS,
+    MIN_RECORDING_SECONDS,
+    RECORDING_CAP_GRACE_SECONDS,
+    child_environment,
+)
 from .config import sweep_audio_directory
 from .types import AudioResult
 
-PAREC_ARGV = ("parec", "--device=@DEFAULT_SOURCE@", "--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav")
+# PipeWire's pulse shim buffers ~2 s per write without a latency hint, and
+# SIGINT drops the pending block: the tail of every clip was lost and the pill
+# waveform (which reads the growing file) only moved every 2 s. Keep the flag
+# last so reap_orphan_parec's substring match still covers older argv.
+PAREC_LATENCY_ARG = "--latency-msec=30"
+PAREC_ARGV = ("parec", "--device=@DEFAULT_SOURCE@", "--rate=16000", "--channels=1", "--format=s16le", "--file-format=wav", PAREC_LATENCY_ARG)
 PAREC_CMDLINE = " ".join(PAREC_ARGV)
 
 # Peak window RMS below this ⇒ treat as muted / no speech (matches waveform idle floor).
@@ -30,6 +41,24 @@ class AudioError(RuntimeError):
 
 class AudioPreflightError(AudioError):
     pass
+
+
+def _owned_by_other_vaani(pid: int) -> bool:
+    """True when ``pid``'s parent is another live Vaani daemon (mic in use).
+
+    Without this, any second process calling the reaper (the test suite,
+    a stray launcher) killed the running daemon's mic mid-dictation.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            ppid = int(fh.read().rsplit(b")", 1)[1].split()[1])
+        if ppid in (os.getpid(), 0, 1):
+            return False
+        with open(f"/proc/{ppid}/cmdline", "rb") as fh:
+            parent = fh.read().split(b"\0")
+    except (OSError, ValueError, IndexError):
+        return False
+    return b"-m" in parent and b"vaani" in parent
 
 
 def reap_orphan_parec(*, keep_pid: int | None = None) -> int:
@@ -58,6 +87,8 @@ def reap_orphan_parec(*, keep_pid: int | None = None) -> int:
         except ValueError:
             continue
         if keep_pid is not None and pid == keep_pid:
+            continue
+        if _owned_by_other_vaani(pid):
             continue
         cmdline = args.strip()
         if cmdline != PAREC_CMDLINE and not cmdline.endswith(" " + PAREC_CMDLINE):
@@ -92,6 +123,8 @@ def reap_orphan_parec(*, keep_pid: int | None = None) -> int:
             except ValueError:
                 continue
             if keep_pid is not None and pid == keep_pid:
+                continue
+            if _owned_by_other_vaani(pid):
                 continue
             cmdline = args.strip()
             if " --device=@DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le --file-format=wav" not in cmdline:
@@ -178,8 +211,10 @@ class AudioRecorderImpl:
                     continue
                 try:
                     with open(path, "rb") as fh:
-                        fh.seek(44)
-                        data = fh.read()[-4096:]
+                        # Tail only: reading the whole growing WAV every 40 ms
+                        # cost ~95 MB/s of reads two minutes into a dictation.
+                        fh.seek(max(44, os.fstat(fh.fileno()).st_size - 4096))
+                        data = fh.read()
                     if len(data) >= 2:
                         level = _pcm16_rms(data)
                         self._level = level
@@ -305,8 +340,11 @@ class AudioRecorderImpl:
                 raise AudioError("recording process failed")
             self._stopped = result
             return result
-        except Exception:
-            path.unlink(missing_ok=True)
+        except AudioError as exc:
+            # A too-short click is noise; anything else is real speech the
+            # controller preserves, so leave the file for it.
+            if "too short" in str(exc):
+                path.unlink(missing_ok=True)
             raise
 
     def cleanup(self) -> None:
@@ -356,6 +394,21 @@ def wav_peak_rms(path: Path, *, window_bytes: int = 3200) -> float:
     if len(data) < 2:
         return 0.0
     step = max(2, window_bytes - (window_bytes % 2))
+    try:
+        import numpy as np  # on the release path: pure Python took ~0.5 s for 3 min
+    except ImportError:
+        np = None
+    if np is not None:
+        n = len(data) // step
+        if n:
+            arr = np.frombuffer(data[: n * step], dtype="<i2").astype(np.float32).reshape(n, step // 2)
+            peak = float((np.sqrt((arr * arr).mean(axis=1)) / 32768.0).max())
+        else:
+            peak = 0.0
+        rest = data[n * step :]
+        if len(rest) >= 2:
+            peak = max(peak, _pcm16_rms(rest))
+        return min(1.0, peak)
     peak = 0.0
     for i in range(0, len(data) - 1, step):
         chunk = data[i : i + step]
@@ -386,8 +439,10 @@ def validate_wav(path: Path, *, duration_seconds: float | None = None) -> AudioR
             duration = frames / rate
     except (wave.Error, EOFError) as exc:
         raise AudioError("invalid WAV format") from exc
-    if duration < MIN_RECORDING_SECONDS or duration > MAX_RECORDING_SECONDS:
-        raise AudioError("recording duration out of range")
+    if duration < MIN_RECORDING_SECONDS:
+        raise AudioError("recording too short")
+    if duration > MAX_RECORDING_SECONDS + RECORDING_CAP_GRACE_SECONDS:
+        raise AudioError("recording too long")
     return AudioResult(path, duration_seconds if duration_seconds is not None else duration)
 
 

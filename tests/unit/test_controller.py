@@ -125,7 +125,7 @@ def test_assistant_uses_runner_displays_and_persists():
         def __init__(self): self.results=[]
         def show(self, result): self.results.append(result.stdout)
     class CodingGroq(Groq):
-        def transcribe(self, *a, **k): return SimpleNamespace(text='fix the flaky test', language='en')
+        def transcribe(self, *a, **k): return SimpleNamespace(text='review the flaky test', language='en')
         def route(self, text, *a, **k):
             from vaani.assistant_route import RouteDecision
             return RouteDecision(intent='codex', query=text, confidence=0.9)
@@ -140,10 +140,8 @@ def test_assistant_uses_runner_displays_and_persists():
     c=Controller(recorder=Rec(), groq=CodingGroq(), delivery=Delivery(), history=h,
                  feedback=fb, codex=Runner(), result_window=w, key_provider=lambda:'key')
     assert c.trigger_assistant(); assert c.stop(); c._worker.join(1)
-    # Codex is confirm-gated: first stop only shows Confirm/Cancel.
-    assert w.results == []
-    assert fb.clarify is not None
-    c._apply_clarify_index(0)
+    # A read-only routed task runs through the configured agent runner.
+    assert fb.clarify is None
     assert w.results == ['answer']
     assert h.rows[-1]['mode'] == 'assistant' and h.rows[-1]['final_text'] == 'answer'
     assert c.state is AppState.IDLE
@@ -355,3 +353,99 @@ def test_browser_defaults_to_brave(monkeypatch):
     )
     assert Controller._open_browser().startswith("Opened")
     assert "brave" in seen[0][0]
+
+
+def _stop_raising(message):
+    from vaani.audio import AudioError
+
+    class RecRaises(Rec):
+        def stop(self): raise AudioError(message)
+
+    h = History()
+    c = Controller(recorder=RecRaises(), groq=Groq(), delivery=Delivery(), history=h,
+                   key_provider=lambda: 'key', max_duration=60)
+    assert c.trigger('smart')
+    assert not c.stop()
+    return [e.name for e in c.events]
+
+
+def test_short_clip_is_quiet_cancel():
+    assert 'cancelled' in _stop_raising('recording too short')
+
+
+def test_long_clip_is_not_silently_discarded_as_too_short():
+    # Regression: a capped 10-minute dictation was logged as too_short and lost.
+    names = _stop_raising('recording too long')
+    assert 'cancelled' not in names and 'failure' in names
+
+
+def _wav_file(path, seconds=2.0):
+    import wave
+    with wave.open(str(path), 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+        w.writeframes(b'\x10\x27\xf0\xd8' * int(8000 * seconds))
+    return path
+
+
+def test_failed_transcription_preserves_recording(tmp_path):
+    wav = _wav_file(tmp_path / 'recording-x.wav')
+
+    class RecFile(Rec):
+        def start(self): return SimpleNamespace(path=wav, duration_seconds=2)
+        def stop(self): return SimpleNamespace(path=wav, duration_seconds=2)
+
+    class GroqDown(Groq):
+        def transcribe(self, *a, **k): raise RuntimeError('http')
+        def transcribe_hinglish(self, *a, **k): raise RuntimeError('http')
+
+    sessions = tmp_path / 'sessions'
+    c = Controller(recorder=RecFile(), groq=GroqDown(), delivery=Delivery(), history=History(),
+                   key_provider=lambda: 'key', max_duration=60, session_archive_dir=sessions)
+    assert c.trigger('smart') and c.stop()
+    c._worker.join(2)
+    kept = list(sessions.glob('*-failed/recording.*'))
+    assert kept and not wav.exists()
+    assert c.events[-1].name == 'failure'
+
+
+def test_successful_transcription_still_deletes_recording(tmp_path):
+    wav = _wav_file(tmp_path / 'recording-y.wav')
+
+    class RecFile(Rec):
+        def start(self): return SimpleNamespace(path=wav, duration_seconds=2)
+        def stop(self): return SimpleNamespace(path=wav, duration_seconds=2)
+
+    class GroqH(Groq):
+        def transcribe_hinglish(self, *a, **k): return SimpleNamespace(text='hello there', language='en')
+
+    sessions = tmp_path / 'sessions'
+    h = History()
+    c = Controller(recorder=RecFile(), groq=GroqH(), delivery=Delivery(), history=h,
+                   key_provider=lambda: 'key', max_duration=60, session_archive_dir=sessions)
+    assert c.trigger('smart') and c.stop()
+    c._worker.join(2)
+    assert h.rows and not wav.exists() and not list(sessions.glob('*-failed'))
+
+
+def test_cancel_during_processing_deletes_recording(tmp_path):
+    import threading
+    wav = _wav_file(tmp_path / 'recording-z.wav')
+    entered, release = threading.Event(), threading.Event()
+
+    class RecFile(Rec):
+        def start(self): return SimpleNamespace(path=wav, duration_seconds=2)
+        def stop(self): return SimpleNamespace(path=wav, duration_seconds=2)
+
+    class GroqSlow(Groq):
+        def transcribe_hinglish(self, *a, cancel=None, **k):
+            entered.set(); release.wait(2)
+            raise RuntimeError('cancelled')
+
+    sessions = tmp_path / 'sessions'
+    c = Controller(recorder=RecFile(), groq=GroqSlow(), delivery=Delivery(), history=History(),
+                   key_provider=lambda: 'key', max_duration=60, session_archive_dir=sessions)
+    assert c.trigger('smart') and c.stop()
+    assert entered.wait(2)
+    worker = c._worker
+    c.cancel(); release.set(); worker.join(2)
+    assert not wav.exists() and not list(sessions.glob('*'))

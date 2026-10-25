@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from ..audio import AudioError, AudioPreflightError, validate_wav
-from ..config import MAX_RECORDING_SECONDS, MIN_RECORDING_SECONDS, sweep_audio_directory
+from ..config import (
+    MAX_RECORDING_SECONDS,
+    MIN_RECORDING_SECONDS,
+    RECORDING_CAP_GRACE_SECONDS,
+    sweep_audio_directory,
+)
 from ..types import AudioResult
 
 SAMPLE_RATE = 16000
@@ -217,7 +222,8 @@ class SoundDeviceRecorder:
             raise AudioError(
                 "recording too short — speak for at least half a second before stopping"
             )
-        if wall > MAX_RECORDING_SECONDS or file_duration > MAX_RECORDING_SECONDS:
+        limit = MAX_RECORDING_SECONDS + RECORDING_CAP_GRACE_SECONDS
+        if wall > limit or file_duration > limit:
             path.unlink(missing_ok=True)
             raise AudioError("recording too long")
         return validate_wav(path, duration_seconds=file_duration)

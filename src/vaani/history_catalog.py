@@ -476,7 +476,7 @@ def _contains_host(normalized: str, host: str) -> bool:
     host = host.casefold()
     if host in normalized:
         return True
-    # "metabase saleshandy" ↔ metabase.example.com
+    # "metabase example" ↔ metabase.example.com
     labels = [p for p in host.split(".") if p and p not in {"com", "org", "net", "io", "app"}]
     if not labels:
         return False

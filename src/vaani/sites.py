@@ -508,6 +508,14 @@ def resolve_play_target(query: str, target: str = "youtube") -> SiteTarget | Non
     return SiteTarget(f"YouTube: {cleaned}", url, None)
 
 
+def play_query_of(command: str) -> str | None:
+    """Spoken play/watch title, without any lookup; None if not a play command."""
+    extracted = _extract_play_query(" ".join(command.casefold().strip().split()))
+    if extracted is None:
+        return None
+    return _youtube_query_clean(extracted[1]) or None
+
+
 def resolve_youtube(command: str) -> SiteTarget | None:
     """Map play/watch media voice commands to a browser URL (skip Codex).
 

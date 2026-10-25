@@ -11,10 +11,13 @@ import time
 from pathlib import Path
 from typing import Literal
 
-Command = Literal["stop", "cancel", "option_0", "option_1", "option_2", "option_3", "option_4"]
+Command = Literal[
+    "stop", "cancel", "pause", "resume", "option_0", "option_1", "option_2", "option_3", "option_4"
+]
 Phase = Literal["recording", "processing", "answer"]
 ALLOWED: frozenset[str] = frozenset(
-    {"stop", "cancel", "option_0", "option_1", "option_2", "option_3", "option_4"}
+    # pause/resume: meeting pill only.
+    {"stop", "cancel", "pause", "resume", "option_0", "option_1", "option_2", "option_3", "option_4"}
 )
 # "idle" = persistent pill process stays alive but hidden (instant next show).
 ALLOWED_PHASES: frozenset[str] = frozenset({"recording", "processing", "answer", "idle"})
@@ -252,8 +255,14 @@ def write_session(
     started: float,
     max_s: float,
     warn_s: float,
+    paused_total: float = 0.0,
+    paused_since: float = 0.0,
 ) -> None:
-    """``started`` is wall-clock epoch seconds (shared by daemon + pill)."""
+    """``started`` is wall-clock epoch seconds (shared by daemon + pill).
+
+    ``paused_total``/``paused_since`` (meeting pause) keep the pill timer on
+    recorded time.
+    """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -262,6 +271,8 @@ def write_session(
         "started": float(started),
         "max_s": float(max_s),
         "warn_s": float(warn_s),
+        "paused_total": float(paused_total),
+        "paused_since": float(paused_since),
     }
     tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
@@ -273,7 +284,15 @@ def write_session(
 
 
 def read_session(path: Path | str) -> dict:
-    empty = {"mode": "smart", "handsfree": False, "started": 0.0, "max_s": 0.0, "warn_s": 0.0}
+    empty = {
+        "mode": "smart",
+        "handsfree": False,
+        "started": 0.0,
+        "max_s": 0.0,
+        "warn_s": 0.0,
+        "paused_total": 0.0,
+        "paused_since": 0.0,
+    }
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
@@ -283,7 +302,7 @@ def read_session(path: Path | str) -> dict:
     out = dict(empty)
     out["mode"] = str(data.get("mode") or "smart")
     out["handsfree"] = bool(data.get("handsfree"))
-    for key in ("started", "max_s", "warn_s"):
+    for key in ("started", "max_s", "warn_s", "paused_total", "paused_since"):
         try:
             out[key] = float(data.get(key) or 0.0)
         except (TypeError, ValueError):

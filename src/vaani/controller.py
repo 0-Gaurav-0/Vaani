@@ -26,7 +26,7 @@ from .projects import EditorRequest, default_editor, open_in_editor, parse_edito
 from .app_typing import TypeRequest, WindowWatcher, class_hints, parse_type_request, wait_for_app_window
 from .volume import resolve_volume_action, run_volume_action
 from .media import resolve_media_action, run_media_action
-from .sites import resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
+from .sites import play_query_of, resolve_site, resolve_youtube, resolve_play_target, resolve_browse_query
 from .skills import load_skill_index, match_skill
 from .codex import build_skill_prompt
 from .assistant_intent import (
@@ -53,6 +53,7 @@ from .assistant_route import (
 from .indicator_protocol import clear_command, read_command
 from .delivery import DeliveryStatus
 from .memory import append_turn, load_context
+from .session_archive import SessionArchive, preserve_recording
 from .stt_chunks import ChunkedTranscriber, chunked_stt_enabled
 
 JEV_UNAVAILABLE = "Jev is unavailable right now (OpenRouter). Try again in a bit."
@@ -90,6 +91,25 @@ def normalize_answer_prefix(text: str) -> tuple[str | None, str]:
     return (m.group(1), m.group(2).strip()) if m else (None, text.strip())
 
 
+def disagree_play_choices(candidates: tuple[str, ...]) -> RouteDecision | None:
+    """Offer both passes' titles when Jev can't reconcile them.
+
+    Forced-English Whisper translates Hindi titles ("play pehli nazar mein" →
+    "Play in the first sight"); with Jev rate-limited, acting on that pick
+    played the wrong song. Asking costs one click; guessing costs a wrong tab.
+    """
+    options: list[RouteOption] = []
+    seen: set[str] = set()
+    for cand in candidates[:2]:
+        query = play_query_of(cand)
+        if query and query.casefold() not in seen:
+            seen.add(query.casefold())
+            options.append(RouteOption(f"Play on YouTube: {query}", "play", query, "youtube"))
+    if len(options) < 2:
+        return None
+    return RouteDecision(intent="clarify", options=tuple(options))
+
+
 @dataclass(frozen=True)
 class ControllerEvent:
     name: str
@@ -111,9 +131,11 @@ class Controller:
                  media_keys: Any | None = None,
                  jev: Any | None = None, jev_first: bool = False,
                  jev_groq_fallback: bool = False,
-                 warm_web: bool = False):
+                 warm_web: bool = False,
+                 session_archive_dir: str | os.PathLike[str] | None = None):
         self.recorder, self.groq, self.delivery, self.history = recorder, groq, delivery, history
         self.feedback, self.key_provider, self.hotkeys = feedback, key_provider or (lambda: None), hotkeys
+        self.session_archive_dir = Path(session_archive_dir) if session_archive_dir else None
         self.codex, self.result_window = codex, result_window
         self.browser_launcher = browser_launcher
         self.app_launcher = app_launcher
@@ -227,6 +249,10 @@ class Controller:
 
     start = trigger
 
+    def abort_quiet(self) -> bool:
+        """Drop a just-started dictation without a cue (meeting shortcut hold)."""
+        return self.cancel(quiet=True)
+
     # Servers drop idle keep-alive sockets; refresh during long recordings.
     WARM_REFRESH_S = 45.0
 
@@ -282,8 +308,11 @@ class Controller:
                 raise RuntimeError("API key required")
             return transcribe_h(chunk, key, cancel=cancel, delete_audio=False).text
 
+        archive = None
+        if self.session_archive_dir is not None:
+            archive = SessionArchive(self.session_archive_dir, logger=self.logger)
         try:
-            self._chunker = ChunkedTranscriber(path, transcribe, logger=self.logger).start()
+            self._chunker = ChunkedTranscriber(path, transcribe, logger=self.logger, archive=archive).start()
         except Exception as exc:
             self.logger.warning("event=stt_chunker_start_failed detail=%s", type(exc).__name__)
             self._chunker = None
@@ -455,7 +484,9 @@ class Controller:
             self._amplitude_stop.set()
             # Accidental click / bounce: treat too-short clips as a quiet cancel.
             detail = str(exc).lower()
-            if "duration out of range" in detail or "invalid audio" in detail:
+            # Only a genuinely short clip is a quiet cancel; "too long" or a
+            # broken file must surface, never vanish as a "too_short" no-op.
+            if "too short" in detail:
                 try: self.recorder.cleanup()
                 except Exception: pass
                 with self._lock:
@@ -465,13 +496,14 @@ class Controller:
                 self._feedback("busy")
                 self.logger.info("event=recording_ignored reason=too_short")
                 return False
+            self._preserve_audio(self._audio)
             self._fail(exc, "mic")
             return False
         self._feedback("processing")
         worker = threading.Thread(target=self._process, args=(token, audio), daemon=True)
         self._worker = worker; worker.start(); return True
 
-    def cancel(self) -> bool:
+    def cancel(self, *, quiet: bool = False) -> bool:
         self.logger.info(
             "event=cancel_begin state=%s snap=%s",
             getattr(self.state, "name", self.state),
@@ -494,7 +526,9 @@ class Controller:
             if self.state is AppState.RECORDING:
                 try: self.recorder.cleanup()
                 except Exception: pass
-                self.state = AppState.IDLE; self._emit("cancelled"); self._feedback("busy"); return True
+                self.state = AppState.IDLE; self._emit("cancelled")
+                self._feedback("dismiss" if quiet else "busy")
+                return True
             if self.state is AppState.PROCESSING:
                 self._token += 1
                 job = self._handoff_job
@@ -657,10 +691,11 @@ class Controller:
                     audio.path,
                     key,
                     cancel=self._cancel,
-                    delete_audio=True,
+                    delete_audio=False,
                     language=None,
                     prompt=None,
                 )
+                self._discard_audio(audio)
                 if self._cancel.is_set() or token != self._token:
                     return
                 raw = (result.text or "").strip()
@@ -708,15 +743,18 @@ class Controller:
                 except OSError:
                     pass
             elif callable(transcribe_h):
-                kwargs = {"cancel": self._cancel, "delete_audio": True}
+                # Keep the WAV until transcription succeeds; a failure preserves it.
+                kwargs = {"cancel": self._cancel, "delete_audio": False}
                 if self.mode == "assistant" and _accepts_kwarg(transcribe_h, "parallel"):
                     # Short, often-Hinglish commands: run en+hi concurrently.
                     kwargs["parallel"] = True
                 result = transcribe_h(audio.path, key, **kwargs)
+                self._discard_audio(audio)
             else:
                 result = self.groq.transcribe(
-                    audio.path, key, cancel=self._cancel, delete_audio=True, language="en"
+                    audio.path, key, cancel=self._cancel, delete_audio=False, language="en"
                 )
+                self._discard_audio(audio)
             if self._cancel.is_set() or token != self._token: return
             raw = (result.text or "").strip()
             gemini_raw = getattr(result, "language", None) == "gemini"
@@ -791,7 +829,10 @@ class Controller:
             )
         except Exception as exc:
             if self._cancel.is_set():
+                # User cancelled: honour it, don't leave the WAV to be "recovered".
+                self._discard_audio(audio)
                 return
+            self._preserve_audio(audio)
             try:
                 self.recorder.cleanup()
             except Exception:
@@ -922,6 +963,8 @@ class Controller:
                 candidates[1][:60],
             )
             decision = self._jev_route(raw, candidates=candidates)
+            if decision is None:
+                decision = disagree_play_choices(candidates)
             if decision is not None:
                 self._dispatch_decision(token, audio, key, raw, result, decision)
                 return
@@ -2182,6 +2225,23 @@ class Controller:
         from .platform.linux.browser import open_browser
 
         return open_browser(prefer_brave=prefer_brave, url=url)
+
+    def _discard_audio(self, audio: Any) -> None:
+        try:
+            Path(audio.path).unlink(missing_ok=True)
+        except (OSError, AttributeError, TypeError):
+            pass
+
+    def _preserve_audio(self, audio: Any) -> None:
+        """Move a recording that failed to process into the session archive."""
+        if self.session_archive_dir is None or audio is None:
+            return
+        path = getattr(audio, "path", None)
+        if path is None:
+            return
+        kept = preserve_recording(Path(path), self.session_archive_dir)
+        if kept is not None:
+            self.logger.info("event=recording_preserved dir=%s", kept.parent.name)
 
     def _fail(self, exc: BaseException, category: str | None = None) -> None:
         category = category or exception_category(exc)

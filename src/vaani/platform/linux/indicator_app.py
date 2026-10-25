@@ -28,6 +28,12 @@ ANSWER_MIN_WIDTH = 200
 ANSWER_MAX_WIDTH = 480
 ANSWER_TEXT_MIN_HEIGHT = 44
 MARGIN_BOTTOM = 48
+# Meeting pill: a second instance (VAANI_INDICATOR_KIND=meeting) with its own
+# files; left button = pause/resume, never signals the dictation daemon.
+KIND = os.environ.get("VAANI_INDICATOR_KIND", "dictation")
+MEETING = KIND == "meeting"
+# Default spot sits above the dictation pill so both can show at once.
+MEETING_LIFT = 58
 BAR_COUNT = 22
 HIT_PAD = 36
 # Pointer travel before a press turns into a drag instead of a click.
@@ -60,6 +66,7 @@ GLASS_TOP = (0.17, 0.18, 0.22, 0.74)
 GLASS_BOTTOM = (0.05, 0.05, 0.07, 0.86)
 DICTATION_ACCENT = (0.96, 0.96, 0.97)
 ASSISTANT_ACCENT = (0.66, 0.55, 0.98)  # violet
+MEETING_ACCENT = (0.98, 0.40, 0.38)  # red: "recording a meeting"
 WARN_ACCENT = (0.98, 0.75, 0.14)  # amber, last minute
 DANGER_ACCENT = (0.97, 0.33, 0.33)  # red, last 15s
 APPEAR_MS = 200
@@ -167,7 +174,8 @@ def _clamp_to_monitors(
 def _default_pos(
     ox: int, oy: int, sw: int, sh: int, *, w: int = WIDTH, h: int = HEIGHT
 ) -> tuple[int, int]:
-    return ox + max(0, (sw - w) // 2), oy + max(0, sh - h - MARGIN_BOTTOM)
+    lift = MEETING_LIFT if MEETING else 0
+    return ox + max(0, (sw - w) // 2), oy + max(0, sh - h - MARGIN_BOTTOM - lift)
 
 
 def _zone_orientation(cy: float, rect: Rect, current: str = "h") -> str:
@@ -1226,12 +1234,25 @@ def run_gtk(
 
         def _accent() -> tuple[float, float, float]:
             sess = state.get("session") or {}
+            if MEETING:
+                return MEETING_ACCENT
             return ASSISTANT_ACCENT if sess.get("mode") == "assistant" else DICTATION_ACCENT
 
+        def _paused() -> bool:
+            return bool((state.get("session") or {}).get("paused_since"))
+
         def _elapsed() -> float:
+            """Recorded time: wall clock since start minus paused time."""
             sess = state.get("session") or {}
             started = float(sess.get("started") or 0.0)
-            return max(0.0, time.time() - started) if started > 0 else 0.0
+            if started <= 0:
+                return 0.0
+            now = time.time()
+            paused = float(sess.get("paused_total") or 0.0)
+            since = float(sess.get("paused_since") or 0.0)
+            if since > 0:
+                paused += max(0.0, now - since)
+            return max(0.0, now - started - paused)
 
         def _warn_level() -> int:
             """0 normal, 1 last minute, 2 last 15s."""
@@ -1397,11 +1418,26 @@ def run_gtk(
             cr.set_line_width(1.6)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
             d = 3.6 * sq
-            cr.move_to(lx - d, cy - d)
-            cr.line_to(lx + d, cy + d)
-            cr.move_to(lx + d, cy - d)
-            cr.line_to(lx - d, cy + d)
-            cr.stroke()
+            if MEETING and _paused():
+                # ▶ resume
+                cr.move_to(lx - d * 0.7, cy - d)
+                cr.line_to(lx + d, cy)
+                cr.line_to(lx - d * 0.7, cy + d)
+                cr.close_path()
+                cr.fill()
+            elif MEETING:
+                # ⏸ pause
+                cr.move_to(lx - d * 0.55, cy - d)
+                cr.line_to(lx - d * 0.55, cy + d)
+                cr.move_to(lx + d * 0.55, cy - d)
+                cr.line_to(lx + d * 0.55, cy + d)
+                cr.stroke()
+            else:
+                cr.move_to(lx - d, cy - d)
+                cr.line_to(lx + d, cy + d)
+                cr.move_to(lx + d, cy - d)
+                cr.line_to(lx - d, cy + d)
+                cr.stroke()
 
             # Right / bottom: stop (recording) / cancel-able spinner (processing).
             rx = cap_x + cap_w - 5.0 - btn_r
@@ -1453,7 +1489,10 @@ def run_gtk(
                     remaining = float(sess.get("max_s") or 0.0) - elapsed
                     label = _fmt(remaining) if portrait else f"{_fmt(remaining)} left"
                     label_col = DANGER_ACCENT if warn == 2 else WARN_ACCENT
-                elif sess.get("handsfree") or elapsed >= TIMER_AFTER_S:
+                elif MEETING and _paused():
+                    label = "Paused " + _fmt(elapsed) if not portrait else _fmt(elapsed)
+                    label_col = WARN_ACCENT
+                elif MEETING or sess.get("handsfree") or elapsed >= TIMER_AFTER_S:
                     label = _fmt(elapsed)
             if label:
                 cr.select_font_face(MONO_FONT, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if warn else cairo.FONT_WEIGHT_NORMAL)
@@ -1652,7 +1691,10 @@ def run_gtk(
             except Exception as exc:
                 print(f"[vaani] indicator: write_command({action}) failed: {exc!r}", flush=True)
             # Backup path: daemon listens for SIGUSR1/2 even if the file poll lags.
+            # Never for the meeting pill: those signals stop/cancel dictation.
             try:
+                if MEETING:
+                    raise RuntimeError("meeting pill uses the control file only")
                 import signal as _signal
 
                 pid = int(os.environ.get("VAANI_DAEMON_PID") or os.getppid())
@@ -1729,7 +1771,10 @@ def run_gtk(
                 _dismiss_answer_ui()
                 return
             button = _button_at(ex, ey)
-            if button == "left":
+            if button == "left" and MEETING:
+                _press("left")
+                _request("resume" if _paused() else "pause")
+            elif button == "left":
                 _press("left")
                 _request("cancel")
             elif button == "right":
@@ -1914,7 +1959,8 @@ def run_gtk(
                     return True
                 _show()
             prev = state.get("last_phase")
-            if phase != prev or state["ticks"] % 15 == 0:
+            # Meeting pause/resume flips session fields, not the phase: re-read often.
+            if phase != prev or state["ticks"] % (3 if MEETING else 15) == 0:
                 state["session"] = read_session(session_file)
             if phase != prev:
                 if prev in (None, "idle") and phase == "recording":
@@ -2030,7 +2076,7 @@ def main() -> int:
     answer = resolve_answer_path()
     xdg = os.environ.get("XDG_CONFIG_HOME")
     config = Path(xdg) if xdg else Path.home() / ".config"
-    pos = config / "vaani" / "indicator.json"
+    pos = config / "vaani" / ("indicator-meeting.json" if MEETING else "indicator.json")
 
     try:
         return run_gtk(

@@ -20,7 +20,8 @@ def test_resolves_local_site_and_browser(tmp_path):
     assert target.url == "https://example.com/dashboard"
 
 
-def test_invalid_local_config_is_ignored(tmp_path):
+def test_invalid_local_config_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setattr("vaani.history_catalog.resolve_from_catalog", lambda *a, **k: None)
     config = tmp_path / "sites.json"
     config.write_text('[{"aliases":["files"],"name":"Files","url":"file:///tmp"}]')
     assert resolve_site("Open files", config_path=config) is None

@@ -15,6 +15,9 @@ CLEANUP_DEADLINE = 75.0
 POOL_ACQUISITION_TIMEOUT = 5.0
 SQLITE_BUSY_TIMEOUT_MS = 2000
 MAX_RECORDING_SECONDS = 600
+# The cap timer stops parec at ~600 s wall clock; the WAV can run a little
+# past that. Validation must accept it or a capped dictation is discarded.
+RECORDING_CAP_GRACE_SECONDS = 30
 MIN_RECORDING_SECONDS = 0.250
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
 
@@ -62,6 +65,10 @@ class Settings:
     @property
     def amplitude_path(self) -> Path:
         return self.cache_dir / "amplitude"
+
+    @property
+    def sessions_dir(self) -> Path:
+        return self.data_dir / "sessions"
 
     @property
     def indicator_control_path(self) -> Path:

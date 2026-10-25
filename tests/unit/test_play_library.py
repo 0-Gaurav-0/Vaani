@@ -46,7 +46,7 @@ def test_pick_listening_target_prefers_mix(monkeypatch):
 def test_match_history_for_query(monkeypatch):
     clips = [
         HistoryClip(
-            title="Tu Jaane Na Full Video - Ajab Prem",
+            title="Tu Jaane Na Full Song - Ajab Prem",
             url="https://www.youtube.com/watch?v=BewnzhHlQuk",
             visit_count=2,
             last_visit=3,

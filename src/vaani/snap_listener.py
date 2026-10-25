@@ -30,6 +30,8 @@ _MONITOR_ARGV = (
     "--rate=16000",
     "--channels=1",
     "--format=s16le",
+    # Without it PipeWire delivers ~2 s blocks: snap/wake react seconds late.
+    "--latency-msec=30",
 )
 
 _SAMPLE_RATE = 16000

@@ -27,9 +27,11 @@ running_pid() { pgrep -f '^\.venv/bin/python -m vaani$' | head -1 || true; }
 
 restart_vaani() {
     if [ -n "${VAANI_RELEASE_NO_RESTART:-}" ]; then say "restart skipped (VAANI_RELEASE_NO_RESTART)"; return 0; fi
-    # Never cut off a dictation: wait while the mic is recording.
+    # Never cut off a dictation: wait while the mic is recording. Meeting
+    # parec (--client-name=vaani-meeting) runs in its own scope, survives the
+    # restart and is adopted, so it must not block a release.
     for _ in $(seq 1 60); do
-        pgrep -x parec >/dev/null 2>&1 || break
+        pgrep -f '^parec .*--file-format=wav' >/dev/null 2>&1 || break
         sleep 1
     done
     pkill -f '^\.venv/bin/python -m vaani$' 2>/dev/null || true

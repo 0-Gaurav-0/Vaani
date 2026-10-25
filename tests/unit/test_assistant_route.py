@@ -65,3 +65,20 @@ def test_resolve_play_target_youtube(monkeypatch):
     )
     assert target is not None
     assert target.url.endswith("watch?v=abcdefghijk")
+
+
+def test_disagree_play_choices_offers_both_titles_when_jev_is_down():
+    from vaani.controller import disagree_play_choices
+
+    # Live failure: forced-English Whisper translated the Hindi title.
+    decision = disagree_play_choices(("Play in the first sight", "Play pahali najar mein jaaega"))
+    assert decision is not None and decision.should_clarify
+    assert [o.query for o in decision.options] == ["in the first sight", "pahali najar mein jaaega"]
+    assert all(o.intent == "play" and o.target == "youtube" for o in decision.options)
+
+
+def test_disagree_play_choices_skips_non_play_or_identical():
+    from vaani.controller import disagree_play_choices
+
+    assert disagree_play_choices(("Flip and", "play pe")) is None
+    assert disagree_play_choices(("play tum hi ho", "Play Tum Hi Ho")) is None

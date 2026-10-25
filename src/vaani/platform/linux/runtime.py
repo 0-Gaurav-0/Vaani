@@ -6,11 +6,13 @@ import select
 import signal
 import subprocess
 import sys
+import threading
 
 from ...audio import AudioRecorderImpl, reap_orphan_parec
 from ...codex import CodexRunner, ResultWindow
 from ...config import Settings, sweep_audio_directory
 from ...controller import Controller
+from ...session_archive import recover_recordings
 from ...delivery import ClipboardDelivery
 from ...groq import GroqClient
 from ...history import HistoryStore
@@ -140,10 +142,14 @@ def run_linux(settings: Settings) -> int:
 def _run_x11(settings: Settings) -> int:
     _reap_orphan_indicators()
     _reap_orphan_mic()
+    # A crashed session's WAV would be swept below; keep it instead.
+    recovered = recover_recordings(settings.audio_dir, settings.sessions_dir)
     sweep_audio_directory(settings.audio_dir)
     os.environ["VAANI_AMPLITUDE_PATH"] = str(settings.amplitude_path)
     os.environ["VAANI_INDICATOR_CONTROL"] = str(settings.indicator_control_path)
     logger = configure_logging(settings.log_dir, debug=settings.debug)
+    for path in recovered:
+        logger.info("event=session_recovered dir=%s", path.parent.name)
     try:
         from Xlib.display import Display
 
@@ -188,6 +194,7 @@ def _run_x11(settings: Settings) -> int:
         key_provider=lambda: effective_key(store).value,
         amplitude_path=settings.amplitude_path,
         indicator_control_path=settings.indicator_control_path,
+        session_archive_dir=settings.sessions_dir,
         browser_launcher=browser,
         app_launcher=apps,
         media_keys=media_keys,
@@ -265,6 +272,26 @@ def _run_x11(settings: Settings) -> int:
 
     from ...types import AppState as _AppState
 
+    from ...meeting.control import MeetingControl
+    from ...meeting.util import default_root as meeting_root
+
+    from ...meeting.pill import MeetingPill
+
+    def meeting_sound(cue: str) -> None:
+        # Sound only: the dictation pill must not react to meeting events.
+        threading.Thread(target=feedback._play_sound, args=(cue,), daemon=True).start()
+
+    meeting = MeetingControl(
+        meeting_root(),
+        pill=MeetingPill(settings.cache_dir, settings.log_dir),
+        sound=meeting_sound,
+        logger=logger,
+    )
+    try:
+        meeting.startup()
+    except Exception as exc:
+        logger.error("event=meeting_startup_failed detail=%s", type(exc).__name__)
+
     # Middle button owns hold-to-talk on ThinkPads; Ctrl+Space stays with the desktop.
     hotkeys = MiddleButtonHotkeyManager(
         on_hotkey_press,
@@ -273,6 +300,11 @@ def _run_x11(settings: Settings) -> int:
         on_touchpad_middle=on_touchpad_middle,
         on_handsfree=on_handsfree,
         is_recording=lambda: controller.state is _AppState.RECORDING,
+        # pactl/parec/notify-send take time; keep them off the X event thread.
+        on_meeting=lambda taps: threading.Thread(
+            target=meeting.shortcut, args=(taps,), daemon=True, name="vaani-meeting-key"
+        ).start(),
+        on_abort_quiet=controller.abort_quiet,
     )
     controller.hotkeys = hotkeys
     snap_listener = None
@@ -344,6 +376,18 @@ def _run_x11(settings: Settings) -> int:
             snap_listener = None
             snap_on = False
             wake_on = False
+        # First dictation after login paid ~2.7 s importing numpy/soundfile
+        # (trim + FLAC) under memory pressure; load them while idle instead.
+        def _preload_audio_libs() -> None:
+            try:
+                import numpy  # noqa: F401
+                import soundfile  # noqa: F401
+            except Exception:
+                pass
+
+        import threading
+
+        threading.Thread(target=_preload_audio_libs, name="vaani-preload", daemon=True).start()
         extras = []
         if snap_listener is not None:
             if snap_on:
@@ -415,6 +459,10 @@ def _run_x11(settings: Settings) -> int:
             pass
         try:
             hotkeys.unregister()
+        except Exception:
+            pass
+        try:
+            meeting.shutdown()  # hides the pill; a recording meeting keeps going
         except Exception:
             pass
         try:

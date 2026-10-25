@@ -73,6 +73,7 @@ def test_write_and_read_answer(tmp_path: Path):
     assert read_answer(path) == {
         "question": "Who is PM?",
         "answer": "Narendra Modi",
+        "options": [],
     }
     clear_answer(path)
-    assert read_answer(path) == {"question": "", "answer": ""}
+    assert read_answer(path) == {"question": "", "answer": "", "options": []}
